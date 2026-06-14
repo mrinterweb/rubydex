@@ -8,6 +8,7 @@ use std::ops::Deref;
 /// the reference count for each string it uses, and remove the string from the
 /// graph when its count reaches zero.
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct StringRef {
     value: Box<str>,
     ref_count: u32,

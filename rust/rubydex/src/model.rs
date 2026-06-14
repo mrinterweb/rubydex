@@ -11,5 +11,7 @@ pub mod ids;
 pub mod keywords;
 pub mod name;
 pub mod references;
+#[cfg(feature = "redb-store")]
+pub mod store;
 pub mod string_ref;
 pub mod visibility;
