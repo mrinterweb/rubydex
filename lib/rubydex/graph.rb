@@ -12,9 +12,24 @@ module Rubydex
       self.workspace_path = workspace_path if workspace_path
     end
 
+<<<<<<< HEAD
     # Index all files and dependencies of the workspace that exists in `workspace_path`
+=======
+    # Index all files and dependencies of the workspace that exists in `@workspace_path`.
+    #
+    # Disk-backed orchestration: build (or reuse) a redb store of the whole resolved graph in a
+    # FORKED child so its peak indexing memory is reclaimed when the child exits, then attach the
+    # store to this graph. The long-lived server therefore holds the bulk index off-heap and serves
+    # reads from disk. Falls back to the in-memory path if the store can't be built.
+>>>>>>> d98fbf0 (Orchestrate a forked store build so the server runs lean (Stage D))
     #: -> Array[String]
     def index_workspace
+      cache = store_cache_path
+      build_store_via_fork(cache) unless File.exist?(cache) && store_fresh?(cache)
+      attach_store(cache)
+      []
+    rescue StandardError => e
+      warn("rubydex: disk-backed index unavailable (#{e.class}: #{e.message}); falling back to in-memory")
       index_all(workspace_paths)
     end
 
@@ -40,6 +55,50 @@ module Rubydex
     end
 
     private
+
+    # Path of the on-disk store for this workspace, namespaced by workspace path.
+    #: -> String
+    def store_cache_path
+      require "digest"
+      key = Digest::SHA1.hexdigest(File.expand_path(@workspace_path))
+      File.join(Dir.home, ".cache", "rubydex", key, "index.redb")
+    end
+
+    # SHA of the workspace Gemfile.lock, used to invalidate the store when dependencies change.
+    #: -> String
+    def lockfile_hash
+      require "digest"
+      lock = File.join(@workspace_path, "Gemfile.lock")
+      File.exist?(lock) ? Digest::SHA1.hexdigest(File.read(lock)) : "no-lockfile"
+    end
+
+    #: (String) -> bool
+    def store_fresh?(cache)
+      marker = "#{cache}.hash"
+      File.exist?(marker) && File.read(marker) == lockfile_hash
+    end
+
+    # Builds the store in a forked child (whose peak indexing memory is reclaimed on exit), then
+    # atomically publishes it. The parent never holds the full in-memory index.
+    #: (String) -> void
+    def build_store_via_fork(cache)
+      require "fileutils"
+      FileUtils.mkdir_p(File.dirname(cache))
+      tmp = "#{cache}.#{Process.pid}.building"
+
+      pid = fork do
+        builder = Rubydex::Graph.new(workspace_path: @workspace_path)
+        builder.index_all(builder.workspace_paths)
+        builder.resolve
+        builder.build_store(tmp)
+        exit!(0)
+      end
+      _, status = Process.wait2(pid)
+      raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
+
+      File.rename(tmp, cache)
+      File.write("#{cache}.hash", lockfile_hash)
+    end
 
     # Gathers the paths we have to index for all workspace dependencies
     #: (Array[String]) -> void

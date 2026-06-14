@@ -102,6 +102,33 @@ pub extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPointer {
     }
 }
 
+/// Switches an existing graph over to a prebuilt store as its disk-backed base layer (drops the
+/// in-memory maps). Returns `true` on success. Used by the launcher after a forked child built the
+/// store, so the long-lived server holds the bulk index off-heap.
+#[unsafe(no_mangle)]
+pub extern "C" fn rdx_graph_attach_store(pointer: GraphPointer, path: *const c_char) -> bool {
+    let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
+        return false;
+    };
+    with_mut_graph(pointer, |graph| {
+        #[cfg(feature = "redb-store")]
+        {
+            match rubydex::model::store::RedbStore::open(std::path::Path::new(&path)) {
+                Ok(store) => {
+                    graph.attach_store(store);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(feature = "redb-store"))]
+        {
+            let _ = (graph, path);
+            false
+        }
+    })
+}
+
 /// Searches the graph using exact substring matching, returning every declaration whose name matches any of the
 /// queries.
 ///
@@ -361,6 +388,14 @@ pub unsafe extern "C" fn rdx_index_all(
     let file_paths: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(file_paths, count).unwrap() };
 
     with_mut_graph(pointer, |graph| {
+        // Static store-backed POC mode: don't index into the in-memory layer (would require
+        // store-aware resolution to be correct). Reads are served from the prebuilt store.
+        #[cfg(feature = "redb-store")]
+        if graph.is_store_backed() {
+            unsafe { *out_error_count = 0 };
+            return ptr::null();
+        }
+
         let (file_paths, listing_errors) = listing::collect_file_paths(file_paths, &graph.excluded_patterns());
         let indexing_errors = indexing::index_files(graph, file_paths, indexing::IndexerBackend::RubyIndexer);
 
@@ -437,6 +472,12 @@ pub unsafe extern "C" fn rdx_graph_delete_document(pointer: GraphPointer, uri: *
 #[unsafe(no_mangle)]
 pub extern "C" fn rdx_graph_resolve(pointer: GraphPointer) {
     with_mut_graph(pointer, |graph| {
+        // A store-backed graph is pre-resolved and static (POC mode): skip resolution so the
+        // unmigrated resolver never runs against disk-backed nodes.
+        #[cfg(feature = "redb-store")]
+        if graph.is_store_backed() {
+            return;
+        }
         let mut resolver = Resolver::new(graph);
         resolver.resolve();
     });
@@ -727,6 +768,11 @@ pub unsafe extern "C" fn rdx_index_source(
     };
 
     with_mut_graph(pointer, |graph| {
+        // Static store-backed POC mode: ignore live edits (reads come from the prebuilt store).
+        #[cfg(feature = "redb-store")]
+        if graph.is_store_backed() {
+            return IndexSourceResult::Success;
+        }
         indexing::index_source(graph, &uri_str, source_str, &language);
         IndexSourceResult::Success
     })
