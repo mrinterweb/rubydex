@@ -93,8 +93,34 @@ pub struct Graph {
 
     /// Project configuration
     config: Config,
+
+    /// Optional disk-backed base layer holding gem/stdlib nodes. When set, reads that miss the
+    /// in-memory maps above fall back to the store, keeping the bulk index off the heap.
+    #[cfg(feature = "redb-store")]
+    store: Option<crate::model::store::RedbStore>,
 }
+#[cfg(not(feature = "redb-store"))]
 assert_mem_size!(Graph, 352);
+
+/// A reference to a declaration that is either borrowed from the in-memory graph (`Mem`) or owned,
+/// having been deserialized from the disk-backed store (`Stored`). Derefs to `&Declaration` so most
+/// call sites read identically whether the node lives in memory or on disk.
+#[derive(Debug)]
+pub enum DeclRef<'a> {
+    Mem(&'a Declaration),
+    Stored(Box<Declaration>),
+}
+
+impl std::ops::Deref for DeclRef<'_> {
+    type Target = Declaration;
+
+    fn deref(&self) -> &Declaration {
+        match self {
+            DeclRef::Mem(declaration) => declaration,
+            DeclRef::Stored(declaration) => declaration,
+        }
+    }
+}
 
 impl Graph {
     #[must_use]
@@ -111,10 +137,39 @@ impl Graph {
             name_dependents: IdentityHashMap::default(),
             pending_work: Vec::default(),
             config: Config::new(),
+            #[cfg(feature = "redb-store")]
+            store: None,
         };
 
         add_built_in_data(&mut graph);
         graph
+    }
+
+    /// Creates a graph backed by a prebuilt store as its disk-backed base layer. The in-memory maps
+    /// start empty (built-ins live in the store); workspace nodes are indexed on top, and reads that
+    /// miss memory fall back to the store.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn with_store(store: crate::model::store::RedbStore) -> Self {
+        let mut graph = Self::default();
+        graph.store = Some(store);
+        graph
+    }
+
+    /// Looks up a declaration by ID, checking the in-memory graph first, then the disk-backed store.
+    /// Returns a `DeclRef` that derefs to `&Declaration` regardless of which layer it came from.
+    #[must_use]
+    pub fn declaration(&self, id: DeclarationId) -> Option<DeclRef<'_>> {
+        if let Some(declaration) = self.declarations.get(&id) {
+            return Some(DeclRef::Mem(declaration));
+        }
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            if let Ok(Some(declaration)) = store.get_declaration(id) {
+                return Some(DeclRef::Stored(Box::new(declaration)));
+            }
+        }
+        None
     }
 
     // Returns an immutable reference to the declarations map

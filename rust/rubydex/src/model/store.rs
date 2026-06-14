@@ -55,6 +55,12 @@ pub struct RedbStore {
     db: Database,
 }
 
+impl std::fmt::Debug for RedbStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RedbStore { .. }")
+    }
+}
+
 impl RedbStore {
     /// Creates (or opens) a redb database at `path`.
     ///
@@ -509,5 +515,32 @@ mod tests {
         );
         assert!(store.get_declaration(bar_id).expect("get Bar").is_none(), "Bar deleted");
         assert!(!store.delete_declaration(bar_id).expect("re-delete Bar"), "Bar already gone");
+    }
+
+    #[test]
+    fn layered_graph_reads_declaration_from_store() {
+        use crate::model::graph::DeclRef;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("base.redb");
+
+        // Build a store from a graph (its built-in declarations give us real nodes to read back).
+        let base = Graph::new();
+        let (sample_id, sample_name) = base
+            .declarations()
+            .iter()
+            .next()
+            .map(|(id, declaration)| (*id, declaration.name().to_string()))
+            .expect("built-in declarations exist");
+        RedbStore::build(&path, &base).expect("build store");
+        drop(base);
+
+        // A store-backed graph has empty in-memory maps; the lookup must come from disk.
+        let graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        assert!(graph.declarations().get(&sample_id).is_none(), "memory layer is empty");
+
+        let declaration = graph.declaration(sample_id).expect("declaration from store");
+        assert!(matches!(declaration, DeclRef::Stored(_)), "should be store-backed");
+        assert_eq!(declaration.name(), sample_name);
     }
 }

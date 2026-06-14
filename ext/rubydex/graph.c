@@ -949,6 +949,19 @@ static VALUE rdxr_graph_build_store(VALUE self, VALUE path) {
     return Qnil;
 }
 
+// Graph.open_store: (String path) -> Graph. Opens a prebuilt redb store as the graph's base layer.
+static VALUE rdxr_graph_open_store(VALUE klass, VALUE path) {
+    Check_Type(path, T_STRING);
+
+    void *graph = rdx_graph_open_store(StringValueCStr(path));
+    if (graph == NULL) {
+        rb_raise(rb_eRuntimeError, "failed to open redb store at `%s` (is the redb-store feature compiled in?)",
+                 StringValueCStr(path));
+    }
+
+    return TypedData_Wrap_Struct(klass, &graph_type, graph);
+}
+
 void rdxi_initialize_graph(VALUE moduleRubydex) {
     mRubydex = moduleRubydex;
     cGraph = rb_define_class_under(mRubydex, "Graph", rb_cObject);
@@ -961,6 +974,7 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "index_all", rdxr_graph_index_all, 1);
     rb_define_method(cGraph, "index_source", rdxr_graph_index_source, 3);
     rb_define_method(cGraph, "build_store", rdxr_graph_build_store, 1);
+    rb_define_singleton_method(cGraph, "open_store", rdxr_graph_open_store, 1);
     rb_define_method(cGraph, "document", rdxr_graph_document, 1);
     rb_define_method(cGraph, "delete_document", rdxr_graph_delete_document, 1);
     rb_define_method(cGraph, "resolve", rdxr_graph_resolve, 0);

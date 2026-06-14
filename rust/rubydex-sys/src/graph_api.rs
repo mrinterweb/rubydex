@@ -80,6 +80,28 @@ pub extern "C" fn rdx_graph_build_store(pointer: GraphPointer, path: *const c_ch
     })
 }
 
+/// Opens a prebuilt redb store and returns a new graph that uses it as its disk-backed base layer.
+/// Returns null if the path is invalid, the store cannot be opened, or the `redb-store` feature was
+/// not compiled in.
+#[unsafe(no_mangle)]
+pub extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPointer {
+    let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
+        return ptr::null_mut();
+    };
+    #[cfg(feature = "redb-store")]
+    {
+        match rubydex::model::store::RedbStore::open(std::path::Path::new(&path)) {
+            Ok(store) => Box::into_raw(Box::new(Graph::with_store(store))) as GraphPointer,
+            Err(_) => ptr::null_mut(),
+        }
+    }
+    #[cfg(not(feature = "redb-store"))]
+    {
+        let _ = path;
+        ptr::null_mut()
+    }
+}
+
 /// Searches the graph using exact substring matching, returning every declaration whose name matches any of the
 /// queries.
 ///
@@ -537,8 +559,9 @@ pub unsafe extern "C" fn rdx_graph_get_declaration(pointer: GraphPointer, name: 
     with_graph(pointer, |graph| {
         let decl_id = declaration_id_from_lookup_name(&name_str);
 
-        if let Some(decl) = graph.declarations().get(&decl_id) {
-            Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, decl))).cast_const()
+        // Layered lookup: in-memory workspace first, then the disk-backed store.
+        if let Some(decl) = graph.declaration(decl_id) {
+            Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, &decl))).cast_const()
         } else {
             ptr::null()
         }
