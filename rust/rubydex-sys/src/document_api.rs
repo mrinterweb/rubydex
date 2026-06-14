@@ -54,7 +54,7 @@ pub unsafe extern "C" fn rdx_graph_documents_iter_free(iter: *mut DocumentsIter)
 pub unsafe extern "C" fn rdx_document_uri(pointer: GraphPointer, uri_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let uri_id = UriId::new(uri_id);
-        if let Some(doc) = graph.documents().get(&uri_id) {
+        if let Some(doc) = graph.document(uri_id) {
             CString::new(doc.uri()).unwrap().into_raw().cast_const()
         } else {
             ptr::null()
@@ -77,7 +77,7 @@ pub unsafe extern "C" fn rdx_document_definitions_iter_new(pointer: GraphPointer
     // Snapshot the IDs and kinds at iterator creation to avoid borrowing across FFI calls
     with_graph(pointer, |graph| {
         let uri_id = UriId::new(uri_id);
-        if let Some(doc) = graph.documents().get(&uri_id) {
+        if let Some(doc) = graph.document(uri_id) {
             rdx_definitions_iter_new_from_ids(graph, doc.definitions())
         } else {
             DefinitionsIter::new(Vec::<_>::new().into_boxed_slice())
