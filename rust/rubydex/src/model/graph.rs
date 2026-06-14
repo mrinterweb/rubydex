@@ -838,15 +838,17 @@ impl Graph {
     /// side (`Foo#bar`) and `Public` on the singleton side (`Foo::<Foo>#bar`).
     #[must_use]
     pub fn visibility(&self, declaration_id: &DeclarationId) -> Option<Visibility> {
-        let declaration = self.declarations.get(declaration_id)?;
+        let declaration = self.declaration(*declaration_id)?;
         let definitions = declaration.definitions();
 
-        match declaration {
+        match &*declaration {
             Declaration::Namespace(Namespace::Class(_) | Namespace::Module(_) | Namespace::Todo(_))
             | Declaration::Constant(_)
             | Declaration::ConstantAlias(_) => {
                 for def_id in definitions.iter().rev() {
-                    if let Some(Definition::ConstantVisibility(vis)) = self.definitions.get(def_id) {
+                    if let Some(definition) = self.definition(*def_id)
+                        && let Definition::ConstantVisibility(vis) = &*definition
+                    {
                         return Some(*vis.visibility());
                     }
                 }
@@ -856,18 +858,18 @@ impl Graph {
                 let mut latest_alias: Option<DefinitionId> = None;
 
                 for def_id in definitions.iter().rev() {
-                    let Some(definition) = self.definitions.get(def_id) else {
+                    let Some(definition) = self.definition(*def_id) else {
                         continue;
                     };
 
-                    let visibility = match definition {
+                    let visibility = match &*definition {
                         Definition::MethodVisibility(vis) => match *vis.visibility() {
                             Visibility::ModuleFunction if vis.flags().is_singleton_method_visibility() => {
                                 Some(Visibility::Public)
                             }
                             Visibility::ModuleFunction => Some(Visibility::Private),
                             other => Some(other),
-                        },
+                        }
                         Definition::Method(method) => Some(*method.visibility()),
                         Definition::AttrAccessor(attr) => Some(*attr.visibility()),
                         Definition::AttrReader(attr) => Some(*attr.visibility()),
