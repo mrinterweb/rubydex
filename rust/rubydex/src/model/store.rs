@@ -121,19 +121,47 @@ impl RedbStore {
         Ok(Self { db })
     }
 
-    /// Serializes and writes a single interned string.
+    /// Inserts or replaces a node of type `V` in `table` at `key`. redb is mutable in place, so this
+    /// is how an incremental edit updates a node — no immutable-snapshot + overlay machinery needed.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or the redb transaction fails.
+    fn put_node<V: serde::Serialize>(
+        &self,
+        table: TableDefinition<u64, &[u8]>,
+        key: u64,
+        value: &V,
+    ) -> Result<(), redb::Error> {
+        let bytes = postcard::to_allocvec(value).expect("node should serialize");
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(table)?;
+            table.insert(key, bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Removes a node from `table` at `key`, returning whether it existed.
+    ///
+    /// # Errors
+    /// Returns an error if the redb transaction fails.
+    fn delete_node(&self, table: TableDefinition<u64, &[u8]>, key: u64) -> Result<bool, redb::Error> {
+        let write_txn = self.db.begin_write()?;
+        let existed = {
+            let mut table = write_txn.open_table(table)?;
+            table.remove(key)?.is_some()
+        };
+        write_txn.commit()?;
+        Ok(existed)
+    }
+
+    /// Inserts or replaces a single interned string.
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
     pub fn put_string(&self, id: StringId, value: &StringRef) -> Result<(), redb::Error> {
-        let bytes = postcard::to_allocvec(value).expect("StringRef should serialize");
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut table = write_txn.open_table(STRINGS)?;
-            table.insert(id.get(), bytes.as_slice())?;
-        }
-        write_txn.commit()?;
-        Ok(())
+        self.put_node(STRINGS, id.get(), value)
     }
 
     /// Reads and deserializes a node of type `V` from `table` by its `u64` key, if present.
@@ -161,19 +189,36 @@ impl RedbStore {
         self.get_node(STRINGS, id.get())
     }
 
-    /// Serializes and writes a single declaration node.
+    /// Inserts or replaces a single declaration node.
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
     pub fn put_declaration(&self, id: DeclarationId, value: &Declaration) -> Result<(), redb::Error> {
-        let bytes = postcard::to_allocvec(value).expect("Declaration should serialize");
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut table = write_txn.open_table(DECLARATIONS)?;
-            table.insert(id.get(), bytes.as_slice())?;
-        }
-        write_txn.commit()?;
-        Ok(())
+        self.put_node(DECLARATIONS, id.get(), value)
+    }
+
+    /// Inserts or replaces a single document node.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or the redb transaction fails.
+    pub fn put_document(&self, id: UriId, value: &Document) -> Result<(), redb::Error> {
+        self.put_node(DOCUMENTS, id.get(), value)
+    }
+
+    /// Removes a declaration node, returning whether it existed.
+    ///
+    /// # Errors
+    /// Returns an error if the redb transaction fails.
+    pub fn delete_declaration(&self, id: DeclarationId) -> Result<bool, redb::Error> {
+        self.delete_node(DECLARATIONS, id.get())
+    }
+
+    /// Removes a document node, returning whether it existed.
+    ///
+    /// # Errors
+    /// Returns an error if the redb transaction fails.
+    pub fn delete_document(&self, id: UriId) -> Result<bool, redb::Error> {
+        self.delete_node(DOCUMENTS, id.get())
     }
 
     /// Reads a single declaration node, if present.
@@ -424,5 +469,45 @@ mod tests {
         assert!(c.contains(&"Circle".to_string()));
         assert!(c.contains(&"Cylinder".to_string()));
         assert!(!c.contains(&"Square".to_string()));
+    }
+
+    #[test]
+    fn incremental_mutation_persists() {
+        use crate::model::declaration::{ClassDeclaration, Declaration, Namespace};
+
+        fn class(name: &str) -> ClassDeclaration {
+            ClassDeclaration::new(name.to_string(), DeclarationId::from("Object"))
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mut.redb");
+        let store = RedbStore::create(&path).expect("create store");
+
+        let foo_id = DeclarationId::from("Foo");
+        let bar_id = DeclarationId::from("Bar");
+        store
+            .put_declaration(foo_id, &Declaration::Namespace(Namespace::Class(Box::new(class("Foo")))))
+            .expect("put Foo");
+        store
+            .put_declaration(bar_id, &Declaration::Namespace(Namespace::Class(Box::new(class("Bar")))))
+            .expect("put Bar");
+
+        // Update Foo in place (add a member) and delete Bar.
+        let mut foo = class("Foo");
+        foo.add_member(StringId::from("baz"), DeclarationId::from("Foo::baz"));
+        let foo_updated = Declaration::Namespace(Namespace::Class(Box::new(foo)));
+        store.put_declaration(foo_id, &foo_updated).expect("update Foo");
+        assert!(store.delete_declaration(bar_id).expect("delete Bar"), "Bar existed");
+
+        // Reopen as a fresh handle: the in-place mutations must have persisted.
+        drop(store);
+        let store = RedbStore::open(&path).expect("reopen store");
+        let loaded_foo = store.get_declaration(foo_id).expect("get Foo").expect("Foo present");
+        assert_eq!(
+            postcard::to_allocvec(&foo_updated).expect("serialize updated"),
+            postcard::to_allocvec(&loaded_foo).expect("serialize loaded"),
+        );
+        assert!(store.get_declaration(bar_id).expect("get Bar").is_none(), "Bar deleted");
+        assert!(!store.delete_declaration(bar_id).expect("re-delete Bar"), "Bar already gone");
     }
 }
