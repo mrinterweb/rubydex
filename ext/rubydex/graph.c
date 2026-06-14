@@ -934,6 +934,21 @@ static VALUE rdxr_graph_keyword(VALUE self, VALUE name) {
     return rb_class_new_instance(2, argv, cKeyword);
 }
 
+// Graph#build_store: (String path) -> nil. Persists the resolved graph to an on-disk redb store.
+static VALUE rdxr_graph_build_store(VALUE self, VALUE path) {
+    Check_Type(path, T_STRING);
+
+    void *graph;
+    TypedData_Get_Struct(self, void *, &graph_type, graph);
+
+    if (!rdx_graph_build_store(graph, StringValueCStr(path))) {
+        rb_raise(rb_eRuntimeError, "failed to build redb store at `%s` (is the redb-store feature compiled in?)",
+                 StringValueCStr(path));
+    }
+
+    return Qnil;
+}
+
 void rdxi_initialize_graph(VALUE moduleRubydex) {
     mRubydex = moduleRubydex;
     cGraph = rb_define_class_under(mRubydex, "Graph", rb_cObject);
@@ -945,6 +960,7 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_alloc_func(cGraph, rdxr_graph_alloc);
     rb_define_method(cGraph, "index_all", rdxr_graph_index_all, 1);
     rb_define_method(cGraph, "index_source", rdxr_graph_index_source, 3);
+    rb_define_method(cGraph, "build_store", rdxr_graph_build_store, 1);
     rb_define_method(cGraph, "document", rdxr_graph_document, 1);
     rb_define_method(cGraph, "delete_document", rdxr_graph_delete_document, 1);
     rb_define_method(cGraph, "resolve", rdxr_graph_resolve, 0);

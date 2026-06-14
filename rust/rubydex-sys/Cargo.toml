@@ -14,6 +14,10 @@ categories = ["development-tools", "external-ffi-bindings"]
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+[features]
+# Forwarded to the rubydex crate so the on-disk redb store can be compiled into the cdylib.
+redb-store = ["rubydex/redb-store"]
+
 [dependencies]
 rubydex = { version = "0.2.6", path = "../rubydex" }
 libc = "0.2.174"

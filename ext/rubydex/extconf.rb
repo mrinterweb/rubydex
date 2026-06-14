@@ -29,6 +29,8 @@ bindings_path = root_dir.join("rubydex-sys").join("rustbindings.h")
 
 cargo_args = ["--manifest-path #{root_dir.join("Cargo.toml")}"]
 cargo_args << "--release" if release
+# Opt-in disk-backed (low-resident-memory) index. Set RUBYDEX_REDB_STORE=1 when installing.
+cargo_args << "--features rubydex-sys/redb-store" if ENV["RUBYDEX_REDB_STORE"]
 
 if Gem.win_platform?
   cargo_args << "--target x86_64-pc-windows-gnu"

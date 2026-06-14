@@ -59,6 +59,27 @@ where
     result
 }
 
+/// Persists the resolved graph to an on-disk redb store at `path`, returning `true` on success.
+/// Returns `false` if the path is invalid, the store cannot be built, or the `redb-store` feature
+/// was not compiled in.
+#[unsafe(no_mangle)]
+pub extern "C" fn rdx_graph_build_store(pointer: GraphPointer, path: *const c_char) -> bool {
+    let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
+        return false;
+    };
+    with_graph(pointer, |graph| {
+        #[cfg(feature = "redb-store")]
+        {
+            rubydex::model::store::RedbStore::build(std::path::Path::new(&path), graph).is_ok()
+        }
+        #[cfg(not(feature = "redb-store"))]
+        {
+            let _ = (graph, path);
+            false
+        }
+    })
+}
+
 /// Searches the graph using exact substring matching, returning every declaration whose name matches any of the
 /// queries.
 ///

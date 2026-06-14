@@ -325,6 +325,11 @@ class Rubydex::Graph
   sig { params(file_paths: T::Array[String]).returns(T::Array[String]) }
   def index_all(file_paths); end
 
+  # Persists the resolved graph to an on-disk redb store at `path`. Requires the gem to be built
+  # with the `redb-store` feature (RUBYDEX_REDB_STORE=1).
+  sig { params(path: String).void }
+  def build_store(path); end
+
   sig { params(uri: String, source: String, language_id: String).void }
   def index_source(uri, source, language_id); end
 
