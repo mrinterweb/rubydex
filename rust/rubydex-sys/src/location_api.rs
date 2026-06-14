@@ -1,10 +1,20 @@
 //! Location-related C API and structs
 
 use libc::c_char;
+use line_index::LineIndex;
 use rubydex::model::document::Document;
 use rubydex::model::graph::Graph;
 use rubydex::offset::Offset;
 use std::ffi::CString;
+
+/// Reads a document's source from its `file://` URI. Used to rebuild a `LineIndex` for store-loaded
+/// documents, which don't retain source (so their in-memory `LineIndex` is empty).
+#[cfg(feature = "redb-store")]
+fn read_source(uri: &str) -> Option<String> {
+    let url = url::Url::parse(uri).ok()?;
+    let path = url.to_file_path().ok()?;
+    std::fs::read_to_string(path).ok()
+}
 
 /// C-compatible struct representing a definition location with offsets and line/column positions.
 #[repr(C)]
@@ -27,9 +37,21 @@ pub struct Location {
 /// - If the offset cannot be converted to a position.
 #[must_use]
 pub(crate) fn create_location_for_uri_and_offset(graph: &Graph, document: &Document, offset: &Offset) -> *mut Location {
-    let line_index = document.line_index();
-    let start_pos = line_index.line_col(offset.start().into());
-    let end_pos = line_index.line_col(offset.end().into());
+    // Store-loaded documents have an empty `LineIndex` (source is discarded on serialize), so rebuild
+    // it from the file and clamp offsets to avoid the "invalid offset" panic. Falls back to the
+    // document's own index (and empty source) if the file can't be read.
+    #[cfg(feature = "redb-store")]
+    let rebuilt = read_source(document.uri()).map(|source| (LineIndex::new(&source), source.len()));
+    #[cfg(feature = "redb-store")]
+    let (line_index, max_offset) = match &rebuilt {
+        Some((index, len)) => (index, u32::try_from(*len).unwrap_or(u32::MAX)),
+        None => (document.line_index(), u32::MAX),
+    };
+    #[cfg(not(feature = "redb-store"))]
+    let (line_index, max_offset) = (document.line_index(), u32::MAX);
+
+    let start_pos = line_index.line_col(offset.start().min(max_offset).into());
+    let end_pos = line_index.line_col(offset.end().min(max_offset).into());
 
     let loc = if let Some(wide_encoding) = graph.encoding().to_wide() {
         let wide_start_pos = line_index.to_wide(wide_encoding, start_pos).unwrap();
