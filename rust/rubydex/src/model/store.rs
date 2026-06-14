@@ -53,6 +53,17 @@ impl RedbStore {
         })
     }
 
+    /// Opens an existing redb store at `path` — e.g. a server reading a prebuilt gem/stdlib index
+    /// without holding the graph in memory.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened.
+    pub fn open(path: &Path) -> Result<Self, redb::Error> {
+        Ok(Self {
+            db: Database::open(path)?,
+        })
+    }
+
     /// Builds an on-disk store at `path` from a fully-indexed, resolved graph, writing every node
     /// map into its table in a single write transaction.
     ///
@@ -198,6 +209,28 @@ impl RedbStore {
     pub fn get_name_dependents(&self, id: NameId) -> Result<Option<Vec<NameDependent>>, redb::Error> {
         self.get_node(NAME_DEPENDENTS, id.get())
     }
+
+    /// Representative go-to-definition query, answered entirely from disk: resolves a fully qualified
+    /// name to its first definition's location `(document uri, start byte offset)`. Walks
+    /// declaration -> definition -> document, each a store read, with nothing held resident.
+    ///
+    /// # Errors
+    /// Returns an error if any redb read transaction fails.
+    pub fn definition_location(&self, fully_qualified_name: &str) -> Result<Option<(String, u32)>, redb::Error> {
+        let Some(declaration) = self.get_declaration(DeclarationId::from(fully_qualified_name))? else {
+            return Ok(None);
+        };
+        let Some(definition_id) = declaration.definitions().first().copied() else {
+            return Ok(None);
+        };
+        let Some(definition) = self.get_definition(definition_id)? else {
+            return Ok(None);
+        };
+        let Some(document) = self.get_document(*definition.uri_id())? else {
+            return Ok(None);
+        };
+        Ok(Some((document.uri().to_string(), definition.offset().start())))
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +316,32 @@ mod tests {
         assert_roundtrip!(graph.method_references(), get_method_reference);
         assert_roundtrip!(graph.documents(), get_document);
         assert_roundtrip!(graph.name_dependents(), get_name_dependents);
+    }
+
+    #[test]
+    fn definition_location_answered_from_reopened_store() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("foo.rb");
+        std::fs::write(&rb_path, "class Foo\n  def bar; end\nend\n").expect("write rb");
+
+        // Index + resolve the file into an in-memory graph, then persist it.
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // ensure the answer comes from disk, not the in-memory graph
+
+        // Reopen as a fresh handle (simulates a server that only reads the prebuilt store).
+        let store = RedbStore::open(&store_path).expect("open store");
+        let (uri, _start) = store
+            .definition_location("Foo")
+            .expect("query")
+            .expect("Foo should be located from the store");
+        assert!(uri.ends_with("foo.rb"), "unexpected uri: {uri}");
     }
 }
