@@ -3,6 +3,7 @@ use crate::model::document::Document;
 use crate::{assert_mem_size, model::ids::UriId, offset::Offset};
 
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct Diagnostic {
     rule: Rule,
     uri_id: UriId,
@@ -66,6 +67,7 @@ pub enum Severity {
 macro_rules! rules {
     ($($(#[doc = $documentation:literal])+ $rule:ident => $severity:ident),+ $(,)?) => {
         #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        #[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
         pub enum Rule {
             $($(#[doc = $documentation])+ $rule,)+
         }
