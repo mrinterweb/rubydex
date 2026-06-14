@@ -70,6 +70,24 @@ impl<T> From<&String> for Id<T> {
     }
 }
 
+// Manual serde impls (not derived) so that the zero-sized `PhantomData<T>` marker does not force a
+// `T: Serialize`/`T: Deserialize` bound on every ID marker type. An `Id<T>` is serialized purely as
+// its underlying `u64`, which is also exactly the key we store in redb.
+#[cfg(feature = "redb-store")]
+impl<T> serde::Serialize for Id<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.value.get())
+    }
+}
+
+#[cfg(feature = "redb-store")]
+impl<'de, T> serde::Deserialize<'de> for Id<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u64::deserialize(deserializer)?;
+        Ok(Self::new(value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

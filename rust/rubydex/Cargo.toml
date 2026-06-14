@@ -25,6 +25,9 @@ jemalloc = ["dep:tikv-jemallocator"]
 # Rust crate by itself, so we gate it with a feature
 jemalloc_dylib = ["jemalloc", "tikv-jemallocator/disable_initial_exec_tls"]
 test_utils = ["dep:tempfile"]
+# Disk-persisted, low-resident-memory index backed by an embedded redb store.
+# Opt-in: the default build keeps the all-in-memory graph unchanged.
+redb-store = ["dep:redb", "dep:postcard"]  # serde is always-on (non-optional) on main, so no dep:serde
 
 [dependencies]
 cypher-parser = "0.2"
@@ -47,6 +50,8 @@ toml = "1.1.2"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator = { version = "0.7.0", optional = true }
+redb = { version = "4", optional = true }
+postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
 rubydex = { path = ".", features = ["test_utils", "jemalloc"] }

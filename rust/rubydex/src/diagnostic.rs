@@ -3,6 +3,7 @@ use crate::model::document::Document;
 use crate::{model::ids::UriId, offset::Offset};
 
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct Diagnostic {
     rule: Rule,
     uri_id: UriId,
@@ -75,6 +76,7 @@ macro_rules! rules {
         $( $variant:ident );* $(;)?
     ) => {
         #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        #[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
         pub enum Rule {
             $(
                 $variant,
