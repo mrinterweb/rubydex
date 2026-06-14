@@ -715,8 +715,7 @@ pub fn find_member_in_ancestors(
     only_inherited: bool,
 ) -> Result<DeclarationId, FindMemberError> {
     let declaration = graph
-        .declarations()
-        .get(&declaration_id)
+        .declaration(declaration_id)
         .ok_or(FindMemberError::DeclarationNotFound)?;
     let namespace = declaration.as_namespace().ok_or(FindMemberError::NotNamespace)?;
     let mut found_main_namespace = false;
@@ -733,15 +732,11 @@ pub fn find_member_in_ancestors(
             continue;
         }
 
-        if let Some(member_id) = graph
-            .declarations()
-            .get(ancestor_id)
-            .unwrap()
-            .as_namespace()
-            .unwrap()
-            .member(&member_str_id)
-        {
-            return Ok(*member_id);
+        let member_id = graph
+            .declaration(*ancestor_id)
+            .and_then(|ancestor_decl| ancestor_decl.as_namespace().and_then(|ns| ns.member(&member_str_id)).copied());
+        if let Some(member_id) = member_id {
+            return Ok(member_id);
         }
     }
 
