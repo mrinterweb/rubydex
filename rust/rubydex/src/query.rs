@@ -256,7 +256,8 @@ fn method_visible_at_call(
         Visibility::Public => true,
         Visibility::Private | Visibility::ModuleFunction => caller_self == Some(receiver),
         Visibility::Protected => caller_self.is_some_and(|cs| {
-            let defined_in = graph.declarations().get(&defined_in).unwrap().as_namespace().unwrap();
+            let defined_in = graph.declaration(defined_in).unwrap();
+        let defined_in = defined_in.as_namespace().unwrap();
             let descendants = defined_in.descendants();
             descendants.contains(&cs) && descendants.contains(&receiver)
         }),
@@ -273,12 +274,21 @@ fn collect_members<'a>(
     completion_ctx: &mut CompletionContext<'a>,
     candidates: &mut Vec<CompletionCandidate>,
 ) {
-    let namespace = graph.declarations().get(&namespace_id).unwrap().as_namespace().unwrap();
+    // CompletionContext stores graph-lifetime `&'a StringId`s, so this path uses direct in-memory
+    // access and degrades gracefully for store-backed (gem) namespaces rather than panicking.
+    let Some(namespace) = graph.declarations().get(&namespace_id) else {
+        return;
+    };
+    let Some(namespace) = namespace.as_namespace() else {
+        return;
+    };
 
     for (member_str_id, member_decl_id) in namespace.members() {
-        let member = graph.declarations().get(member_decl_id).unwrap();
+        let Some(member) = graph.declaration(*member_decl_id) else {
+            continue;
+        };
 
-        if !kind_filter(member) {
+        if !kind_filter(&member) {
             continue;
         }
 
@@ -346,12 +356,12 @@ pub fn completion_candidates<'a>(
 /// - `Ok(None)` if the declaration does not exist in the graph
 /// - `Err(...)` if the declaration exists but is not a namespace or alias to a namespace
 fn resolve_to_namespace(graph: &Graph, decl_id: DeclarationId) -> Result<Option<DeclarationId>, Box<dyn Error>> {
-    match graph.declarations().get(&decl_id) {
+    match graph.declaration(decl_id).as_deref() {
         Some(Declaration::Namespace(_)) => Ok(Some(decl_id)),
         None => Ok(None),
         Some(_) => {
             if let Some(target_id) = graph.resolve_alias(&decl_id)
-                && let Some(Declaration::Namespace(_)) = graph.declarations().get(&target_id)
+                && let Some(Declaration::Namespace(_)) = graph.declaration(target_id).as_deref()
             {
                 Ok(Some(target_id))
             } else {
@@ -372,7 +382,8 @@ fn namespace_access_completion<'a>(
         return Ok(Vec::new());
     };
     let resolved_caller_self_id = self_decl_id.map(|id| resolve_self_namespace(graph, id)).transpose()?;
-    let namespace = graph.declarations().get(&resolved_id).unwrap().as_namespace().unwrap();
+    let namespace = graph.declaration(resolved_id).unwrap();
+        let namespace = namespace.as_namespace().unwrap();
     let mut candidates = Vec::new();
 
     // Walk ancestors collecting inherited constants, stopping at Object to avoid surfacing top-level constants
@@ -399,7 +410,8 @@ fn namespace_access_completion<'a>(
     // The receiver of an explicit `Foo::` call is the singleton class, so visibility checks
     // compare against it (not against `Foo` itself).
     if let Some(singleton_id) = namespace.singleton_class() {
-        let singleton = graph.declarations().get(singleton_id).unwrap().as_namespace().unwrap();
+        let singleton = graph.declaration(*singleton_id).unwrap();
+        let singleton = singleton.as_namespace().unwrap();
         let receiver = *singleton_id;
 
         for ancestor in singleton.ancestors() {
@@ -432,7 +444,8 @@ fn method_call_completion<'a>(
         return Ok(Vec::new());
     };
     let resolved_caller_self_id = self_decl_id.map(|id| resolve_self_namespace(graph, id)).transpose()?;
-    let namespace = graph.declarations().get(&resolved_id).unwrap().as_namespace().unwrap();
+    let namespace = graph.declaration(resolved_id).unwrap();
+        let namespace = namespace.as_namespace().unwrap();
     let mut candidates = Vec::new();
 
     for ancestor in namespace.ancestors() {
@@ -464,10 +477,10 @@ fn expression_completion<'a>(
     nesting_name_id: NameId,
     mut context: CompletionContext<'a>,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
-    let Some(name_ref) = graph.names().get(&nesting_name_id) else {
+    let Some(name_ref) = graph.name(nesting_name_id) else {
         return Err(format!("Name {nesting_name_id} not found in graph").into());
     };
-    let NameRef::Resolved(name_ref) = name_ref else {
+    let NameRef::Resolved(name_ref) = &*name_ref else {
         return Err(format!("Expected name {nesting_name_id} to be resolved").into());
     };
 
@@ -537,7 +550,8 @@ fn collect_constants_from_lexical_scope<'a>(
     }
 
     if matches!(innermost_lexical_decl, Namespace::Module(_)) {
-        let object = graph.declarations().get(&OBJECT_ID).unwrap().as_namespace().unwrap();
+        let object = graph.declaration(*OBJECT_ID).unwrap();
+        let object = object.as_namespace().unwrap();
 
         for ancestor in object.ancestors() {
             if let Ancestor::Complete(ancestor_id) = ancestor {
@@ -577,7 +591,8 @@ fn collect_class_variables_from_lexical_scope<'a>(
             // No non-singleton lexical scope (invalid Ruby). Skip cvar collection.
             return;
         };
-        let NameRef::Resolved(parent_ref) = graph.names().get(&parent_name_id).unwrap() else {
+        let parent_name_node = graph.name(parent_name_id).unwrap();
+        let NameRef::Resolved(parent_ref) = &*parent_name_node else {
             return;
         };
         decl = graph
@@ -614,7 +629,8 @@ fn collect_constants_from_outer_nesting<'a>(
     let mut current_name_id = *name_ref.nesting();
 
     while let Some(id) = current_name_id {
-        let NameRef::Resolved(parent_ref) = graph.names().get(&id).unwrap() else {
+        let parent_name_node = graph.name(id).unwrap();
+        let NameRef::Resolved(parent_ref) = &*parent_name_node else {
             break;
         };
 
@@ -662,13 +678,13 @@ fn method_argument_completion<'a>(
     context: CompletionContext<'a>,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
     let mut candidates = expression_completion(graph, self_decl_id, nesting_name_id, context)?;
-    let Some(method_decl) = graph.declarations().get(&method_decl_id) else {
+    let Some(method_decl) = graph.declaration(method_decl_id) else {
         return Ok(candidates);
     };
 
     // Find the first Method definition to extract keyword parameters
     for def_id in method_decl.definitions() {
-        if let Some(Definition::Method(method_def)) = graph.definitions().get(def_id) {
+        if let Some(Definition::Method(method_def)) = graph.definition(*def_id).as_deref() {
             for signature in method_def.signatures().as_slice() {
                 for param in signature {
                     match param {
@@ -776,13 +792,14 @@ pub fn follow_method_alias(graph: &Graph, alias_id: DefinitionId) -> Result<Decl
     let mut current = alias_id;
 
     loop {
-        let Some(Definition::MethodAlias(alias)) = graph.definitions().get(&current) else {
+        let current_def = graph.definition(current);
+        let Some(Definition::MethodAlias(alias)) = current_def.as_deref() else {
             return Err(AliasResolutionError::NotAnAlias);
         };
 
         let owner_id = graph
             .definition_id_to_declaration_id(current)
-            .and_then(|decl_id| graph.declarations().get(decl_id))
+            .and_then(|decl_id| graph.declaration(*decl_id))
             .map(|decl| *decl.owner_id())
             .ok_or(AliasResolutionError::UnresolvedOwner)?;
 
@@ -871,9 +888,9 @@ mod tests {
 
     fn candidate_label(context: &GraphTest, candidate: &CompletionCandidate) -> String {
         match candidate {
-            CompletionCandidate::Declaration(id) => context.graph().declarations().get(id).unwrap().name().to_string(),
+            CompletionCandidate::Declaration(id) => context.graph().declaration(*id).unwrap().name().to_string(),
             CompletionCandidate::KeywordArgument(str_id) => {
-                format!("{}:", context.graph().strings().get(str_id).unwrap().as_str())
+                format!("{}:", context.graph().string(*str_id).unwrap().as_str())
             }
             CompletionCandidate::Keyword(kw) => kw.name().to_string(),
         }
@@ -1052,7 +1069,7 @@ mod tests {
         // finds basic path
         let uri_id = resolve_require_path(context.graph(), "foo/bar", &load_paths);
         assert!(uri_id.is_some());
-        let doc = context.graph().documents().get(&uri_id.unwrap()).unwrap();
+        let doc = context.graph().document(uri_id.unwrap()).unwrap();
         assert_eq!(uri, doc.uri());
 
         // handles .rb suffix
@@ -1078,7 +1095,7 @@ mod tests {
         // lib comes first in load paths
         let load_paths = [root.join("lib"), root.join("test")];
         let uri_id = resolve_require_path(context.graph(), "foo/bar", &load_paths).unwrap();
-        let doc = context.graph().documents().get(&uri_id).unwrap();
+        let doc = context.graph().document(uri_id).unwrap();
         assert!(
             doc.uri().contains("lib/foo/bar.rb"),
             "Expected lib path, got {}",
@@ -1088,7 +1105,7 @@ mod tests {
         // test comes first in load paths
         let load_paths = [root.join("test"), root.join("lib")];
         let uri_id = resolve_require_path(context.graph(), "foo/bar", &load_paths).unwrap();
-        let doc = context.graph().documents().get(&uri_id).unwrap();
+        let doc = context.graph().document(uri_id).unwrap();
         assert!(
             doc.uri().contains("test/foo/bar.rb"),
             "Expected test path, got {}",
