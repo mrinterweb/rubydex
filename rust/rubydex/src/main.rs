@@ -76,6 +76,14 @@ struct Args {
     #[cfg(feature = "redb-store")]
     #[arg(long = "query", value_name = "FQN", help = "Fully qualified name to look up (with --open-store)")]
     query: Option<String>,
+
+    #[cfg(feature = "redb-store")]
+    #[arg(
+        long = "search",
+        value_name = "PREFIX",
+        help = "Prefix-search declaration short names from the store (with --open-store)"
+    )]
+    search: Option<String>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -140,6 +148,13 @@ fn main() {
             match store.definition_location(fqn).expect("query store") {
                 Some((uri, start)) => println!("{fqn} -> {uri} @ {start}"),
                 None => println!("{fqn} -> not found"),
+            }
+        }
+        if let Some(prefix) = args.search.as_deref() {
+            let names = store.search_prefix(prefix, 20).expect("search store");
+            println!("{} match(es) for prefix {prefix:?}:", names.len());
+            for name in names {
+                println!("  {name}");
             }
         }
         MemoryStats::print_memory_usage();

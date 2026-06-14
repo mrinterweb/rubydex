@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, MultimapTableDefinition, ReadableDatabase, TableDefinition};
 
 use serde::de::DeserializeOwned;
 
@@ -36,6 +36,19 @@ const CONSTANT_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("c
 const METHOD_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("method_references");
 const DOCUMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("documents");
 const NAME_DEPENDENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("name_dependents");
+
+// Secondary index for prefix search: lowercased short name -> declaration IDs (one short name can
+// map to many declarations). redb keeps keys ordered, so a prefix is served by a range scan.
+const SHORT_NAME_INDEX: MultimapTableDefinition<&str, u64> = MultimapTableDefinition::new("short_name_index");
+
+/// The unqualified ("short") name of a fully qualified name: the segment after the last `::`, `#`,
+/// or `.` separator. e.g. `Foo::Bar` -> `Bar`, `Foo#baz` -> `baz`.
+fn short_name(fully_qualified_name: &str) -> &str {
+    fully_qualified_name
+        .rsplit([':', '#', '.'])
+        .next()
+        .unwrap_or(fully_qualified_name)
+}
 
 /// A redb-backed node store. Stage 0: strings only.
 pub struct RedbStore {
@@ -93,6 +106,15 @@ impl RedbStore {
             write_map!(METHOD_REFERENCES, graph.method_references());
             write_map!(DOCUMENTS, graph.documents());
             write_map!(NAME_DEPENDENTS, graph.name_dependents());
+
+            // Secondary prefix-search index: short name -> declaration IDs.
+            {
+                let mut index = write_txn.open_multimap_table(SHORT_NAME_INDEX)?;
+                for (id, declaration) in graph.declarations() {
+                    let key = short_name(declaration.name()).to_lowercase();
+                    index.insert(key.as_str(), id.get())?;
+                }
+            }
 
             write_txn.commit()?;
         }
@@ -231,6 +253,36 @@ impl RedbStore {
         };
         Ok(Some((document.uri().to_string(), definition.offset().start())))
     }
+
+    /// Workspace-symbol-style prefix search answered from disk: returns the fully qualified names of
+    /// declarations whose short name starts with `prefix` (case-insensitive), up to `limit`. Uses the
+    /// ordered `short_name_index` so only the matching key range is scanned, not the whole graph.
+    ///
+    /// # Errors
+    /// Returns an error if any redb read transaction fails.
+    pub fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<String>, redb::Error> {
+        let lower = prefix.to_lowercase();
+        let read_txn = self.db.begin_read()?;
+        let index = read_txn.open_multimap_table(SHORT_NAME_INDEX)?;
+
+        let mut results = Vec::new();
+        for entry in index.range(lower.as_str()..)? {
+            let (key, ids) = entry?;
+            // The range is unbounded above, so stop once keys no longer share the prefix.
+            if !key.value().starts_with(&lower) {
+                break;
+            }
+            for id in ids {
+                if let Some(declaration) = self.get_declaration(DeclarationId::new(id?.value()))? {
+                    results.push(declaration.name().to_string());
+                    if results.len() >= limit {
+                        return Ok(results);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -343,5 +395,34 @@ mod tests {
             .expect("query")
             .expect("Foo should be located from the store");
         assert!(uri.ends_with("foo.rb"), "unexpected uri: {uri}");
+    }
+
+    #[test]
+    fn prefix_search_from_store() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("shapes.rb");
+        std::fs::write(&rb_path, "class Circle\nend\nclass Cylinder\nend\nclass Square\nend\n").expect("write rb");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph);
+
+        let store = RedbStore::open(&store_path).expect("open store");
+
+        assert_eq!(store.search_prefix("cy", 10).expect("search"), vec!["Cylinder".to_string()]);
+        assert_eq!(store.search_prefix("ci", 10).expect("search"), vec!["Circle".to_string()]);
+
+        // Case-insensitive prefix "c" matches both shapes (and possibly built-ins) but not Square.
+        let c = store.search_prefix("C", 50).expect("search");
+        assert!(c.contains(&"Circle".to_string()));
+        assert!(c.contains(&"Cylinder".to_string()));
+        assert!(!c.contains(&"Square".to_string()));
     }
 }
