@@ -159,8 +159,8 @@ pub unsafe extern "C" fn rdx_graph_declarations_search(
         query::declaration_search(graph, &query_refs, &query::MatchMode::Exact)
             .into_iter()
             .filter_map(|id| {
-                let decl = graph.declarations().get(&id)?;
-                Some(CDeclaration::from_declaration(id, decl))
+                let decl = graph.declaration(id)?;
+                Some(CDeclaration::from_declaration(id, &decl))
             })
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
@@ -194,8 +194,8 @@ pub unsafe extern "C" fn rdx_graph_declarations_fuzzy_search(
         query::declaration_search(graph, &query_refs, &query::MatchMode::Fuzzy)
             .into_iter()
             .filter_map(|id| {
-                let decl = graph.declarations().get(&id)?;
-                Some(CDeclaration::from_declaration(id, decl))
+                let decl = graph.declaration(id)?;
+                Some(CDeclaration::from_declaration(id, &decl))
             })
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
@@ -333,8 +333,10 @@ fn resolve_constant_name(mut tracked_name: name_api::TrackedName<'_>) -> *const 
     let name_id = tracked_name.name_id();
     let declaration_id = Resolver::new(tracked_name.graph_mut()).resolve_constant(name_id);
     declaration_id.map_or(ptr::null(), |id| {
-        let declaration = tracked_name.graph().declarations().get(&id).unwrap();
-        Box::into_raw(Box::new(CDeclaration::from_declaration(id, declaration))).cast_const()
+        let Some(declaration) = tracked_name.graph().declaration(id) else {
+            return ptr::null();
+        };
+        Box::into_raw(Box::new(CDeclaration::from_declaration(id, &declaration))).cast_const()
     })
 }
 
@@ -613,7 +615,7 @@ pub unsafe extern "C" fn rdx_graph_declarations_iter_new(pointer: GraphPointer) 
         graph
             .declarations()
             .iter()
-            .map(|(id, decl)| CDeclaration::from_declaration(*id, decl))
+            .map(|(id, decl)| CDeclaration::from_declaration(*id, &decl))
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
     });
@@ -966,7 +968,7 @@ fn run_and_finalize_completion(graph: &Graph, receiver: CompletionReceiver) -> C
                     .expect("completion candidate declaration must exist in graph");
                 CCompletionCandidate {
                     kind: CCompletionCandidateKind::Declaration,
-                    declaration: Box::into_raw(Box::new(CDeclaration::from_declaration(id, decl))),
+                    declaration: Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))),
                     name: ptr::null(),
                     documentation: ptr::null(),
                 }

@@ -154,7 +154,7 @@ mod tests {
         .unwrap();
         let name_id = tracked_name.name_id();
 
-        let const_name = tracked_name.graph().names().get(&name_id).unwrap();
+        let const_name = tracked_name.graph().name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
 
         let some_name = tracked_name
@@ -193,7 +193,7 @@ mod tests {
         let tracked_name = name_from_nesting_names(&mut graph, "::CONST", vec!["Foo".into()]).unwrap();
         let name_id = tracked_name.name_id();
 
-        let const_name = tracked_name.graph().names().get(&name_id).unwrap();
+        let const_name = tracked_name.graph().name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
         assert!(const_name.parent_scope().is_top_level());
 
@@ -214,7 +214,7 @@ mod tests {
         let tracked_name = name_from_nesting_names(&mut graph, "CONST", vec!["Foo".into(), "<Foo>".into()]).unwrap();
         let name_id = tracked_name.name_id();
 
-        let const_name = tracked_name.graph().names().get(&name_id).unwrap();
+        let const_name = tracked_name.graph().name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
 
         // The nesting should be <Foo> with an Attached parent scope
@@ -232,7 +232,7 @@ mod tests {
 
         // The attached parent should be Foo
         let foo_id = singleton_name.parent_scope().expect("Attached should have an id");
-        let foo_name = tracked_name.graph().names().get(&foo_id).unwrap();
+        let foo_name = tracked_name.graph().name(foo_id).unwrap();
         assert_eq!(StringId::from("Foo"), *foo_name.str());
     }
 
@@ -243,7 +243,7 @@ mod tests {
         let tracked_name = name_from_nesting_names(&mut graph, "CONST", vec!["Foo".into(), "::Bar".into()]).unwrap();
         let name_id = tracked_name.name_id();
 
-        let const_name = tracked_name.graph().names().get(&name_id).unwrap();
+        let const_name = tracked_name.graph().name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
         assert!(const_name.parent_scope().is_none());
 
