@@ -45,18 +45,18 @@ pub unsafe extern "C" fn rdx_graph_diagnostics(pointer: GraphPointer) -> *mut Di
         let entries = graph
             .all_diagnostics()
             .iter()
-            .map(|diagnostic| {
-                let document = graph.documents().get(diagnostic.uri_id()).unwrap();
-                let location = create_location_for_uri_and_offset(graph, document, diagnostic.offset());
+            .filter_map(|diagnostic| {
+                let document = graph.document(*diagnostic.uri_id())?;
+                let location = create_location_for_uri_and_offset(graph, &document, diagnostic.offset());
 
-                DiagnosticEntry {
+                Some(DiagnosticEntry {
                     rule: CString::new(diagnostic.rule().to_string())
                         .unwrap()
                         .into_raw()
                         .cast_const(),
                     message: CString::new(diagnostic.message()).unwrap().into_raw().cast_const(),
                     location,
-                }
+                })
             })
             .collect::<Vec<DiagnosticEntry>>();
 

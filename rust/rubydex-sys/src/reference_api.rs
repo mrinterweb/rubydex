@@ -32,9 +32,9 @@ impl CConstantReference {
             .get(&ref_id)
             .expect("Constant reference not found");
 
-        let name_ref = graph.names().get(reference.name_id()).expect("Name ID should exist");
+        let name_ref = graph.name(*reference.name_id()).expect("Name ID should exist");
 
-        let declaration_id = match name_ref {
+        let declaration_id = match &*name_ref {
             NameRef::Resolved(resolved) => **resolved.declaration_id(),
             NameRef::Unresolved(_) => 0,
         };
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn rdx_constant_reference_name(pointer: GraphPointer, refe
         let Some(reference) = graph.constant_reference(ref_id) else {
             return ptr::null();
         };
-        let name = graph.names().get(reference.name_id()).expect("Name ID should exist");
+        let name = graph.name(*reference.name_id()).expect("Name ID should exist");
 
         let name_string = graph
             .strings()
@@ -192,12 +192,11 @@ pub unsafe extern "C" fn rdx_constant_reference_location(pointer: GraphPointer, 
         let Some(reference) = graph.constant_reference(ref_id) else {
             return ptr::null_mut();
         };
-        let document = graph
-            .documents()
-            .get(&reference.uri_id())
-            .expect("Document should exist");
+        let Some(document) = graph.document(reference.uri_id()) else {
+            return ptr::null_mut();
+        };
 
-        create_location_for_uri_and_offset(graph, document, reference.offset())
+        create_location_for_uri_and_offset(graph, &document, reference.offset())
     })
 }
 
@@ -219,7 +218,7 @@ pub unsafe extern "C" fn rdx_resolved_constant_reference_declaration(
     with_graph(pointer, |graph| {
         let ref_id = ConstantReferenceId::new(reference_id);
         let reference = graph.constant_reference(ref_id).expect("Reference not found");
-        let name_ref = graph.names().get(reference.name_id()).expect("Name ID should exist");
+        let name_ref = graph.name(*reference.name_id()).expect("Name ID should exist");
 
         match &*name_ref {
             NameRef::Resolved(resolved) => {
