@@ -134,7 +134,7 @@ pub unsafe extern "C" fn rdx_method_references_iter_free(iter: *mut MethodRefere
 pub unsafe extern "C" fn rdx_constant_reference_name(pointer: GraphPointer, reference_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let ref_id = ConstantReferenceId::new(reference_id);
-        let Some(reference) = graph.constant_references().get(&ref_id) else {
+        let Some(reference) = graph.constant_reference(ref_id) else {
             return ptr::null();
         };
         let name = graph.names().get(reference.name_id()).expect("Name ID should exist");
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn rdx_constant_reference_name(pointer: GraphPointer, refe
 pub unsafe extern "C" fn rdx_method_reference_name(pointer: GraphPointer, reference_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let ref_id = MethodReferenceId::new(reference_id);
-        let Some(reference) = graph.method_references().get(&ref_id) else {
+        let Some(reference) = graph.method_reference(ref_id) else {
             return ptr::null();
         };
         let name = graph
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn rdx_method_reference_name(pointer: GraphPointer, refere
 pub unsafe extern "C" fn rdx_constant_reference_location(pointer: GraphPointer, reference_id: u64) -> *mut Location {
     with_graph(pointer, |graph| {
         let ref_id = ConstantReferenceId::new(reference_id);
-        let Some(reference) = graph.constant_references().get(&ref_id) else {
+        let Some(reference) = graph.constant_reference(ref_id) else {
             return ptr::null_mut();
         };
         let document = graph
@@ -218,14 +218,14 @@ pub unsafe extern "C" fn rdx_resolved_constant_reference_declaration(
 ) -> *const CDeclaration {
     with_graph(pointer, |graph| {
         let ref_id = ConstantReferenceId::new(reference_id);
-        let reference = graph.constant_references().get(&ref_id).expect("Reference not found");
+        let reference = graph.constant_reference(ref_id).expect("Reference not found");
         let name_ref = graph.names().get(reference.name_id()).expect("Name ID should exist");
 
-        match name_ref {
+        match &*name_ref {
             NameRef::Resolved(resolved) => {
                 let decl_id = *resolved.declaration_id();
-                let decl = graph.declarations().get(&decl_id).expect("Declaration not found");
-                Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, decl))).cast_const()
+                let decl = graph.declaration(decl_id).expect("Declaration not found");
+                Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, &decl))).cast_const()
             }
             NameRef::Unresolved(_) => ptr::null(),
         }
@@ -269,19 +269,19 @@ pub unsafe extern "C" fn rdx_method_reference_receiver_declaration(
 ) -> *const CDeclaration {
     with_graph(pointer, |graph| {
         let ref_id = MethodReferenceId::new(reference_id);
-        let reference = graph.method_references().get(&ref_id).expect("Reference not found");
+        let reference = graph.method_reference(ref_id).expect("Reference not found");
 
         let Some(name_id) = reference.receiver() else {
             return ptr::null();
         };
 
-        let name_ref = graph.names().get(&name_id).expect("Name ID should exist");
+        let name_ref = graph.name(name_id).expect("Name ID should exist");
 
-        match name_ref {
+        match &*name_ref {
             NameRef::Resolved(resolved) => {
                 let decl_id = *resolved.declaration_id();
-                let decl = graph.declarations().get(&decl_id).expect("Declaration not found");
-                Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, decl))).cast_const()
+                let decl = graph.declaration(decl_id).expect("Declaration not found");
+                Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, &decl))).cast_const()
             }
             NameRef::Unresolved(_) => ptr::null(),
         }
@@ -303,7 +303,7 @@ pub unsafe extern "C" fn rdx_method_reference_receiver_declaration(
 pub unsafe extern "C" fn rdx_method_reference_location(pointer: GraphPointer, reference_id: u64) -> *mut Location {
     with_graph(pointer, |graph| {
         let ref_id = MethodReferenceId::new(reference_id);
-        let Some(reference) = graph.method_references().get(&ref_id) else {
+        let Some(reference) = graph.method_reference(ref_id) else {
             return ptr::null_mut();
         };
         let document = graph

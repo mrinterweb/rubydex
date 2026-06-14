@@ -74,7 +74,8 @@ pub struct SignatureArray {
 pub unsafe extern "C" fn rdx_definition_signatures(pointer: GraphPointer, definition_id: u64) -> *mut SignatureArray {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let Definition::Method(method_def) = graph.definitions().get(&def_id).expect("definition should exist") else {
+        let defn = graph.definition(def_id).expect("definition should exist");
+        let Definition::Method(method_def) = &*defn else {
             panic!("expected a method definition");
         };
 
@@ -90,7 +91,7 @@ pub unsafe extern "C" fn rdx_definition_signatures(pointer: GraphPointer, defini
 /// Helper: build signature entries from a `MethodDefinition`.
 fn collect_method_signatures(graph: &Graph, method_def: &MethodDefinition) -> Vec<SignatureEntry> {
     let uri_id = *method_def.uri_id();
-    let document = graph.documents().get(&uri_id).expect("document should exist");
+    let document = graph.document(uri_id).expect("document should exist");
 
     method_def
         .signatures()
@@ -102,15 +103,14 @@ fn collect_method_signatures(graph: &Graph, method_def: &MethodDefinition) -> Ve
                 .map(|param| {
                     let param_struct = param.inner();
                     let name = graph
-                        .strings()
-                        .get(param_struct.str())
+                        .string(*param_struct.str())
                         .expect("parameter name string should exist");
                     let name_str = CString::new(name.as_str()).unwrap().into_raw().cast_const();
 
                     ParameterEntry {
                         name: name_str,
                         kind: map_parameter_kind(param),
-                        location: create_location_for_uri_and_offset(graph, document, param_struct.offset()),
+                        location: create_location_for_uri_and_offset(graph, &document, param_struct.offset()),
                     }
                 })
                 .collect();
@@ -149,10 +149,13 @@ pub unsafe extern "C" fn rdx_method_alias_definition_signatures(
         let mut sig_entries: Vec<SignatureEntry> = Vec::new();
 
         if let Ok(declaration_id) = resolved {
-            if let Some(Declaration::Method(method_def)) = graph.declarations().get(&declaration_id) {
+            let decl = graph.declaration(declaration_id);
+            if let Some(Declaration::Method(method_def)) = decl.as_deref() {
                 for definition_id in method_def.definitions() {
-                    if let Some(Definition::Method(method_definition)) = graph.definitions().get(definition_id) {
-                        sig_entries.extend(collect_method_signatures(graph, method_definition));
+                    if let Some(def) = graph.definition(*definition_id) {
+                        if let Definition::Method(method_definition) = &*def {
+                            sig_entries.extend(collect_method_signatures(graph, method_definition));
+                        }
                     }
                 }
             } else {
