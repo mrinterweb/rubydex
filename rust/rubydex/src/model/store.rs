@@ -14,9 +14,17 @@ use std::path::Path;
 
 use redb::{Database, ReadableDatabase, TableDefinition};
 
+use serde::de::DeserializeOwned;
+
 use crate::model::declaration::Declaration;
-use crate::model::graph::Graph;
-use crate::model::ids::{DeclarationId, StringId};
+use crate::model::definitions::Definition;
+use crate::model::document::Document;
+use crate::model::graph::{Graph, NameDependent};
+use crate::model::ids::{
+    ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId,
+};
+use crate::model::name::NameRef;
+use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::string_ref::StringRef;
 
 // One redb table per graph node map, all keyed by the node's `u64` content-hash ID.
@@ -95,19 +103,29 @@ impl RedbStore {
         Ok(())
     }
 
-    /// Reads and deserializes a single interned string, if present.
+    /// Reads and deserializes a node of type `V` from `table` by its `u64` key, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    fn get_node<V: DeserializeOwned>(
+        &self,
+        table: TableDefinition<u64, &[u8]>,
+        key: u64,
+    ) -> Result<Option<V>, redb::Error> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(table)?;
+        match table.get(key)? {
+            Some(guard) => Ok(Some(postcard::from_bytes::<V>(guard.value()).expect("node should deserialize"))),
+            None => Ok(None),
+        }
+    }
+
+    /// Reads a single interned string, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_string(&self, id: StringId) -> Result<Option<StringRef>, redb::Error> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(STRINGS)?;
-        match table.get(id.get())? {
-            Some(guard) => Ok(Some(
-                postcard::from_bytes::<StringRef>(guard.value()).expect("StringRef should deserialize"),
-            )),
-            None => Ok(None),
-        }
+        self.get_node(STRINGS, id.get())
     }
 
     /// Serializes and writes a single declaration node.
@@ -125,19 +143,60 @@ impl RedbStore {
         Ok(())
     }
 
-    /// Reads and deserializes a single declaration node, if present.
+    /// Reads a single declaration node, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_declaration(&self, id: DeclarationId) -> Result<Option<Declaration>, redb::Error> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(DECLARATIONS)?;
-        match table.get(id.get())? {
-            Some(guard) => Ok(Some(
-                postcard::from_bytes::<Declaration>(guard.value()).expect("Declaration should deserialize"),
-            )),
-            None => Ok(None),
-        }
+        self.get_node(DECLARATIONS, id.get())
+    }
+
+    /// Reads a single definition node, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    pub fn get_definition(&self, id: DefinitionId) -> Result<Option<Definition>, redb::Error> {
+        self.get_node(DEFINITIONS, id.get())
+    }
+
+    /// Reads a single name node, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    pub fn get_name(&self, id: NameId) -> Result<Option<NameRef>, redb::Error> {
+        self.get_node(NAMES, id.get())
+    }
+
+    /// Reads a single constant reference node, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    pub fn get_constant_reference(&self, id: ConstantReferenceId) -> Result<Option<ConstantReference>, redb::Error> {
+        self.get_node(CONSTANT_REFERENCES, id.get())
+    }
+
+    /// Reads a single method reference node, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    pub fn get_method_reference(&self, id: MethodReferenceId) -> Result<Option<MethodRef>, redb::Error> {
+        self.get_node(METHOD_REFERENCES, id.get())
+    }
+
+    /// Reads a single document node, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    pub fn get_document(&self, id: UriId) -> Result<Option<Document>, redb::Error> {
+        self.get_node(DOCUMENTS, id.get())
+    }
+
+    /// Reads the dependents of a single name, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    pub fn get_name_dependents(&self, id: NameId) -> Result<Option<Vec<NameDependent>>, redb::Error> {
+        self.get_node(NAME_DEPENDENTS, id.get())
     }
 }
 
@@ -203,18 +262,26 @@ mod tests {
         let path = dir.path().join("graph.redb");
         let store = RedbStore::build(&path, &graph).expect("build store");
 
-        // Every declaration in the graph must round-trip byte-identically through the built store.
-        for (id, declaration) in graph.declarations() {
-            let loaded = store
-                .get_declaration(*id)
-                .expect("get")
-                .expect("declaration present in store");
-            assert_eq!(
-                postcard::to_allocvec(declaration).expect("serialize in-memory"),
-                postcard::to_allocvec(&loaded).expect("serialize loaded"),
-                "declaration {} did not round-trip",
-                declaration.name(),
-            );
+        // Every node in every map must round-trip byte-identically through the built store.
+        macro_rules! assert_roundtrip {
+            ($map:expr, $getter:ident) => {
+                for (id, value) in $map {
+                    let loaded = store.$getter(*id).expect("get").expect("node present in store");
+                    assert_eq!(
+                        postcard::to_allocvec(value).expect("serialize in-memory"),
+                        postcard::to_allocvec(&loaded).expect("serialize loaded"),
+                    );
+                }
+            };
         }
+
+        assert_roundtrip!(graph.declarations(), get_declaration);
+        assert_roundtrip!(graph.definitions(), get_definition);
+        assert_roundtrip!(graph.names(), get_name);
+        assert_roundtrip!(graph.strings(), get_string);
+        assert_roundtrip!(graph.constant_references(), get_constant_reference);
+        assert_roundtrip!(graph.method_references(), get_method_reference);
+        assert_roundtrip!(graph.documents(), get_document);
+        assert_roundtrip!(graph.name_dependents(), get_name_dependents);
     }
 }
