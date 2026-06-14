@@ -219,21 +219,27 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
         let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
 
         // Store-backed (pre-resolved, static) mode: the resolver mutates gem nodes, which would
-        // panic against the disk-backed graph. Resolve by fully qualified name directly from the
-        // store instead — innermost nesting first, then the bare name. POC: skips relative/ancestor
-        // resolution, but stable and correct for the common cases.
+        // panic against the disk-backed graph. Resolve directly from the pre-resolved store instead.
         #[cfg(feature = "redb-store")]
         if graph.is_store_backed() {
-            let mut candidates = Vec::new();
+            // 1. Lexical scope: try `nesting[..depth]::name` from innermost to top level.
             for depth in (0..=nesting.len()).rev() {
                 let mut parts = nesting[..depth].to_vec();
                 parts.push(const_name.clone());
-                candidates.push(parts.join("::"));
-            }
-            for candidate in candidates {
-                let id = DeclarationId::from(candidate.as_str());
+                let id = DeclarationId::from(parts.join("::").as_str());
                 if let Some(decl) = graph.declaration(id) {
                     return Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))).cast_const();
+                }
+            }
+            // 2. Inheritance: the constant may be defined in an ancestor (parent class / included
+            // module / concern) of an enclosing namespace. Walk each enclosing scope's ancestors.
+            let member = rubydex::model::ids::StringId::from(const_name.as_str());
+            for depth in (1..=nesting.len()).rev() {
+                let scope_id = DeclarationId::from(nesting[..depth].join("::").as_str());
+                if let Ok(member_id) = rubydex::query::find_member_in_ancestors(graph, scope_id, member, false) {
+                    if let Some(decl) = graph.declaration(member_id) {
+                        return Box::into_raw(Box::new(CDeclaration::from_declaration(member_id, &decl))).cast_const();
+                    }
                 }
             }
             return ptr::null();
