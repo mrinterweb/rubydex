@@ -159,6 +159,31 @@ impl Graph {
         graph
     }
 
+    /// Switches an existing graph over to a prebuilt store: drops the in-memory node maps (their
+    /// contents live in the store) and serves all subsequent reads from disk. Used by the launcher
+    /// orchestration after a forked child has built the store, so the long-lived server holds the
+    /// bulk index off-heap.
+    #[cfg(feature = "redb-store")]
+    pub fn attach_store(&mut self, store: crate::model::store::RedbStore) {
+        self.declarations = IdentityHashMap::default();
+        self.definitions = IdentityHashMap::default();
+        self.documents = IdentityHashMap::default();
+        self.strings = IdentityHashMap::default();
+        self.names = IdentityHashMap::default();
+        self.constant_references = IdentityHashMap::default();
+        self.method_references = IdentityHashMap::default();
+        self.name_dependents = IdentityHashMap::default();
+        self.pending_work = Vec::new();
+        self.store = Some(store);
+    }
+
+    /// Whether this graph is backed by a disk store (orchestration has attached one).
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn is_store_backed(&self) -> bool {
+        self.store.is_some()
+    }
+
     /// Looks up a declaration by ID, checking the in-memory graph first, then the disk-backed store.
     /// Returns a `DeclRef` that derefs to `&Declaration` regardless of which layer it came from.
     #[must_use]

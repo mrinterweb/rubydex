@@ -78,8 +78,11 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the database cannot be opened.
     pub fn open(path: &Path) -> Result<Self, redb::Error> {
+        // Cap redb's in-heap page cache so a long-lived server stays lean; the OS still caches the
+        // file, so cold reads page in from disk on demand. 32 MiB is plenty for hot nodes.
+        const CACHE_BYTES: usize = 32 * 1024 * 1024;
         Ok(Self {
-            db: Database::open(path)?,
+            db: Database::builder().set_cache_size(CACHE_BYTES).open(path)?,
         })
     }
 
