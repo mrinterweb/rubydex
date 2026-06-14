@@ -641,10 +641,8 @@ pub unsafe extern "C" fn rdx_graph_constant_references_iter_new(pointer: GraphPo
             .constant_references()
             .iter()
             .map(|(id, cref)| {
-                let declaration_id = graph
-                    .names()
-                    .get(cref.name_id())
-                    .and_then(|name_ref| match name_ref {
+                let declaration_id = graph.name(*cref.name_id())
+                    .and_then(|name_ref| match &*name_ref {
                         NameRef::Resolved(resolved) => Some(**resolved.declaration_id()),
                         NameRef::Unresolved(_) => None,
                     })
@@ -934,9 +932,7 @@ fn run_and_finalize_completion(
         .into_iter()
         .map(|candidate| match candidate {
             CompletionCandidate::Declaration(id) => {
-                let decl = graph
-                    .declarations()
-                    .get(&id)
+                let decl = graph.declaration(id)
                     .expect("completion candidate declaration must exist in graph");
                 CCompletionCandidate {
                     kind: CCompletionCandidateKind::Declaration,
@@ -958,9 +954,7 @@ fn run_and_finalize_completion(
                     .cast_const(),
             },
             CompletionCandidate::KeywordArgument(str_id) => {
-                let name_str = graph
-                    .strings()
-                    .get(&str_id)
+                let name_str = graph.string(str_id)
                     .expect("keyword argument string must exist in graph");
                 CCompletionCandidate {
                     kind: CCompletionCandidateKind::KeywordParameter,

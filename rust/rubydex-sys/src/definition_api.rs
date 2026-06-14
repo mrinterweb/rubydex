@@ -316,13 +316,13 @@ where
 {
     let entries = ids
         .into_iter()
-        .map(|def_id| {
+        .filter_map(|def_id| {
             let id = **def_id;
-            let kind = graph
-                .definitions()
-                .get(&DefinitionId::new(id))
-                .map_or_else(|| panic!("Definition not found: {id:?}"), map_definition_to_kind);
-            CDefinition { id, kind }
+            let definition = graph.definition(DefinitionId::new(id))?;
+            Some(CDefinition {
+                id,
+                kind: map_definition_to_kind(&definition),
+            })
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();
@@ -554,11 +554,9 @@ pub unsafe extern "C" fn rdx_method_alias_definition_target(
 
         match rubydex::query::follow_method_alias(graph, def_id) {
             Ok(target_id) => {
-                let target_decl = graph
-                    .declarations()
-                    .get(&target_id)
+                let target_decl = graph.declaration(target_id)
                     .expect("target declaration must exist");
-                let boxed = Box::new(CDeclaration::from_declaration(target_id, target_decl));
+                let boxed = Box::new(CDeclaration::from_declaration(target_id, &target_decl));
 
                 CMethodAliasTargetResult {
                     status: CMethodAliasResolution::Resolved,

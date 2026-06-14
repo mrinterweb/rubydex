@@ -27,9 +27,7 @@ impl CConstantReference {
     /// This function will panic if there's inconsistent data in the graph
     #[must_use]
     pub fn from_id(graph: &Graph, ref_id: ConstantReferenceId) -> Self {
-        let reference = graph
-            .constant_references()
-            .get(&ref_id)
+        let reference = graph.constant_reference(ref_id)
             .expect("Constant reference not found");
 
         let name_ref = graph.name(*reference.name_id()).expect("Name ID should exist");
@@ -139,9 +137,7 @@ pub unsafe extern "C" fn rdx_constant_reference_name(pointer: GraphPointer, refe
         };
         let name = graph.name(*reference.name_id()).expect("Name ID should exist");
 
-        let name_string = graph
-            .strings()
-            .get(name.str())
+        let name_string = graph.string(*name.str())
             .expect("String ID should exist")
             .to_string();
         CString::new(name_string).unwrap().into_raw().cast_const()
@@ -166,8 +162,7 @@ pub unsafe extern "C" fn rdx_method_reference_name(pointer: GraphPointer, refere
             return ptr::null();
         };
         let name = graph
-            .strings()
-            .get(reference.str())
+            .string(*reference.str())
             .expect("Name ID should exist")
             .to_string();
         CString::new(name).unwrap().into_raw().cast_const()
@@ -306,11 +301,10 @@ pub unsafe extern "C" fn rdx_method_reference_location(pointer: GraphPointer, re
             return ptr::null_mut();
         };
         let document = graph
-            .documents()
-            .get(&reference.uri_id())
+            .document(reference.uri_id())
             .expect("Document should exist");
 
-        create_location_for_uri_and_offset(graph, document, reference.offset())
+        create_location_for_uri_and_offset(graph, &document, reference.offset())
     })
 }
 
