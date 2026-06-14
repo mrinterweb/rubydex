@@ -102,25 +102,28 @@ pub struct Graph {
 #[cfg(not(feature = "redb-store"))]
 assert_mem_size!(Graph, 352);
 
-/// A reference to a declaration that is either borrowed from the in-memory graph (`Mem`) or owned,
-/// having been deserialized from the disk-backed store (`Stored`). Derefs to `&Declaration` so most
-/// call sites read identically whether the node lives in memory or on disk.
+/// A reference to a node that is either borrowed from the in-memory graph (`Mem`) or owned, having
+/// been deserialized from the disk-backed store (`Stored`). Derefs to `&T` so most call sites read
+/// identically whether the node lives in memory or on disk.
 #[derive(Debug)]
-pub enum DeclRef<'a> {
-    Mem(&'a Declaration),
-    Stored(Box<Declaration>),
+pub enum NodeRef<'a, T> {
+    Mem(&'a T),
+    Stored(Box<T>),
 }
 
-impl std::ops::Deref for DeclRef<'_> {
-    type Target = Declaration;
+impl<T> std::ops::Deref for NodeRef<'_, T> {
+    type Target = T;
 
-    fn deref(&self) -> &Declaration {
+    fn deref(&self) -> &T {
         match self {
-            DeclRef::Mem(declaration) => declaration,
-            DeclRef::Stored(declaration) => declaration,
+            NodeRef::Mem(node) => node,
+            NodeRef::Stored(node) => node,
         }
     }
 }
+
+/// A borrowed-or-owned reference to a declaration (see [`NodeRef`]).
+pub type DeclRef<'a> = NodeRef<'a, Declaration>;
 
 impl Graph {
     #[must_use]
@@ -161,15 +164,75 @@ impl Graph {
     #[must_use]
     pub fn declaration(&self, id: DeclarationId) -> Option<DeclRef<'_>> {
         if let Some(declaration) = self.declarations.get(&id) {
-            return Some(DeclRef::Mem(declaration));
+            return Some(NodeRef::Mem(declaration));
         }
         #[cfg(feature = "redb-store")]
         if let Some(store) = &self.store {
             if let Ok(Some(declaration)) = store.get_declaration(id) {
-                return Some(DeclRef::Stored(Box::new(declaration)));
+                return Some(NodeRef::Stored(Box::new(declaration)));
             }
         }
         None
+    }
+
+    /// Looks up a definition by ID, checking the in-memory graph first, then the disk-backed store.
+    #[must_use]
+    pub fn definition(&self, id: DefinitionId) -> Option<NodeRef<'_, Definition>> {
+        if let Some(definition) = self.definitions.get(&id) {
+            return Some(NodeRef::Mem(definition));
+        }
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            if let Ok(Some(definition)) = store.get_definition(id) {
+                return Some(NodeRef::Stored(Box::new(definition)));
+            }
+        }
+        None
+    }
+
+    /// Looks up a name node by ID, checking the in-memory graph first, then the disk-backed store.
+    #[must_use]
+    pub fn name(&self, id: NameId) -> Option<NodeRef<'_, NameRef>> {
+        if let Some(name) = self.names.get(&id) {
+            return Some(NodeRef::Mem(name));
+        }
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            if let Ok(Some(name)) = store.get_name(id) {
+                return Some(NodeRef::Stored(Box::new(name)));
+            }
+        }
+        None
+    }
+
+    /// Looks up a constant reference by ID, checking the in-memory graph first, then the store.
+    #[must_use]
+    pub fn constant_reference(&self, id: ConstantReferenceId) -> Option<NodeRef<'_, ConstantReference>> {
+        if let Some(reference) = self.constant_references.get(&id) {
+            return Some(NodeRef::Mem(reference));
+        }
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            if let Ok(Some(reference)) = store.get_constant_reference(id) {
+                return Some(NodeRef::Stored(Box::new(reference)));
+            }
+        }
+        None
+    }
+
+    /// Mutable access to a declaration, copy-on-write promoting it from the disk-backed store into the
+    /// in-memory layer if it is not already resident. Resolution uses this whenever it must mutate a
+    /// node (e.g. recording a workspace class as a descendant of a gem class).
+    pub fn declaration_mut(&mut self, id: DeclarationId) -> Option<&mut Declaration> {
+        #[cfg(feature = "redb-store")]
+        if !self.declarations.contains_key(&id) {
+            if let Some(store) = &self.store {
+                if let Ok(Some(declaration)) = store.get_declaration(id) {
+                    self.declarations.insert(id, declaration);
+                }
+            }
+        }
+        self.declarations.get_mut(&id)
     }
 
     // Returns an immutable reference to the declarations map
