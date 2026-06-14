@@ -218,6 +218,27 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
         let nesting: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(nesting, count).unwrap() };
         let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
 
+        // Store-backed (pre-resolved, static) mode: the resolver mutates gem nodes, which would
+        // panic against the disk-backed graph. Resolve by fully qualified name directly from the
+        // store instead — innermost nesting first, then the bare name. POC: skips relative/ancestor
+        // resolution, but stable and correct for the common cases.
+        #[cfg(feature = "redb-store")]
+        if graph.is_store_backed() {
+            let mut candidates = Vec::new();
+            for depth in (0..=nesting.len()).rev() {
+                let mut parts = nesting[..depth].to_vec();
+                parts.push(const_name.clone());
+                candidates.push(parts.join("::"));
+            }
+            for candidate in candidates {
+                let id = DeclarationId::from(candidate.as_str());
+                if let Some(decl) = graph.declaration(id) {
+                    return Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))).cast_const();
+                }
+            }
+            return ptr::null();
+        }
+
         let Some((name_id, names_to_untrack)) = name_api::nesting_stack_to_name_id(graph, &const_name, nesting) else {
             return ptr::null();
         };
