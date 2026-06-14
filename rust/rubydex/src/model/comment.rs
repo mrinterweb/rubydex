@@ -2,6 +2,7 @@ use crate::assert_mem_size;
 use crate::offset::Offset;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct Comment {
     offset: Offset,
     string: String,

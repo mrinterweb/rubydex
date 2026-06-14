@@ -2,6 +2,7 @@ use crate::assert_mem_size;
 use line_index::WideEncoding;
 
 #[derive(Default, Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum Encoding {
     #[default]
     Utf8,

@@ -15,13 +15,19 @@ use std::path::Path;
 use redb::{Database, ReadableDatabase, TableDefinition};
 
 use crate::model::declaration::Declaration;
+use crate::model::graph::Graph;
 use crate::model::ids::{DeclarationId, StringId};
 use crate::model::string_ref::StringRef;
 
-/// Interned strings, keyed by their `StringId` (`u64`).
+// One redb table per graph node map, all keyed by the node's `u64` content-hash ID.
 const STRINGS: TableDefinition<u64, &[u8]> = TableDefinition::new("strings");
-/// Declaration nodes, keyed by their `DeclarationId` (`u64`).
 const DECLARATIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("declarations");
+const DEFINITIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("definitions");
+const NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("names");
+const CONSTANT_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("constant_references");
+const METHOD_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("method_references");
+const DOCUMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("documents");
+const NAME_DEPENDENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("name_dependents");
 
 /// A redb-backed node store. Stage 0: strings only.
 pub struct RedbStore {
@@ -37,6 +43,41 @@ impl RedbStore {
         Ok(Self {
             db: Database::create(path)?,
         })
+    }
+
+    /// Builds an on-disk store at `path` from a fully-indexed, resolved graph, writing every node
+    /// map into its table in a single write transaction.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be created or any redb transaction fails.
+    pub fn build(path: &Path, graph: &Graph) -> Result<Self, redb::Error> {
+        let db = Database::create(path)?;
+        {
+            let write_txn = db.begin_write()?;
+            // Serialize each `(id, node)` pair into the node's table. The `{{ }}` scoping drops each
+            // table guard before the next table is opened within the same transaction.
+            macro_rules! write_map {
+                ($table:expr, $map:expr) => {{
+                    let mut table = write_txn.open_table($table)?;
+                    for (id, value) in $map {
+                        let bytes = postcard::to_allocvec(value).expect("node should serialize");
+                        table.insert(id.get(), bytes.as_slice())?;
+                    }
+                }};
+            }
+
+            write_map!(DECLARATIONS, graph.declarations());
+            write_map!(DEFINITIONS, graph.definitions());
+            write_map!(STRINGS, graph.strings());
+            write_map!(NAMES, graph.names());
+            write_map!(CONSTANT_REFERENCES, graph.constant_references());
+            write_map!(METHOD_REFERENCES, graph.method_references());
+            write_map!(DOCUMENTS, graph.documents());
+            write_map!(NAME_DEPENDENTS, graph.name_dependents());
+
+            write_txn.commit()?;
+        }
+        Ok(Self { db })
     }
 
     /// Serializes and writes a single interned string.
@@ -149,5 +190,31 @@ mod tests {
         assert_eq!(before, after);
         assert_eq!(loaded.name(), "Foo");
         assert_eq!(loaded.kind(), "Class");
+    }
+
+    #[test]
+    fn build_persists_full_graph() {
+        // `Graph::new()` seeds built-in data (Object, BasicObject, etc.), giving us a real,
+        // non-empty graph to persist without running the indexer.
+        let graph = Graph::new();
+        assert!(!graph.declarations().is_empty(), "built-in data should populate the graph");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        let store = RedbStore::build(&path, &graph).expect("build store");
+
+        // Every declaration in the graph must round-trip byte-identically through the built store.
+        for (id, declaration) in graph.declarations() {
+            let loaded = store
+                .get_declaration(*id)
+                .expect("get")
+                .expect("declaration present in store");
+            assert_eq!(
+                postcard::to_allocvec(declaration).expect("serialize in-memory"),
+                postcard::to_allocvec(&loaded).expect("serialize loaded"),
+                "declaration {} did not round-trip",
+                declaration.name(),
+            );
+        }
     }
 }

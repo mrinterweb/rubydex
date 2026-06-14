@@ -26,6 +26,7 @@ use crate::{query, stats};
 /// An entity whose validity depends on a particular `NameId`.
 /// Used as the value type in the `name_dependents` reverse index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum NameDependent {
     Definition(DefinitionId),
     Reference(ConstantReferenceId),

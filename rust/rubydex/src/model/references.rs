@@ -6,6 +6,7 @@ use crate::{
 
 /// A reference to a constant
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstantReference {
     /// The name ID of this reference
     name_id: NameId,
@@ -55,6 +56,7 @@ impl ConstantReference {
 
 /// A reference to a method
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct MethodRef {
     /// The unqualified name of the method
     str: StringId,

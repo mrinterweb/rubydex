@@ -11,14 +11,25 @@ use crate::model::ids::{ConstantReferenceId, DefinitionId, MethodReferenceId};
 // Represents a document currently loaded into memory. Identified by its unique URI, it holds the edges to all
 // definitions and references discovered in it
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct Document {
     uri: String,
+    // `LineIndex` is a foreign type built from the document source, which the struct does not retain.
+    // POC LIMITATION (Stage 1): it is skipped on serialize and rebuilt empty on load, so line/column
+    // mapping is unavailable for documents materialized from the store. Stage 2 should retain source
+    // (stored on disk in redb) to rebuild an accurate `LineIndex`.
+    #[cfg_attr(feature = "redb-store", serde(skip, default = "empty_line_index"))]
     line_index: LineIndex,
     definition_ids: Vec<DefinitionId>,
     method_reference_ids: Vec<MethodReferenceId>,
     constant_reference_ids: Vec<ConstantReferenceId>,
     diagnostics: Vec<Diagnostic>,
     content_hash: u64,
+}
+
+#[cfg(feature = "redb-store")]
+fn empty_line_index() -> LineIndex {
+    LineIndex::new("")
 }
 assert_mem_size!(Document, 184);
 

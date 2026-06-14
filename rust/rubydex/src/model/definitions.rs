@@ -37,6 +37,7 @@ use crate::{
 
 bitflags! {
     #[derive(Debug, Clone)]
+    #[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize), serde(into = "u8", from = "u8"))]
     pub struct DefinitionFlags: u8 {
         const DEPRECATED = 0b0001;
         const PROMOTABLE = 0b0010;
@@ -44,6 +45,21 @@ bitflags! {
     }
 }
 assert_mem_size!(DefinitionFlags, 1);
+
+// bitflags structs aren't plain data, so serialize/deserialize `DefinitionFlags` as its raw `u8`.
+#[cfg(feature = "redb-store")]
+impl From<DefinitionFlags> for u8 {
+    fn from(flags: DefinitionFlags) -> Self {
+        flags.bits()
+    }
+}
+
+#[cfg(feature = "redb-store")]
+impl From<u8> for DefinitionFlags {
+    fn from(bits: u8) -> Self {
+        Self::from_bits_retain(bits)
+    }
+}
 
 impl DefinitionFlags {
     #[must_use]
@@ -63,6 +79,7 @@ impl DefinitionFlags {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum Definition {
     Class(Box<ClassDefinition>),
     SingletonClass(Box<SingletonClassDefinition>),
@@ -196,6 +213,7 @@ impl Definition {
 /// Represents a mixin: include, prepend, or extend.
 /// During resolution, `Extend` mixins are attached to the singleton class.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum Mixin {
     Include(IncludeDefinition),
     Prepend(PrependDefinition),
@@ -217,6 +235,7 @@ impl Mixin {
 macro_rules! mixin_definition {
     ($variant:ident, $name:ident) => {
         #[derive(Debug, Clone)]
+        #[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
         pub struct $name {
             constant_reference_id: ConstantReferenceId,
         }
@@ -249,6 +268,7 @@ mixin_definition!(Extend, ExtendDefinition);
 /// end
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClassDefinition {
     name_id: NameId,
     uri_id: UriId,
@@ -371,6 +391,7 @@ impl ClassDefinition {
 /// end
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct SingletonClassDefinition {
     /// The name of this singleton class (e.g., `<Foo>` for `class << self` inside `class Foo`)
     name_id: NameId,
@@ -479,6 +500,7 @@ impl SingletonClassDefinition {
 /// end
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModuleDefinition {
     name_id: NameId,
     uri_id: UriId,
@@ -582,6 +604,7 @@ impl ModuleDefinition {
 /// FOO = 1
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstantDefinition {
     name_id: NameId,
     uri_id: UriId,
@@ -656,6 +679,7 @@ impl ConstantDefinition {
 /// ALIAS = Foo
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstantAliasDefinition {
     alias_constant: ConstantDefinition,
     target_name_id: NameId,
@@ -719,6 +743,7 @@ impl ConstantAliasDefinition {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstantVisibilityDefinition {
     receiver: Option<NameId>,
     target: StringId,
@@ -803,6 +828,7 @@ impl ConstantVisibilityDefinition {
 assert_mem_size!(ConstantVisibilityDefinition, 64);
 
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct MethodVisibilityDefinition {
     str_id: StringId,
     visibility: Visibility,
@@ -883,6 +909,7 @@ assert_mem_size!(MethodVisibilityDefinition, 56);
 pub type Signature = Box<[Parameter]>;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum Signatures {
     /// A single method signature, for definitions without overloads.
     ///
@@ -915,6 +942,7 @@ impl Signatures {
 /// end
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct MethodDefinition {
     str_id: StringId,
     uri_id: UriId,
@@ -932,6 +960,7 @@ assert_mem_size!(MethodDefinition, 104);
 
 /// The receiver of a singleton method definition.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum Receiver {
     /// `def self.foo` - receiver is the enclosing definition (class, module, singleton class or DSL)
     SelfReceiver(DefinitionId),
@@ -1027,6 +1056,7 @@ impl MethodDefinition {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum Parameter {
     RequiredPositional(ParameterStruct),
     OptionalPositional(ParameterStruct),
@@ -1058,6 +1088,7 @@ impl Parameter {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ParameterStruct {
     offset: Offset,
     str: StringId,
@@ -1088,6 +1119,7 @@ impl ParameterStruct {
 /// attr_accessor :foo
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttrAccessorDefinition {
     str_id: StringId,
     uri_id: UriId,
@@ -1169,6 +1201,7 @@ impl AttrAccessorDefinition {
 /// attr_reader :foo
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttrReaderDefinition {
     str_id: StringId,
     uri_id: UriId,
@@ -1250,6 +1283,7 @@ impl AttrReaderDefinition {
 /// attr_writer :foo
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttrWriterDefinition {
     str_id: StringId,
     uri_id: UriId,
@@ -1331,6 +1365,7 @@ impl AttrWriterDefinition {
 /// $foo = 1
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct GlobalVariableDefinition {
     str_id: StringId,
     uri_id: UriId,
@@ -1404,6 +1439,7 @@ impl GlobalVariableDefinition {
 /// @foo = 1
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct InstanceVariableDefinition {
     str_id: StringId,
     uri_id: UriId,
@@ -1477,6 +1513,7 @@ impl InstanceVariableDefinition {
 /// @@foo = 1
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClassVariableDefinition {
     str_id: StringId,
     uri_id: UriId,
@@ -1544,6 +1581,7 @@ impl ClassVariableDefinition {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct MethodAliasDefinition {
     new_name_str_id: StringId,
     old_name_str_id: StringId,
@@ -1634,6 +1672,7 @@ impl MethodAliasDefinition {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct GlobalVariableAliasDefinition {
     new_name_str_id: StringId,
     old_name_str_id: StringId,
