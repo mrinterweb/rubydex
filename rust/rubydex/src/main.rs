@@ -56,6 +56,26 @@ struct Args {
         help = "Write orphan definitions report to specified file"
     )]
     report_orphans: Option<String>,
+
+    #[cfg(feature = "redb-store")]
+    #[arg(
+        long = "build-store",
+        value_name = "PATH",
+        help = "Persist the resolved graph to a redb store at PATH"
+    )]
+    build_store: Option<String>,
+
+    #[cfg(feature = "redb-store")]
+    #[arg(
+        long = "open-store",
+        value_name = "PATH",
+        help = "Open a prebuilt redb store at PATH and answer queries from disk instead of indexing"
+    )]
+    open_store: Option<String>,
+
+    #[cfg(feature = "redb-store")]
+    #[arg(long = "query", value_name = "FQN", help = "Fully qualified name to look up (with --open-store)")]
+    query: Option<String>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -111,6 +131,21 @@ fn main() {
         }
     }
 
+    // Disk-backed query path: open a prebuilt store and answer queries without indexing anything.
+    // The resident memory reported here reflects only what the query touched on disk.
+    #[cfg(feature = "redb-store")]
+    if let Some(path) = args.open_store.as_deref() {
+        let store = rubydex::model::store::RedbStore::open(std::path::Path::new(path)).expect("open store");
+        if let Some(fqn) = args.query.as_deref() {
+            match store.definition_location(fqn).expect("query store") {
+                Some((uri, start)) => println!("{fqn} -> {uri} @ {start}"),
+                None => println!("{fqn} -> not found"),
+            }
+        }
+        MemoryStats::print_memory_usage();
+        std::process::exit(0);
+    }
+
     // Listing
 
     let (file_paths, errors) = time_it!(listing, {
@@ -148,6 +183,13 @@ fn main() {
 
     if let Some(StopAfter::Resolution) = args.stop_after {
         return exit(args.stats);
+    }
+
+    // Persist the resolved graph to an on-disk redb store.
+    #[cfg(feature = "redb-store")]
+    if let Some(path) = args.build_store.as_deref() {
+        rubydex::model::store::RedbStore::build(std::path::Path::new(path), &graph).expect("build store");
+        println!("Built redb store at {path}");
     }
 
     // Integrity check
