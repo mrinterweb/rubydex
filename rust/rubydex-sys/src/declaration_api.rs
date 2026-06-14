@@ -133,7 +133,7 @@ pub unsafe extern "C" fn rdx_graph_declarations_iter_free(iter: *mut Declaration
 pub unsafe extern "C" fn rdx_declaration_name(pointer: GraphPointer, name_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let name_id = DeclarationId::new(name_id);
-        if let Some(decl) = graph.declarations().get(&name_id) {
+        if let Some(decl) = graph.declaration(name_id) {
             CString::new(decl.name()).unwrap().into_raw().cast_const()
         } else {
             ptr::null()
@@ -162,13 +162,16 @@ pub unsafe extern "C" fn rdx_declaration_member(
 
     with_graph(pointer, |graph| {
         let name_id = DeclarationId::new(name_id);
-        if let Some(Declaration::Namespace(decl)) = graph.declarations().get(&name_id) {
-            let member_id = StringId::from(member_str.as_str());
+        if let Some(decl) = graph.declaration(name_id) {
+            if let Some(namespace) = decl.as_namespace() {
+                let member_id = StringId::from(member_str.as_str());
 
-            if let Some(member_decl_id) = decl.member(&member_id) {
-                let member_decl = graph.declarations().get(member_decl_id).unwrap();
-                return Box::into_raw(Box::new(CDeclaration::from_declaration(*member_decl_id, member_decl)))
-                    .cast_const();
+                if let Some(member_decl_id) = namespace.member(&member_id).copied() {
+                    if let Some(member_decl) = graph.declaration(member_decl_id) {
+                        return Box::into_raw(Box::new(CDeclaration::from_declaration(member_decl_id, &member_decl)))
+                            .cast_const();
+                    }
+                }
             }
         }
 
@@ -208,8 +211,8 @@ pub unsafe extern "C" fn rdx_declaration_find_member(
             ),
         };
 
-        let member_decl = graph.declarations().get(&member_decl_id).unwrap();
-        Box::into_raw(Box::new(CDeclaration::from_declaration(member_decl_id, member_decl))).cast_const()
+        let member_decl = graph.declaration(member_decl_id).unwrap();
+        Box::into_raw(Box::new(CDeclaration::from_declaration(member_decl_id, &member_decl))).cast_const()
     })
 }
 
@@ -227,7 +230,7 @@ pub unsafe extern "C" fn rdx_declaration_find_member(
 pub unsafe extern "C" fn rdx_declaration_unqualified_name(pointer: GraphPointer, name_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let name_id = DeclarationId::new(name_id);
-        if let Some(decl) = graph.declarations().get(&name_id) {
+        if let Some(decl) = graph.declaration(name_id) {
             CString::new(decl.unqualified_name()).unwrap().into_raw().cast_const()
         } else {
             ptr::null()
@@ -253,7 +256,7 @@ pub unsafe extern "C" fn rdx_declaration_definitions_iter_new(
     // Snapshot the IDs and kinds at iterator creation to avoid borrowing across FFI calls
     with_graph(pointer, |graph| {
         let decl_id = DeclarationId::new(decl_id);
-        if let Some(decl) = graph.declarations().get(&decl_id) {
+        if let Some(decl) = graph.declaration(decl_id) {
             rdx_definitions_iter_new_from_ids(graph, decl.definitions())
         } else {
             DefinitionsIter::new(Vec::<_>::new().into_boxed_slice())
@@ -273,18 +276,17 @@ pub unsafe extern "C" fn rdx_declaration_definitions_iter_new(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_declaration_singleton_class(pointer: GraphPointer, decl_id: u64) -> *const CDeclaration {
     with_graph(pointer, |graph| {
-        let declaration = graph
-            .declarations()
-            .get(&DeclarationId::new(decl_id))
+        let singleton_id = graph
+            .declaration(DeclarationId::new(decl_id))
             .unwrap()
             .as_namespace()
-            .unwrap();
+            .unwrap()
+            .singleton_class()
+            .copied();
 
-        if let Some(singleton_id) = declaration.singleton_class() {
-            Box::into_raw(Box::new(CDeclaration::from_declaration(
-                *singleton_id,
-                graph.declarations().get(singleton_id).unwrap(),
-            )))
+        if let Some(singleton_id) = singleton_id {
+            let singleton = graph.declaration(singleton_id).unwrap();
+            Box::into_raw(Box::new(CDeclaration::from_declaration(singleton_id, &singleton))).cast_const()
         } else {
             ptr::null()
         }
@@ -304,15 +306,14 @@ pub unsafe extern "C" fn rdx_declaration_singleton_class(pointer: GraphPointer, 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_declaration_owner(pointer: GraphPointer, decl_id: u64) -> *const CDeclaration {
     with_graph(pointer, |graph| {
-        let Some(declaration) = graph.declarations().get(&DeclarationId::new(decl_id)) else {
+        let Some(declaration) = graph.declaration(DeclarationId::new(decl_id)) else {
             return ptr::null();
         };
         let owner_id = *declaration.owner_id();
-        Box::into_raw(Box::new(CDeclaration::from_declaration(
-            owner_id,
-            graph.declarations().get(&owner_id).unwrap(),
-        )))
-        .cast_const()
+        let Some(owner) = graph.declaration(owner_id) else {
+            return ptr::null();
+        };
+        Box::into_raw(Box::new(CDeclaration::from_declaration(owner_id, &owner))).cast_const()
     })
 }
 
@@ -347,18 +348,20 @@ pub unsafe extern "C" fn rdx_declaration_ancestors(pointer: GraphPointer, decl_i
     let declarations = with_graph(pointer, |graph| {
         let declaration_id = DeclarationId::new(decl_id);
 
-        let Some(Declaration::Namespace(declaration)) = graph.declarations().get(&declaration_id) else {
+        let Some(declaration) = graph.declaration(declaration_id) else {
+            return Vec::new();
+        };
+        let Some(namespace) = declaration.as_namespace() else {
             return Vec::new();
         };
 
-        declaration
+        namespace
             .ancestors()
             .into_iter()
             .filter_map(|ancestor| match ancestor {
-                Ancestor::Complete(id) => Some(CDeclaration::from_declaration(
-                    *id,
-                    graph.declarations().get(id).unwrap(),
-                )),
+                Ancestor::Complete(id) => graph
+                    .declaration(*id)
+                    .map(|decl| CDeclaration::from_declaration(*id, &decl)),
                 Ancestor::Partial(_) => None,
             })
             .collect::<Vec<_>>()
@@ -381,14 +384,17 @@ pub unsafe extern "C" fn rdx_declaration_descendants(pointer: GraphPointer, decl
     let declarations = with_graph(pointer, |graph| {
         let declaration_id = DeclarationId::new(decl_id);
 
-        let Some(Declaration::Namespace(declaration)) = graph.declarations().get(&declaration_id) else {
+        let Some(declaration) = graph.declaration(declaration_id) else {
+            return Vec::new();
+        };
+        let Some(namespace) = declaration.as_namespace() else {
             return Vec::new();
         };
 
-        declaration
+        namespace
             .descendants()
             .iter()
-            .map(|id| CDeclaration::from_declaration(*id, graph.declarations().get(id).unwrap()))
+            .filter_map(|id| graph.declaration(*id).map(|decl| CDeclaration::from_declaration(*id, &decl)))
             .collect::<Vec<_>>()
     });
 
@@ -409,14 +415,17 @@ pub unsafe extern "C" fn rdx_declaration_members(pointer: GraphPointer, decl_id:
     let declarations = with_graph(pointer, |graph| {
         let declaration_id = DeclarationId::new(decl_id);
 
-        let Some(Declaration::Namespace(declaration)) = graph.declarations().get(&declaration_id) else {
+        let Some(declaration) = graph.declaration(declaration_id) else {
+            return Vec::new();
+        };
+        let Some(namespace) = declaration.as_namespace() else {
             return Vec::new();
         };
 
-        declaration
+        namespace
             .members()
             .values()
-            .map(|id| CDeclaration::from_declaration(*id, graph.declarations().get(id).unwrap()))
+            .filter_map(|id| graph.declaration(*id).map(|decl| CDeclaration::from_declaration(*id, &decl)))
             .collect::<Vec<_>>()
     });
 
@@ -446,8 +455,8 @@ pub unsafe extern "C" fn rdx_constant_alias_target(pointer: GraphPointer, decl_i
             return ptr::null();
         };
 
-        let target_decl = graph.declarations().get(&target_id).unwrap();
-        Box::into_raw(Box::new(CDeclaration::from_declaration(target_id, target_decl))).cast_const()
+        let target_decl = graph.declaration(target_id).unwrap();
+        Box::into_raw(Box::new(CDeclaration::from_declaration(target_id, &target_decl))).cast_const()
     })
 }
 
@@ -465,7 +474,7 @@ pub unsafe extern "C" fn rdx_declaration_constant_references_iter_new(
     with_graph(pointer, |graph| {
         let decl_id_typed = DeclarationId::new(declaration_id);
 
-        let Some(decl) = graph.declarations().get(&decl_id_typed) else {
+        let Some(decl) = graph.declaration(decl_id_typed) else {
             return ptr::null_mut();
         };
         let Some(constant_references) = decl.constant_references() else {
@@ -497,11 +506,14 @@ pub unsafe extern "C" fn rdx_declaration_method_references_iter_new(
 ) -> *mut MethodReferencesIter {
     with_graph(pointer, |graph| {
         let decl_id = DeclarationId::new(decl_id);
-        let Some(Declaration::Method(decl)) = graph.declarations().get(&decl_id) else {
+        let Some(decl) = graph.declaration(decl_id) else {
+            return ptr::null_mut();
+        };
+        let Some(method) = decl.as_method() else {
             return ptr::null_mut();
         };
 
-        let entries: Vec<_> = decl
+        let entries: Vec<_> = method
             .references()
             .iter()
             .map(|ref_id| CMethodReference { id: **ref_id })
