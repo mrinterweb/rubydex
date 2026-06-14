@@ -4,6 +4,7 @@ use std::fmt::Display;
 use crate::assert_mem_size;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum Visibility {
     Public,
     Protected,
