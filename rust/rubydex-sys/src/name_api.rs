@@ -97,7 +97,7 @@ mod tests {
         )
         .unwrap();
 
-        let const_name = graph.names().get(&name_id).unwrap();
+        let const_name = graph.name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
 
         let some_name = graph
@@ -133,7 +133,7 @@ mod tests {
 
         let (name_id, _) = nesting_stack_to_name_id(&mut graph, "::CONST", vec!["Foo".into()]).unwrap();
 
-        let const_name = graph.names().get(&name_id).unwrap();
+        let const_name = graph.name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
         assert!(const_name.parent_scope().is_top_level());
 
@@ -149,7 +149,7 @@ mod tests {
 
         let (name_id, _) = nesting_stack_to_name_id(&mut graph, "CONST", vec!["Foo".into(), "<Foo>".into()]).unwrap();
 
-        let const_name = graph.names().get(&name_id).unwrap();
+        let const_name = graph.name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
 
         // The nesting should be <Foo> with an Attached parent scope
@@ -163,7 +163,7 @@ mod tests {
 
         // The attached parent should be Foo
         let foo_id = singleton_name.parent_scope().expect("Attached should have an id");
-        let foo_name = graph.names().get(&foo_id).unwrap();
+        let foo_name = graph.name(foo_id).unwrap();
         assert_eq!(StringId::from("Foo"), *foo_name.str());
     }
 
@@ -173,7 +173,7 @@ mod tests {
 
         let (name_id, _) = nesting_stack_to_name_id(&mut graph, "CONST", vec!["Foo".into(), "::Bar".into()]).unwrap();
 
-        let const_name = graph.names().get(&name_id).unwrap();
+        let const_name = graph.name(name_id).unwrap();
         assert_eq!(StringId::from("CONST"), *const_name.str());
         assert!(const_name.parent_scope().is_none());
 

@@ -155,8 +155,8 @@ pub unsafe extern "C" fn rdx_graph_declarations_search(
         query::declaration_search(graph, &query_refs, &query::MatchMode::Exact)
             .into_iter()
             .filter_map(|id| {
-                let decl = graph.declarations().get(&id)?;
-                Some(CDeclaration::from_declaration(id, decl))
+                let decl = graph.declaration(id)?;
+                Some(CDeclaration::from_declaration(id, &decl))
             })
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
@@ -190,8 +190,8 @@ pub unsafe extern "C" fn rdx_graph_declarations_fuzzy_search(
         query::declaration_search(graph, &query_refs, &query::MatchMode::Fuzzy)
             .into_iter()
             .filter_map(|id| {
-                let decl = graph.declarations().get(&id)?;
-                Some(CDeclaration::from_declaration(id, decl))
+                let decl = graph.declaration(id)?;
+                Some(CDeclaration::from_declaration(id, &decl))
             })
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
@@ -226,8 +226,8 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
 
         let declaration = match resolver.resolve_constant(name_id) {
             Some(id) => {
-                let decl = graph.declarations().get(&id).unwrap();
-                Box::into_raw(Box::new(CDeclaration::from_declaration(id, decl))).cast_const()
+                let decl = graph.declaration(id).unwrap();
+                Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))).cast_const()
             }
             None => ptr::null(),
         };
@@ -557,7 +557,7 @@ pub unsafe extern "C" fn rdx_graph_declarations_iter_new(pointer: GraphPointer) 
         graph
             .declarations()
             .iter()
-            .map(|(id, decl)| CDeclaration::from_declaration(*id, decl))
+            .map(|(id, decl)| CDeclaration::from_declaration(*id, &decl))
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
     });
@@ -919,7 +919,7 @@ fn run_and_finalize_completion(
                     .expect("completion candidate declaration must exist in graph");
                 CCompletionCandidate {
                     kind: CCompletionCandidateKind::Declaration,
-                    declaration: Box::into_raw(Box::new(CDeclaration::from_declaration(id, decl))),
+                    declaration: Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))),
                     name: ptr::null(),
                     documentation: ptr::null(),
                 }

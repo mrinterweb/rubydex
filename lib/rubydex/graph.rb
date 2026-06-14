@@ -12,16 +12,12 @@ module Rubydex
       self.workspace_path = workspace_path if workspace_path
     end
 
-<<<<<<< HEAD
-    # Index all files and dependencies of the workspace that exists in `workspace_path`
-=======
-    # Index all files and dependencies of the workspace that exists in `@workspace_path`.
+    # Index all files and dependencies of the workspace that exists in `workspace_path`.
     #
     # Disk-backed orchestration: build (or reuse) a redb store of the whole resolved graph in a
     # FORKED child so its peak indexing memory is reclaimed when the child exits, then attach the
     # store to this graph. The long-lived server therefore holds the bulk index off-heap and serves
     # reads from disk. Falls back to the in-memory path if the store can't be built.
->>>>>>> d98fbf0 (Orchestrate a forked store build so the server runs lean (Stage D))
     #: -> Array[String]
     def index_workspace
       cache = store_cache_path

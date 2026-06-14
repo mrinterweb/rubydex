@@ -245,6 +245,51 @@ impl Graph {
         None
     }
 
+    /// Looks up a method reference by ID, checking the in-memory graph first, then the store.
+    #[must_use]
+    pub fn method_reference(&self, id: MethodReferenceId) -> Option<NodeRef<'_, MethodRef>> {
+        if let Some(reference) = self.method_references.get(&id) {
+            return Some(NodeRef::Mem(reference));
+        }
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            if let Ok(Some(reference)) = store.get_method_reference(id) {
+                return Some(NodeRef::Stored(Box::new(reference)));
+            }
+        }
+        None
+    }
+
+    /// Looks up a document by ID, checking the in-memory graph first, then the store.
+    #[must_use]
+    pub fn document(&self, id: UriId) -> Option<NodeRef<'_, Document>> {
+        if let Some(document) = self.documents.get(&id) {
+            return Some(NodeRef::Mem(document));
+        }
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            if let Ok(Some(document)) = store.get_document(id) {
+                return Some(NodeRef::Stored(Box::new(document)));
+            }
+        }
+        None
+    }
+
+    /// Looks up an interned string by ID, checking the in-memory graph first, then the store.
+    #[must_use]
+    pub fn string(&self, id: StringId) -> Option<NodeRef<'_, StringRef>> {
+        if let Some(string) = self.strings.get(&id) {
+            return Some(NodeRef::Mem(string));
+        }
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            if let Ok(Some(string)) = store.get_string(id) {
+                return Some(NodeRef::Stored(Box::new(string)));
+            }
+        }
+        None
+    }
+
     /// Mutable access to a declaration, copy-on-write promoting it from the disk-backed store into the
     /// in-memory layer if it is not already resident. Resolution uses this whenever it must mutate a
     /// node (e.g. recording a workspace class as a descendant of a gem class).

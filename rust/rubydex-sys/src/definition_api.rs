@@ -74,8 +74,8 @@ pub(crate) fn map_definition_to_kind(defn: &Definition) -> DefinitionKind {
 pub unsafe extern "C" fn rdx_definition_kind(pointer: GraphPointer, definition_id: u64) -> DefinitionKind {
     with_graph(pointer, |graph| {
         let definition_id = DefinitionId::new(definition_id);
-        if let Some(defn) = graph.definitions().get(&definition_id) {
-            map_definition_to_kind(defn)
+        if let Some(defn) = graph.definition(definition_id) {
+            map_definition_to_kind(&defn)
         } else {
             panic!("Definition not found: {definition_id:?}");
         }
@@ -96,10 +96,10 @@ pub unsafe extern "C" fn rdx_definition_kind(pointer: GraphPointer, definition_i
 pub unsafe extern "C" fn rdx_definition_name(pointer: GraphPointer, definition_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        if let Some(defn) = graph.definitions().get(&def_id) {
-            let string_id = graph.definition_string_id(defn);
+        if let Some(defn) = graph.definition(def_id) {
+            let string_id = graph.definition_string_id(&defn);
 
-            if let Some(name) = graph.strings().get(&string_id) {
+            if let Some(name) = graph.string(string_id) {
                 CString::new(name.as_str()).unwrap().into_raw().cast_const()
             } else {
                 ptr::null()
@@ -170,19 +170,19 @@ pub struct CommentArray {
 pub unsafe extern "C" fn rdx_definition_comments(pointer: GraphPointer, definition_id: u64) -> *mut CommentArray {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let Some(defn) = graph.definitions().get(&def_id) else {
+        let Some(defn) = graph.definition(def_id) else {
             return ptr::null_mut();
         };
 
         let uri_id = *defn.uri_id();
-        let document = graph.documents().get(&uri_id).expect("document should exist");
+        let document = graph.document(uri_id).expect("document should exist");
 
         let mut entries = defn
             .comments()
             .iter()
             .map(|c| CommentEntry {
                 string: CString::new(c.string().as_str()).unwrap().into_raw().cast_const(),
-                location: create_location_for_uri_and_offset(graph, document, c.offset()),
+                location: create_location_for_uri_and_offset(graph, &document, c.offset()),
             })
             .collect::<Vec<CommentEntry>>()
             .into_boxed_slice();
@@ -244,12 +244,12 @@ pub unsafe extern "C" fn rdx_definition_comments_free(ptr: *mut CommentArray) {
 pub unsafe extern "C" fn rdx_definition_location(pointer: GraphPointer, definition_id: u64) -> *mut Location {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let Some(defn) = graph.definitions().get(&def_id) else {
+        let Some(defn) = graph.definition(def_id) else {
             return ptr::null_mut();
         };
 
-        let document = graph.documents().get(defn.uri_id()).expect("document should exist");
-        create_location_for_uri_and_offset(graph, document, defn.offset())
+        let document = graph.document(*defn.uri_id()).expect("document should exist");
+        create_location_for_uri_and_offset(graph, &document, defn.offset())
     })
 }
 
@@ -270,11 +270,11 @@ pub unsafe extern "C" fn rdx_definition_declaration(pointer: GraphPointer, defin
         let Some(decl_id) = graph.definition_id_to_declaration_id(def_id) else {
             return ptr::null();
         };
-        let Some(decl) = graph.declarations().get(decl_id) else {
+        let Some(decl) = graph.declaration(*decl_id) else {
             return ptr::null();
         };
 
-        Box::into_raw(Box::new(CDeclaration::from_declaration(*decl_id, decl))).cast_const()
+        Box::into_raw(Box::new(CDeclaration::from_declaration(*decl_id, &decl))).cast_const()
     })
 }
 
@@ -291,7 +291,7 @@ pub unsafe extern "C" fn rdx_definition_declaration(pointer: GraphPointer, defin
 pub unsafe extern "C" fn rdx_definition_lexical_nesting_id(pointer: GraphPointer, definition_id: u64) -> *const u64 {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let Some(defn) = graph.definitions().get(&def_id) else {
+        let Some(defn) = graph.definition(def_id) else {
             panic!("Definition not found: {definition_id:?}");
         };
 
@@ -342,7 +342,7 @@ where
 pub unsafe extern "C" fn rdx_definition_is_deprecated(pointer: GraphPointer, definition_id: u64) -> bool {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let defn = graph.definitions().get(&def_id).expect("definition not found");
+        let defn = graph.definition(def_id).expect("definition not found");
         defn.is_deprecated()
     })
 }
@@ -363,14 +363,14 @@ pub unsafe extern "C" fn rdx_definition_is_deprecated(pointer: GraphPointer, def
 pub unsafe extern "C" fn rdx_definition_name_location(pointer: GraphPointer, definition_id: u64) -> *mut Location {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let Some(defn) = graph.definitions().get(&def_id) else {
+        let Some(defn) = graph.definition(def_id) else {
             return ptr::null_mut();
         };
         let Some(name_offset) = defn.name_offset() else {
             return ptr::null_mut();
         };
-        let document = graph.documents().get(defn.uri_id()).expect("document should exist");
-        create_location_for_uri_and_offset(graph, document, name_offset)
+        let document = graph.document(*defn.uri_id()).expect("document should exist");
+        create_location_for_uri_and_offset(graph, &document, name_offset)
     })
 }
 
@@ -390,9 +390,9 @@ pub unsafe extern "C" fn rdx_class_definition_superclass(
 ) -> *const CConstantReference {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let defn = graph.definitions().get(&def_id).expect("Definition not found");
+        let defn = graph.definition(def_id).expect("Definition not found");
 
-        let Definition::Class(class_def) = defn else {
+        let Definition::Class(class_def) = &*defn else {
             panic!("Definition is not a class: {definition_id}");
         };
 
@@ -473,9 +473,9 @@ fn map_mixin_kind(mixin: &Mixin) -> MixinKind {
 pub unsafe extern "C" fn rdx_definition_mixins(pointer: GraphPointer, definition_id: u64) -> *mut MixinsIter {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let defn = graph.definitions().get(&def_id).expect("Definition not found");
+        let defn = graph.definition(def_id).expect("Definition not found");
 
-        let mixins = match defn {
+        let mixins = match &*defn {
             Definition::Class(class_def) => class_def.mixins(),
             Definition::Module(mod_def) => mod_def.mixins(),
             Definition::SingletonClass(singleton_def) => singleton_def.mixins(),
