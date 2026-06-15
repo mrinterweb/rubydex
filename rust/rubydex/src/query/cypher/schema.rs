@@ -477,7 +477,7 @@ pub fn node_name(graph: &Graph, node: NodeRef) -> String {
             .definitions()
             .get(&id)
             .and_then(|definition| graph.definition_to_declaration_id(definition))
-            .and_then(|decl_id| graph.declarations().get(decl_id))
+            .and_then(|decl_id| graph.declarations().get(&decl_id))
             .map_or_else(String::new, |declaration| declaration.name().to_string()),
         NodeRef::Document(id) => graph.documents().get(&id).map_or_else(String::new, |document| {
             document.file_name().unwrap_or_else(|| document.uri().to_string())
@@ -602,7 +602,7 @@ pub fn expand_out(graph: &Graph, node: NodeRef, rel: RelType) -> Vec<NodeRef> {
             .definitions()
             .get(&def_id)
             .and_then(|definition| graph.definition_to_declaration_id(definition))
-            .map(|decl_id| vec![NodeRef::Declaration(*decl_id)])
+            .map(|decl_id| vec![NodeRef::Declaration(decl_id)])
             .unwrap_or_default(),
         (NodeRef::Definition(def_id), RelType::Contains) => definition_children(graph, def_id),
         (NodeRef::Declaration(decl_id), RelType::HasParent) => superclasses(graph, decl_id),
@@ -759,7 +759,7 @@ fn descendants(graph: &Graph, decl_id: DeclarationId) -> Vec<NodeRef> {
 /// Resolves a constant reference to the declaration of the name it points to.
 fn resolve_ref(graph: &Graph, ref_id: ConstantReferenceId) -> Option<DeclarationId> {
     let constant_ref = graph.constant_references().get(&ref_id)?;
-    graph.name_id_to_declaration_id(*constant_ref.name_id()).copied()
+    graph.name_id_to_declaration_id(*constant_ref.name_id())
 }
 
 /// Resolves a constant reference to a namespace declaration, following constant aliases.

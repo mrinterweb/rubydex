@@ -419,7 +419,7 @@ impl Graph {
         declaration
             .definitions()
             .iter()
-            .all(|def_id| match self.definitions.get(def_id) {
+            .all(|def_id| match self.definition(*def_id).as_deref() {
                 Some(Definition::Constant(c)) => c.flags().is_promotable(),
                 _ => true,
             })
@@ -465,41 +465,24 @@ impl Graph {
     /// This will panic if there's inconsistent data in the graph
     #[must_use]
     pub fn definition_string_id(&self, definition: &Definition) -> StringId {
-        let id = match definition {
-            Definition::Class(it) => {
-                let name = self.names.get(it.name_id()).unwrap();
-                name.str()
-            }
-            Definition::SingletonClass(it) => {
-                let name = self.names.get(it.name_id()).unwrap();
-                name.str()
-            }
-            Definition::Module(it) => {
-                let name = self.names.get(it.name_id()).unwrap();
-                name.str()
-            }
-            Definition::Constant(it) => {
-                let name = self.names.get(it.name_id()).unwrap();
-                name.str()
-            }
-            Definition::ConstantAlias(it) => {
-                let name = self.names.get(it.name_id()).unwrap();
-                name.str()
-            }
-            Definition::ConstantVisibility(it) => it.target(),
-            Definition::MethodVisibility(it) => it.str_id(),
-            Definition::GlobalVariable(it) => it.str_id(),
-            Definition::InstanceVariable(it) => it.str_id(),
-            Definition::ClassVariable(it) => it.str_id(),
-            Definition::AttrAccessor(it) => it.str_id(),
-            Definition::AttrReader(it) => it.str_id(),
-            Definition::AttrWriter(it) => it.str_id(),
-            Definition::Method(it) => it.str_id(),
-            Definition::MethodAlias(it) => it.new_name_str_id(),
-            Definition::GlobalVariableAlias(it) => it.new_name_str_id(),
-        };
-
-        *id
+        match definition {
+            Definition::Class(it) => *self.name(*it.name_id()).unwrap().str(),
+            Definition::SingletonClass(it) => *self.name(*it.name_id()).unwrap().str(),
+            Definition::Module(it) => *self.name(*it.name_id()).unwrap().str(),
+            Definition::Constant(it) => *self.name(*it.name_id()).unwrap().str(),
+            Definition::ConstantAlias(it) => *self.name(*it.name_id()).unwrap().str(),
+            Definition::ConstantVisibility(it) => *it.target(),
+            Definition::MethodVisibility(it) => *it.str_id(),
+            Definition::GlobalVariable(it) => *it.str_id(),
+            Definition::InstanceVariable(it) => *it.str_id(),
+            Definition::ClassVariable(it) => *it.str_id(),
+            Definition::AttrAccessor(it) => *it.str_id(),
+            Definition::AttrReader(it) => *it.str_id(),
+            Definition::AttrWriter(it) => *it.str_id(),
+            Definition::Method(it) => *it.str_id(),
+            Definition::MethodAlias(it) => *it.new_name_str_id(),
+            Definition::GlobalVariableAlias(it) => *it.new_name_str_id(),
+        }
     }
 
     // Returns an immutable reference to the strings map
@@ -528,13 +511,14 @@ impl Graph {
     ///
     /// Panics if the definition is not found
     #[must_use]
-    pub fn definition_id_to_declaration_id(&self, definition_id: DefinitionId) -> Option<&DeclarationId> {
-        self.definition_to_declaration_id(self.definitions.get(&definition_id).unwrap())
+    pub fn definition_id_to_declaration_id(&self, definition_id: DefinitionId) -> Option<DeclarationId> {
+        let definition = self.definition(definition_id)?;
+        self.definition_to_declaration_id(&definition)
     }
 
     #[must_use]
-    pub fn definition_to_declaration_id(&self, definition: &Definition) -> Option<&DeclarationId> {
-        let (nesting_name_id, member_str_id) = match definition {
+    pub fn definition_to_declaration_id(&self, definition: &Definition) -> Option<DeclarationId> {
+        let (nesting_name_id, member_str_id): (Option<NameId>, &StringId) = match definition {
             Definition::Class(it) => {
                 return self.name_id_to_declaration_id(*it.name_id());
             }
@@ -552,7 +536,6 @@ impl Graph {
             }
             Definition::ConstantVisibility(it) => (
                 it.receiver()
-                    .as_ref()
                     .or_else(|| self.find_enclosing_namespace_name_id(it.lexical_nesting_id().as_ref())),
                 it.target(),
             ),
@@ -607,7 +590,7 @@ impl Graph {
                     Some(Receiver::SelfReceiver(def_id)) => {
                         return self.find_self_receiver_declaration(*def_id, *it.new_name_str_id());
                     }
-                    Some(Receiver::ConstantReceiver(name_id)) => Some(name_id),
+                    Some(Receiver::ConstantReceiver(name_id)) => Some(*name_id),
                     None => self.find_enclosing_namespace_name_id(it.lexical_nesting_id().as_ref()),
                 };
 
@@ -616,28 +599,28 @@ impl Graph {
         };
 
         let nesting_declaration_id = match nesting_name_id {
-            Some(name_id) => self.name_id_to_declaration_id(*name_id),
-            None => Some(&*OBJECT_ID),
-        }?;
+            Some(name_id) => self.name_id_to_declaration_id(name_id)?,
+            None => *OBJECT_ID,
+        };
 
-        self.declarations
-            .get(nesting_declaration_id)?
+        self.declaration(nesting_declaration_id)?
             .as_namespace()?
             .member(member_str_id)
+            .copied()
     }
 
     /// Finds the closest namespace name ID to connect a definition to its declaration
-    fn find_enclosing_namespace_name_id(&self, starting_id: Option<&DefinitionId>) -> Option<&NameId> {
-        let mut current = starting_id;
+    fn find_enclosing_namespace_name_id(&self, starting_id: Option<&DefinitionId>) -> Option<NameId> {
+        let mut current = starting_id.copied();
 
         while let Some(id) = current {
-            let def = self.definitions.get(id).unwrap();
+            let def = self.definition(id)?;
 
             if let Some(name_id) = def.name_id() {
-                return Some(name_id);
+                return Some(*name_id);
             }
 
-            current = def.lexical_nesting_id().as_ref();
+            current = *def.lexical_nesting_id();
         }
 
         None
@@ -647,48 +630,39 @@ impl Graph {
     fn find_singleton_method_visibility_declaration(
         &self,
         definition: &MethodVisibilityDefinition,
-    ) -> Option<&DeclarationId> {
+    ) -> Option<DeclarationId> {
         let nesting_name_id = self.find_enclosing_namespace_name_id(definition.lexical_nesting_id().as_ref());
         let nesting_declaration_id = match nesting_name_id {
-            Some(name_id) => self.name_id_to_declaration_id(*name_id),
-            None => Some(&*OBJECT_ID),
-        }?;
-        let singleton_id = self
-            .declarations
-            .get(nesting_declaration_id)?
-            .as_namespace()?
-            .singleton_class()?;
-        self.declarations
-            .get(singleton_id)?
+            Some(name_id) => self.name_id_to_declaration_id(name_id)?,
+            None => *OBJECT_ID,
+        };
+        let singleton_id = *self.declaration(nesting_declaration_id)?.as_namespace()?.singleton_class()?;
+        self.declaration(singleton_id)?
             .as_namespace()?
             .member(definition.str_id())
+            .copied()
     }
 
+    /// Looks up the declaration for a `SelfReceiver` method/alias through the singleton class.
     /// Looks up the declaration for a `SelfReceiver` method/alias through the singleton class.
     ///
     /// Returns `None` when the owner cannot be resolved to a namespace with a singleton class. This
     /// can happen when the enclosing construct resolved to a non-namespace declaration (e.g. a
     /// constant or constant alias that a same-named `class`/`module` reopened without promotion), in
     /// which case the method has no owning declaration.
-    fn find_self_receiver_declaration(&self, def_id: DefinitionId, member_str_id: StringId) -> Option<&DeclarationId> {
+    fn find_self_receiver_declaration(&self, def_id: DefinitionId, member_str_id: StringId) -> Option<DeclarationId> {
         let owner_decl_id = self.definition_id_to_declaration_id(def_id)?;
-        let singleton_id = self
-            .declarations
-            .get(owner_decl_id)?
-            .as_namespace()?
-            .singleton_class()?;
-        self.declarations
-            .get(singleton_id)?
+        let singleton_id = *self.declaration(owner_decl_id)?.as_namespace()?.singleton_class()?;
+        self.declaration(singleton_id)?
             .as_namespace()?
             .member(&member_str_id)
+            .copied()
     }
 
     #[must_use]
-    pub fn name_id_to_declaration_id(&self, name_id: NameId) -> Option<&DeclarationId> {
-        let name = self.names.get(&name_id);
-
-        match name {
-            Some(NameRef::Resolved(resolved)) => Some(resolved.declaration_id()),
+    pub fn name_id_to_declaration_id(&self, name_id: NameId) -> Option<DeclarationId> {
+        match self.name(name_id).as_deref() {
+            Some(NameRef::Resolved(resolved)) => Some(*resolved.declaration_id()),
             Some(NameRef::Unresolved(_)) | None => None,
         }
     }
@@ -791,24 +765,27 @@ impl Graph {
     /// Returns `Some(vec![])` if no targets have been resolved yet.
     #[must_use]
     pub fn alias_targets(&self, declaration_id: &DeclarationId) -> Option<Vec<DeclarationId>> {
-        let declaration = self.declarations.get(declaration_id)?;
+        let declaration = self.declaration(*declaration_id)?;
 
-        let Declaration::ConstantAlias(_) = declaration else {
+        if !matches!(&*declaration, Declaration::ConstantAlias(_)) {
             return None;
-        };
+        }
 
         let mut targets = Vec::new();
         for definition_id in declaration.definitions() {
-            let Some(Definition::ConstantAlias(alias_def)) = self.definitions.get(definition_id) else {
+            let Some(definition) = self.definition(*definition_id) else {
+                continue;
+            };
+            let Definition::ConstantAlias(alias_def) = &*definition else {
                 continue;
             };
 
-            let target_name_id = alias_def.target_name_id();
-            let Some(name_ref) = self.names.get(target_name_id) else {
+            let target_name_id = *alias_def.target_name_id();
+            let Some(name_ref) = self.name(target_name_id) else {
                 continue;
             };
 
-            if let NameRef::Resolved(resolved) = name_ref {
+            if let NameRef::Resolved(resolved) = &*name_ref {
                 let target_id = *resolved.declaration_id();
                 if !targets.contains(&target_id) {
                     targets.push(target_id);
@@ -837,7 +814,7 @@ impl Graph {
                 && let Some(&first_target) = targets.first()
             {
                 if matches!(
-                    self.declarations.get(&first_target),
+                    self.declaration(first_target).as_deref(),
                     Some(Declaration::ConstantAlias(_))
                 ) {
                     current_id = first_target;
@@ -1272,7 +1249,7 @@ impl Graph {
         // Identify declarations affected by removed definitions
         if let Some(document) = old_document {
             for def_id in document.definitions() {
-                if let Some(declaration_id) = self.definition_id_to_declaration_id(*def_id).copied() {
+                if let Some(declaration_id) = self.definition_id_to_declaration_id(*def_id) {
                     pending_detachments.entry(declaration_id).or_default().push(*def_id);
                 }
             }

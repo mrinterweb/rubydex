@@ -270,11 +270,11 @@ pub unsafe extern "C" fn rdx_definition_declaration(pointer: GraphPointer, defin
         let Some(decl_id) = graph.definition_id_to_declaration_id(def_id) else {
             return ptr::null();
         };
-        let Some(decl) = graph.declaration(*decl_id) else {
+        let Some(decl) = graph.declaration(decl_id) else {
             return ptr::null();
         };
 
-        Box::into_raw(Box::new(CDeclaration::from_declaration(*decl_id, &decl))).cast_const()
+        Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, &decl))).cast_const()
     })
 }
 
