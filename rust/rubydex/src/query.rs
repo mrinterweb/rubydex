@@ -221,12 +221,12 @@ pub enum CompletionReceiver {
     },
 }
 
-pub struct CompletionContext<'a> {
-    seen_members: IdentityHashSet<&'a StringId>,
+pub struct CompletionContext {
+    seen_members: IdentityHashSet<StringId>,
     completion_receiver: CompletionReceiver,
 }
 
-impl<'a> CompletionContext<'a> {
+impl CompletionContext {
     #[must_use]
     pub fn new(completion_receiver: CompletionReceiver) -> Self {
         Self {
@@ -235,7 +235,7 @@ impl<'a> CompletionContext<'a> {
         }
     }
 
-    pub fn dedup(&mut self, member_str_id: &'a StringId) -> bool {
+    pub fn dedup(&mut self, member_str_id: StringId) -> bool {
         self.seen_members.insert(member_str_id)
     }
 }
@@ -266,17 +266,17 @@ fn method_visible_at_call(
 
 /// Walks one namespace's direct members. `kind_filter` selects the declaration kinds to surface; `visibility_filter`
 /// decides whether each surviving candidate is reachable from the access site.
-fn collect_members<'a>(
-    graph: &'a Graph,
+fn collect_members(
+    graph: &Graph,
     namespace_id: DeclarationId,
     kind_filter: fn(&Declaration) -> bool,
     visibility_filter: impl Fn(DeclarationId) -> bool,
-    completion_ctx: &mut CompletionContext<'a>,
+    completion_ctx: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
 ) {
-    // CompletionContext stores graph-lifetime `&'a StringId`s, so this path uses direct in-memory
-    // access and degrades gracefully for store-backed (gem) namespaces rather than panicking.
-    let Some(namespace) = graph.declarations().get(&namespace_id) else {
+    // `seen_members` holds owned (Copy) `StringId`s, so this reads through the layered accessor and
+    // surfaces members of store-backed (gem) namespaces, not just in-memory workspace ones.
+    let Some(namespace) = graph.declaration(namespace_id) else {
         return;
     };
     let Some(namespace) = namespace.as_namespace() else {
@@ -292,7 +292,7 @@ fn collect_members<'a>(
             continue;
         }
 
-        if !completion_ctx.dedup(member_str_id) {
+        if !completion_ctx.dedup(*member_str_id) {
             continue;
         }
 
@@ -326,7 +326,7 @@ fn collect_members<'a>(
 /// a constant alias).
 pub fn completion_candidates<'a>(
     graph: &'a Graph,
-    context: CompletionContext<'a>,
+    context: CompletionContext,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
     match context.completion_receiver {
         CompletionReceiver::Expression {
@@ -376,7 +376,7 @@ fn namespace_access_completion<'a>(
     graph: &'a Graph,
     self_decl_id: Option<DeclarationId>,
     namespace_decl_id: DeclarationId,
-    mut context: CompletionContext<'a>,
+    mut context: CompletionContext,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
     let Some(resolved_id) = resolve_to_namespace(graph, namespace_decl_id)? else {
         return Ok(Vec::new());
@@ -438,7 +438,7 @@ fn method_call_completion<'a>(
     graph: &'a Graph,
     self_decl_id: Option<DeclarationId>,
     receiver_decl_id: DeclarationId,
-    mut context: CompletionContext<'a>,
+    mut context: CompletionContext,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
     let Some(resolved_id) = resolve_to_namespace(graph, receiver_decl_id)? else {
         return Ok(Vec::new());
@@ -475,7 +475,7 @@ fn expression_completion<'a>(
     graph: &'a Graph,
     self_decl_id: Option<DeclarationId>,
     nesting_name_id: NameId,
-    mut context: CompletionContext<'a>,
+    mut context: CompletionContext,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
     let Some(name_ref) = graph.name(nesting_name_id) else {
         return Err(format!("Name {nesting_name_id} not found in graph").into());
@@ -533,7 +533,7 @@ fn expression_completion<'a>(
 fn collect_constants_from_lexical_scope<'a>(
     graph: &'a Graph,
     innermost_lexical_decl: &'a Namespace,
-    context: &mut CompletionContext<'a>,
+    context: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
 ) {
     for ancestor in innermost_lexical_decl.ancestors() {
@@ -575,7 +575,7 @@ fn collect_constants_from_lexical_scope<'a>(
 fn collect_class_variables_from_lexical_scope<'a>(
     graph: &'a Graph,
     name_ref: &crate::model::name::ResolvedName,
-    context: &mut CompletionContext<'a>,
+    context: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
 ) {
     let mut decl = graph
@@ -623,7 +623,7 @@ fn collect_class_variables_from_lexical_scope<'a>(
 fn collect_constants_from_outer_nesting<'a>(
     graph: &'a Graph,
     name_ref: &crate::model::name::ResolvedName,
-    context: &mut CompletionContext<'a>,
+    context: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
 ) {
     let mut current_name_id = *name_ref.nesting();
@@ -652,7 +652,7 @@ fn collect_constants_from_outer_nesting<'a>(
 fn collect_methods_and_ivars_from_self<'a>(
     graph: &'a Graph,
     self_decl: &'a Namespace,
-    context: &mut CompletionContext<'a>,
+    context: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
 ) {
     for ancestor in self_decl.ancestors() {
@@ -675,7 +675,7 @@ fn method_argument_completion<'a>(
     self_decl_id: Option<DeclarationId>,
     nesting_name_id: NameId,
     method_decl_id: DeclarationId,
-    context: CompletionContext<'a>,
+    context: CompletionContext,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
     let mut candidates = expression_completion(graph, self_decl_id, nesting_name_id, context)?;
     let Some(method_decl) = graph.declaration(method_decl_id) else {
