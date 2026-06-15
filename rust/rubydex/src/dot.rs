@@ -125,7 +125,7 @@ impl<'a> DotBuilder<'a> {
             .filter(|(id, _)| def_ids.contains(*id))
             .filter_map(|(_, definition)| {
                 let decl_id = self.graph.definition_to_declaration_id(definition)?;
-                let declaration = self.graph.declarations().get(decl_id)?;
+                let declaration = self.graph.declarations().get(&decl_id)?;
                 let sort_key = format!("{}({})", definition.kind(), declaration.name());
                 Some((sort_key, definition))
             })
@@ -139,7 +139,7 @@ impl<'a> DotBuilder<'a> {
         for (_, definition) in definitions {
             definition.to_dot(self);
             if let Some(decl_id) = self.graph.definition_to_declaration_id(definition) {
-                decl_ids.insert(*decl_id);
+                decl_ids.insert(decl_id);
             }
         }
         self.output.push('\n');
@@ -184,7 +184,7 @@ impl<'a> DotBuilder<'a> {
         for (_, definition) in definitions {
             let def_id = definition.id();
             if let Some(decl_id) = self.graph.definition_to_declaration_id(definition) {
-                let decl_node = Self::decl_node_id(*decl_id);
+                let decl_node = Self::decl_node_id(decl_id);
                 let _ = writeln!(
                     self.output,
                     "  \"def_{def_id}\" -> {decl_node} [label=\"declares\" color=\"{DECL_COLOR}\" fontcolor=\"{DECL_COLOR}\"]"
@@ -237,7 +237,7 @@ impl<'a> DotBuilder<'a> {
                 continue;
             };
 
-            let child_node = Self::decl_node_id(*child_decl_id);
+            let child_node = Self::decl_node_id(child_decl_id);
             let parent_node = Self::decl_node_id(decl_id);
             let _ = writeln!(
                 self.output,
@@ -261,7 +261,7 @@ impl<'a> DotBuilder<'a> {
             let Some(decl_id) = self.graph.definition_to_declaration_id(definition) else {
                 continue;
             };
-            let src_node = Self::decl_node_id(*decl_id);
+            let src_node = Self::decl_node_id(decl_id);
             for mixin in mixins {
                 self.write_mixin_edge(mixin, &src_node, decl_ids);
             }
@@ -313,13 +313,13 @@ impl<'a> DotBuilder<'a> {
         }
     }
 
-    fn resolve_ref(&self, ref_id: crate::model::ids::ConstantReferenceId) -> Option<&'a DeclarationId> {
+    fn resolve_ref(&self, ref_id: crate::model::ids::ConstantReferenceId) -> Option<DeclarationId> {
         let constant_ref = self.graph.constant_references().get(&ref_id)?;
         self.graph.name_id_to_declaration_id(*constant_ref.name_id())
     }
 
     fn resolve_ref_to_namespace(&self, ref_id: crate::model::ids::ConstantReferenceId) -> Option<DeclarationId> {
-        self.resolve_to_namespace(*self.resolve_ref(ref_id)?)
+        self.resolve_to_namespace(self.resolve_ref(ref_id)?)
     }
 
     fn resolve_to_namespace(&self, declaration_id: DeclarationId) -> Option<DeclarationId> {
@@ -375,7 +375,7 @@ impl ToDot for Definition {
         let Some(decl_id) = builder.graph().definition_to_declaration_id(self) else {
             return;
         };
-        let Some(declaration) = builder.graph().declarations().get(decl_id) else {
+        let Some(declaration) = builder.graph().declarations().get(&decl_id) else {
             return;
         };
 
