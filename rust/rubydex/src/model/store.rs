@@ -79,10 +79,14 @@ impl RedbStore {
     /// Returns an error if the database cannot be opened.
     pub fn open(path: &Path) -> Result<Self, redb::Error> {
         // Cap redb's in-heap page cache so a long-lived server stays lean; the OS still caches the
-        // file, so cold reads page in from disk on demand. 32 MiB is plenty for hot nodes.
-        const CACHE_BYTES: usize = 32 * 1024 * 1024;
+        // file, so a cache miss is a RAM hit (not disk) and costs ~0.15 ms. Default 8 MiB — measured
+        // sweet spot (~26 MB less RSS than 32 MiB, negligible latency). Tune with RUBYDEX_REDB_CACHE_MB.
+        let cache_bytes = std::env::var("RUBYDEX_REDB_CACHE_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(8 * 1024 * 1024, |mb| mb * 1024 * 1024);
         Ok(Self {
-            db: Database::builder().set_cache_size(CACHE_BYTES).open(path)?,
+            db: Database::builder().set_cache_size(cache_bytes).open(path)?,
         })
     }
 
