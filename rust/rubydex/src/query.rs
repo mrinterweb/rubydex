@@ -799,7 +799,7 @@ pub fn follow_method_alias(graph: &Graph, alias_id: DefinitionId) -> Result<Decl
 
         let owner_id = graph
             .definition_id_to_declaration_id(current)
-            .and_then(|decl_id| graph.declaration(*decl_id))
+            .and_then(|decl_id| graph.declaration(decl_id))
             .map(|decl| *decl.owner_id())
             .ok_or(AliasResolutionError::UnresolvedOwner)?;
 

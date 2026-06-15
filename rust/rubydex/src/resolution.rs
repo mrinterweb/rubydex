@@ -217,7 +217,7 @@ impl<'a> Resolver<'a> {
                 };
                 let str_id = *method.str_id();
                 match self.graph.definition_id_to_declaration_id(*def_id) {
-                    Some(&owner_decl_id) => {
+                    Some(owner_decl_id) => {
                         match self.get_or_create_singleton_class(owner_decl_id, SingletonAncestors::Enqueue) {
                             Some(singleton_id) => {
                                 self.create_declaration(str_id, id, singleton_id, |name| {
@@ -423,7 +423,7 @@ impl<'a> Resolver<'a> {
                             if let Some(receiver) = method.receiver() {
                                 let receiver_decl_id = match receiver {
                                     Receiver::SelfReceiver(def_id) => {
-                                        let Some(&receiver_decl_id) =
+                                        let Some(receiver_decl_id) =
                                             self.graph.definition_id_to_declaration_id(*def_id)
                                         else {
                                             self.graph.push_work(Unit::Definition(id));
@@ -499,7 +499,6 @@ impl<'a> Resolver<'a> {
                             let nesting_decl_id = self
                                 .graph
                                 .definition_id_to_declaration_id(nesting_id)
-                                .copied()
                                 .unwrap_or(*OBJECT_ID);
 
                             let Some(owner_id) =
@@ -528,7 +527,7 @@ impl<'a> Resolver<'a> {
                             // The singleton's declaration may be missing (e.g. its receiver was
                             // just deleted). Re-queue and let the next resolve place `@bar` on
                             // the right owner instead of falling back to Object.
-                            let Some(&singleton_class_decl_id) = self.graph.definition_id_to_declaration_id(nesting_id)
+                            let Some(singleton_class_decl_id) = self.graph.definition_id_to_declaration_id(nesting_id)
                             else {
                                 self.graph.push_work(Unit::Definition(id));
                                 continue;
@@ -570,7 +569,7 @@ impl<'a> Resolver<'a> {
                     let new_name_str_id = *alias.new_name_str_id();
                     let owner_id = match alias.receiver() {
                         Some(Receiver::SelfReceiver(def_id)) => {
-                            let Some(&decl_id) = self.graph.definition_id_to_declaration_id(*def_id) else {
+                            let Some(decl_id) = self.graph.definition_id_to_declaration_id(*def_id) else {
                                 self.graph.push_work(Unit::Definition(id));
                                 continue;
                             };
@@ -833,7 +832,7 @@ impl<'a> Resolver<'a> {
                 break;
             }
         }
-        let declaration_id = current_nesting.and_then(|id| self.graph.definition_id_to_declaration_id(id).copied())?;
+        let declaration_id = current_nesting.and_then(|id| self.graph.definition_id_to_declaration_id(id))?;
 
         // If the declaration is a constant alias, follow the alias chain to find the
         // target namespace. Returns None if the alias target is unresolved.
@@ -877,7 +876,7 @@ impl<'a> Resolver<'a> {
                 continue;
             };
 
-            let decl = self.graph.declarations().get(declaration_id).unwrap();
+            let decl = self.graph.declarations().get(&declaration_id).unwrap();
 
             // If the associated declaration is a namespace that can own things, we found the right owner. Otherwise, we might
             // have found something nested inside something else (like a method), in which case we have to walk up until we find
@@ -886,13 +885,13 @@ impl<'a> Resolver<'a> {
                 decl,
                 Declaration::Namespace(Namespace::Class(_) | Namespace::Module(_) | Namespace::SingletonClass(_))
             ) {
-                break Some(*declaration_id);
+                break Some(declaration_id);
             }
 
             if matches!(decl, Declaration::ConstantAlias(_)) {
                 // Follow the alias chain to find the target namespace. If the alias is unresolved,
                 // the definition cannot be properly owned yet and should be retried later.
-                break self.resolve_to_namespace(*declaration_id);
+                break self.resolve_to_namespace(declaration_id);
             }
 
             let definition = self.graph.definitions().get(&id).unwrap();
