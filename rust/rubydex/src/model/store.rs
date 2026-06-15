@@ -546,4 +546,47 @@ mod tests {
         assert!(matches!(declaration, DeclRef::Stored(_)), "should be store-backed");
         assert_eq!(declaration.name(), sample_name);
     }
+
+    #[test]
+    fn completion_surfaces_members_from_store() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::query::{CompletionCandidate, CompletionContext, CompletionReceiver, completion_candidates};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("animal.rb");
+        std::fs::write(&rb_path, "class Animal\n  def speak; end\nend\n").expect("write rb");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // the answer must come from disk, not in-memory maps
+
+        // A fresh store-backed graph has empty in-memory maps, so completing a method call on
+        // `Animal` can only surface its `speak` member by reading through the layered accessor.
+        // This is the gem-member completion path that previously degraded to empty.
+        let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        assert!(graph.declarations().is_empty(), "memory layer is empty");
+
+        let receiver = CompletionReceiver::MethodCall {
+            self_decl_id: None,
+            receiver_decl_id: DeclarationId::from("Animal"),
+        };
+        let candidates = completion_candidates(&graph, CompletionContext::new(receiver)).expect("completion");
+
+        let names: Vec<String> = candidates
+            .iter()
+            .filter_map(|c| match c {
+                CompletionCandidate::Declaration(id) => Some(graph.declaration(*id)?.name().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains("speak")),
+            "expected `speak` from store-backed members, got {names:?}"
+        );
+    }
 }
