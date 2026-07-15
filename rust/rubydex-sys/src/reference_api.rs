@@ -27,8 +27,7 @@ impl CConstantReference {
     /// This function will panic if there's inconsistent data in the graph
     #[must_use]
     pub fn from_id(graph: &Graph, ref_id: ConstantReferenceId) -> Self {
-        let reference = graph.constant_reference(ref_id)
-            .expect("Constant reference not found");
+        let reference = graph.constant_reference(ref_id).expect("Constant reference not found");
 
         let name_ref = graph.name(*reference.name_id()).expect("Name ID should exist");
 
@@ -137,9 +136,7 @@ pub unsafe extern "C" fn rdx_constant_reference_name(pointer: GraphPointer, refe
         };
         let name = graph.name(*reference.name_id()).expect("Name ID should exist");
 
-        let name_string = graph.string(*name.str())
-            .expect("String ID should exist")
-            .to_string();
+        let name_string = graph.string(*name.str()).expect("String ID should exist").to_string();
         CString::new(name_string).unwrap().into_raw().cast_const()
     })
 }

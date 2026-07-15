@@ -257,7 +257,7 @@ fn method_visible_at_call(
         Visibility::Private | Visibility::ModuleFunction => caller_self == Some(receiver),
         Visibility::Protected => caller_self.is_some_and(|cs| {
             let defined_in = graph.declaration(defined_in).unwrap();
-        let defined_in = defined_in.as_namespace().unwrap();
+            let defined_in = defined_in.as_namespace().unwrap();
             let descendants = defined_in.descendants();
             descendants.contains(&cs) && descendants.contains(&receiver)
         }),
@@ -324,8 +324,8 @@ fn collect_members(
 ///
 /// Will error if the given `self_decl_id` does not resolve to a namespace declaration (directly or via
 /// a constant alias).
-pub fn completion_candidates<'a>(
-    graph: &'a Graph,
+pub fn completion_candidates(
+    graph: &Graph,
     context: CompletionContext,
 ) -> Result<Vec<CompletionCandidate>, Box<dyn Error>> {
     match context.completion_receiver {
@@ -372,8 +372,8 @@ fn resolve_to_namespace(graph: &Graph, decl_id: DeclarationId) -> Result<Option<
 }
 
 /// Collect completion for a namespace access (e.g.: `Foo::`)
-fn namespace_access_completion<'a>(
-    graph: &'a Graph,
+fn namespace_access_completion(
+    graph: &Graph,
     self_decl_id: Option<DeclarationId>,
     namespace_decl_id: DeclarationId,
     mut context: CompletionContext,
@@ -383,7 +383,7 @@ fn namespace_access_completion<'a>(
     };
     let resolved_caller_self_id = self_decl_id.map(|id| resolve_self_namespace(graph, id)).transpose()?;
     let namespace = graph.declaration(resolved_id).unwrap();
-        let namespace = namespace.as_namespace().unwrap();
+    let namespace = namespace.as_namespace().unwrap();
     let mut candidates = Vec::new();
 
     // Walk ancestors collecting inherited constants, stopping at Object to avoid surfacing top-level constants
@@ -434,8 +434,8 @@ fn namespace_access_completion<'a>(
 }
 
 /// Collect completion for a method call (e.g.: `foo.`, `@bar.`, `Baz.`)
-fn method_call_completion<'a>(
-    graph: &'a Graph,
+fn method_call_completion(
+    graph: &Graph,
     self_decl_id: Option<DeclarationId>,
     receiver_decl_id: DeclarationId,
     mut context: CompletionContext,
@@ -445,7 +445,7 @@ fn method_call_completion<'a>(
     };
     let resolved_caller_self_id = self_decl_id.map(|id| resolve_self_namespace(graph, id)).transpose()?;
     let namespace = graph.declaration(resolved_id).unwrap();
-        let namespace = namespace.as_namespace().unwrap();
+    let namespace = namespace.as_namespace().unwrap();
     let mut candidates = Vec::new();
 
     for ancestor in namespace.ancestors() {
@@ -471,8 +471,8 @@ fn resolve_self_namespace(graph: &Graph, decl_id: DeclarationId) -> Result<Decla
 }
 
 /// Collect completion for an expression
-fn expression_completion<'a>(
-    graph: &'a Graph,
+fn expression_completion(
+    graph: &Graph,
     self_decl_id: Option<DeclarationId>,
     nesting_name_id: NameId,
     mut context: CompletionContext,
@@ -572,8 +572,8 @@ fn collect_constants_from_lexical_scope<'a>(
 /// lexically and singleton classes are skipped: inside `class Bar; class << Foo; @@cvar` the
 /// cvar belongs to `Bar`, not `Foo`. We walk the lexical chain (innermost outward) until we find
 /// a non-singleton namespace, then walk that namespace's ancestors.
-fn collect_class_variables_from_lexical_scope<'a>(
-    graph: &'a Graph,
+fn collect_class_variables_from_lexical_scope(
+    graph: &Graph,
     name_ref: &crate::model::name::ResolvedName,
     context: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
@@ -620,8 +620,8 @@ fn collect_class_variables_from_lexical_scope<'a>(
 
 /// Walks the outer lexical nesting chain (excluding the innermost scope) to collect constants reachable through
 /// enclosing classes/modules.
-fn collect_constants_from_outer_nesting<'a>(
-    graph: &'a Graph,
+fn collect_constants_from_outer_nesting(
+    graph: &Graph,
     name_ref: &crate::model::name::ResolvedName,
     context: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
@@ -670,8 +670,8 @@ fn collect_methods_and_ivars_from_self<'a>(
 }
 
 /// Collect completion for a method argument (e.g.: `foo.bar(|)`)
-fn method_argument_completion<'a>(
-    graph: &'a Graph,
+fn method_argument_completion(
+    graph: &Graph,
     self_decl_id: Option<DeclarationId>,
     nesting_name_id: NameId,
     method_decl_id: DeclarationId,
@@ -748,9 +748,12 @@ pub fn find_member_in_ancestors(
             continue;
         }
 
-        let member_id = graph
-            .declaration(*ancestor_id)
-            .and_then(|ancestor_decl| ancestor_decl.as_namespace().and_then(|ns| ns.member(&member_str_id)).copied());
+        let member_id = graph.declaration(*ancestor_id).and_then(|ancestor_decl| {
+            ancestor_decl
+                .as_namespace()
+                .and_then(|ns| ns.member(&member_str_id))
+                .copied()
+        });
         if let Some(member_id) = member_id {
             return Ok(member_id);
         }
