@@ -77,6 +77,17 @@ module Rubydex
       File.join(Dir.home, ".cache", "rubydex", key, "index.redb")
     end
 
+    # Signature of everything that can change the index for this workspace: the Gemfile.lock hash
+    # (dependency changes) plus a hash of every indexable source file's path/mtime/size under the
+    # workspace. The file signature catches source changes for workspaces without a Gemfile.lock too
+    # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
+    # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
+    #: -> String
+    def store_signature
+      require "digest"
+      Digest::SHA1.hexdigest(lockfile_hash + workspace_source_signature)
+    end
+
     # SHA of the workspace Gemfile.lock, used to invalidate the store when dependencies change.
     #: -> String
     def lockfile_hash
@@ -85,10 +96,37 @@ module Rubydex
       File.exist?(lock) ? Digest::SHA1.hexdigest(File.read(lock)) : "no-lockfile"
     end
 
+    # Hash over the path/mtime/size of every indexable Ruby/RBS file under the workspace (excluding
+    # ignored directories). Detects source changes between runs without reading file contents.
+    #: -> String
+    def workspace_source_signature
+      require "digest"
+      require "find"
+      digest = Digest::SHA1.new
+      Find.find(@workspace_path) do |path|
+        next if File.directory?(path)
+        next unless INDEXABLE_EXTENSIONS.include?(File.extname(path))
+        # Skip ignored directories anywhere in the tree.
+        rel = path.delete_prefix(@workspace_path + File::SEPARATOR)
+        next if rel.split(File::SEPARATOR).any? { |seg| IGNORED_DIRECTORIES.include?(seg) }
+        stat = File.stat(path)
+        digest.update(rel)
+        digest.update("\0")
+        digest.update(stat.mtime.to_i.to_s)
+        digest.update("\0")
+        digest.update(stat.size.to_s)
+        digest.update("\0")
+      end
+      digest.hexdigest
+    rescue Errno::ENOENT
+      # A file vanished mid-walk; treat the signature as unknown so the store is rebuilt.
+      "unknown"
+    end
+
     #: (String) -> bool
     def store_fresh?(cache)
       marker = "#{cache}.hash"
-      File.exist?(marker) && File.read(marker) == lockfile_hash
+      File.exist?(marker) && File.read(marker) == store_signature
     end
 
     # Builds the store in a forked child (whose peak indexing memory is reclaimed on exit), then
@@ -112,7 +150,7 @@ module Rubydex
       raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
 
       File.rename(tmp, cache)
-      File.write("#{cache}.hash", lockfile_hash)
+      File.write("#{cache}.hash", store_signature)
     end
 
     # Gathers the paths we have to index for all workspace dependencies
