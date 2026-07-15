@@ -159,8 +159,18 @@ module Rubydex
       _, status = Process.wait2(pid)
       raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
 
+      # Publish order matters for concurrent correctness: rename the store first, then the marker.
+      # Both renames are atomic on POSIX, so a concurrent reader (attach_store) never sees a
+      # partially-written file. A reader that lands between the two renames sees a NEW store with an
+      # OLD marker, so store_fresh? compares the old marker to the new signature, mismatches, and
+      # rebuilds — a wasted rebuild, never staleness (a stale store can only be served when the
+      # marker says fresh, which requires the new marker, which is written last). Concurrent builders
+      # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
+      marker = "#{cache}.hash"
+      marker_tmp = "#{marker}.#{Process.pid}.building"
+      File.write(marker_tmp, store_signature)
       File.rename(tmp, cache)
-      File.write("#{cache}.hash", store_signature)
+      File.rename(marker_tmp, marker)
     end
 
     # Gathers the paths we have to index for all workspace dependencies
