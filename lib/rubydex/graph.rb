@@ -14,12 +14,19 @@ module Rubydex
 
     # Index all files and dependencies of the workspace that exists in `workspace_path`.
     #
-    # Disk-backed orchestration: build (or reuse) a redb store of the whole resolved graph in a
-    # FORKED child so its peak indexing memory is reclaimed when the child exits, then attach the
-    # store to this graph. The long-lived server therefore holds the bulk index off-heap and serves
-    # reads from disk. Falls back to the in-memory path if the store can't be built.
+    # Disk-backed orchestration (opt-in via RUBYDEX_DISK_INDEX=1): build (or reuse) a redb store of
+    # the whole resolved graph in a FORKED child so its peak indexing memory is reclaimed when the
+    # child exits, then attach the store to this graph. The long-lived server therefore holds the
+    # bulk index off-heap and serves reads from disk. Falls back to the in-memory path if the store
+    # can't be built.
+    #
+    # The default is the in-memory path: the disk-backed path is read-only today (the FFI
+    # short-circuits drop live `index_source` edits against a store-backed graph), so it must stay
+    # opt-in until live-edit integration (Stage 4) lands.
     #: -> Array[String]
     def index_workspace
+      return index_all(workspace_paths) unless disk_index_enabled?
+
       cache = store_cache_path
       build_store_via_fork(cache) unless File.exist?(cache) && store_fresh?(cache)
       attach_store(cache)
@@ -53,6 +60,14 @@ module Rubydex
     end
 
     private
+
+    # Whether the disk-backed (low-resident-memory) index is enabled for this process. Opt-in via
+    # RUBYDEX_DISK_INDEX=1; the default keeps the in-memory path so live edits keep working (the
+    # store-backed path is read-only until Stage 4 lands live-edit integration).
+    #: -> bool
+    def disk_index_enabled?
+      ENV["RUBYDEX_DISK_INDEX"] == "1" || ENV["RUBYDEX_DISK_INDEX"] == "true"
+    end
 
     # Path of the on-disk store for this workspace, namespaced by workspace path.
     #: -> String
