@@ -126,6 +126,7 @@ fn workspace_path_for(paths: &[String]) -> Option<PathBuf> {
     fs::canonicalize(first_path).ok().filter(|path| path.is_dir())
 }
 
+#[allow(clippy::too_many_lines)] // CLI entry point; the redb-store --open-store block tips it over the line limit
 fn main() {
     let args = Args::parse();
 

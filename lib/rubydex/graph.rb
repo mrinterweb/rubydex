@@ -75,7 +75,7 @@ module Rubydex
     #: -> String
     def store_cache_path
       require "digest"
-      key = Digest::SHA1.hexdigest(File.expand_path(@workspace_path))
+      key = Digest::SHA1.hexdigest(File.expand_path(workspace_path))
       File.join(cache_root, "rubydex", key, "index.redb")
     end
 
@@ -103,7 +103,7 @@ module Rubydex
     #: -> String
     def lockfile_hash
       require "digest"
-      lock = File.join(@workspace_path, "Gemfile.lock")
+      lock = File.join(workspace_path, "Gemfile.lock")
       File.exist?(lock) ? Digest::SHA1.hexdigest(File.read(lock)) : "no-lockfile"
     end
 
@@ -114,14 +114,17 @@ module Rubydex
       require "digest"
       require "find"
       digest = Digest::SHA1.new
-      Find.find(@workspace_path) do |path|
-        next if File.directory?(path)
+      root = workspace_path
+      excluded = excluded_patterns
+      Find.find(root) do |path|
+        if File.directory?(path)
+          # Prune excluded directories (e.g. .git, node_modules) so Find doesn't descend into them.
+          Find.prune if excluded.include?(path)
+          next
+        end
         next unless INDEXABLE_EXTENSIONS.include?(File.extname(path))
 
-        # Skip ignored directories anywhere in the tree.
-        rel = path.delete_prefix(@workspace_path + File::SEPARATOR)
-        next if rel.split(File::SEPARATOR).any? { |seg| IGNORED_DIRECTORIES.include?(seg) }
-
+        rel = path.delete_prefix(root + File::SEPARATOR)
         stat = File.stat(path)
         digest.update(rel)
         digest.update("\0")
@@ -153,7 +156,7 @@ module Rubydex
       tmp = "#{cache}.#{Process.pid}.building"
 
       pid = fork do
-        builder = Rubydex::Graph.new(workspace_path: @workspace_path)
+        builder = Rubydex::Graph.new(workspace_path: workspace_path)
         builder.index_all(builder.workspace_paths)
         builder.resolve
         builder.build_store(tmp)

@@ -297,9 +297,7 @@ pub unsafe extern "C" fn rdx_method_reference_location(pointer: GraphPointer, re
         let Some(reference) = graph.method_reference(ref_id) else {
             return ptr::null_mut();
         };
-        let document = graph
-            .document(reference.uri_id())
-            .expect("Document should exist");
+        let document = graph.document(reference.uri_id()).expect("Document should exist");
 
         create_location_for_uri_and_offset(graph, &document, reference.offset())
     })
