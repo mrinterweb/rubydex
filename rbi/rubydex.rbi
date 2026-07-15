@@ -325,10 +325,21 @@ class Rubydex::Graph
   sig { params(file_paths: T::Array[String]).returns(T::Array[String]) }
   def index_all(file_paths); end
 
-  # Persists the resolved graph to an on-disk redb store at `path`. Requires the gem to be built
-  # with the `redb-store` feature (RUBYDEX_REDB_STORE=1).
+  # Persists the resolved graph to an on-disk redb store at `path`. The `redb-store` feature is
+  # compiled into the gem by default; opt out at build time with RUBYDEX_NO_REDB_STORE=1.
   sig { params(path: String).void }
   def build_store(path); end
+
+  # Switches this graph over to a prebuilt redb store at `path` as its disk-backed base layer
+  # (drops the in-memory maps). See build_store.
+  sig { params(path: String).void }
+  def attach_store(path); end
+
+  # Opens a prebuilt redb store at `path` and returns a new Graph that uses it as its base layer.
+  # The `redb-store` feature is compiled into the gem by default; opt out at build time with
+  # RUBYDEX_NO_REDB_STORE=1.
+  sig { params(path: String).returns(Rubydex::Graph) }
+  def self.open_store(path); end
 
   sig { params(uri: String, source: String, language_id: String).void }
   def index_source(uri, source, language_id); end
