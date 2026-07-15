@@ -20,9 +20,7 @@ use crate::model::declaration::Declaration;
 use crate::model::definitions::Definition;
 use crate::model::document::Document;
 use crate::model::graph::{Graph, NameDependent};
-use crate::model::ids::{
-    ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId,
-};
+use crate::model::ids::{ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId};
 use crate::model::name::NameRef;
 use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::string_ref::StringRef;
@@ -189,7 +187,9 @@ impl RedbStore {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(table)?;
         match table.get(key)? {
-            Some(guard) => Ok(Some(postcard::from_bytes::<V>(guard.value()).expect("node should deserialize"))),
+            Some(guard) => Ok(Some(
+                postcard::from_bytes::<V>(guard.value()).expect("node should deserialize"),
+            )),
             None => Ok(None),
         }
     }
@@ -399,7 +399,10 @@ mod tests {
         // `Graph::new()` seeds built-in data (Object, BasicObject, etc.), giving us a real,
         // non-empty graph to persist without running the indexer.
         let graph = Graph::new();
-        assert!(!graph.declarations().is_empty(), "built-in data should populate the graph");
+        assert!(
+            !graph.declarations().is_empty(),
+            "built-in data should populate the graph"
+        );
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("graph.redb");
@@ -474,8 +477,14 @@ mod tests {
 
         let store = RedbStore::open(&store_path).expect("open store");
 
-        assert_eq!(store.search_prefix("cy", 10).expect("search"), vec!["Cylinder".to_string()]);
-        assert_eq!(store.search_prefix("ci", 10).expect("search"), vec!["Circle".to_string()]);
+        assert_eq!(
+            store.search_prefix("cy", 10).expect("search"),
+            vec!["Cylinder".to_string()]
+        );
+        assert_eq!(
+            store.search_prefix("ci", 10).expect("search"),
+            vec!["Circle".to_string()]
+        );
 
         // Case-insensitive prefix "c" matches both shapes (and possibly built-ins) but not Square.
         let c = store.search_prefix("C", 50).expect("search");
@@ -499,10 +508,16 @@ mod tests {
         let foo_id = DeclarationId::from("Foo");
         let bar_id = DeclarationId::from("Bar");
         store
-            .put_declaration(foo_id, &Declaration::Namespace(Namespace::Class(Box::new(class("Foo")))))
+            .put_declaration(
+                foo_id,
+                &Declaration::Namespace(Namespace::Class(Box::new(class("Foo")))),
+            )
             .expect("put Foo");
         store
-            .put_declaration(bar_id, &Declaration::Namespace(Namespace::Class(Box::new(class("Bar")))))
+            .put_declaration(
+                bar_id,
+                &Declaration::Namespace(Namespace::Class(Box::new(class("Bar")))),
+            )
             .expect("put Bar");
 
         // Update Foo in place (add a member) and delete Bar.
@@ -521,7 +536,10 @@ mod tests {
             postcard::to_allocvec(&loaded_foo).expect("serialize loaded"),
         );
         assert!(store.get_declaration(bar_id).expect("get Bar").is_none(), "Bar deleted");
-        assert!(!store.delete_declaration(bar_id).expect("re-delete Bar"), "Bar already gone");
+        assert!(
+            !store.delete_declaration(bar_id).expect("re-delete Bar"),
+            "Bar already gone"
+        );
     }
 
     #[test]

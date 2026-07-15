@@ -1,6 +1,7 @@
 //! Location-related C API and structs
 
 use libc::c_char;
+#[cfg(feature = "redb-store")]
 use line_index::LineIndex;
 use rubydex::model::document::Document;
 use rubydex::model::graph::Graph;
