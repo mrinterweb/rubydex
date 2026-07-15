@@ -69,12 +69,22 @@ module Rubydex
       ENV["RUBYDEX_DISK_INDEX"] == "1" || ENV["RUBYDEX_DISK_INDEX"] == "true"
     end
 
-    # Path of the on-disk store for this workspace, namespaced by workspace path.
+    # Path of the on-disk store for this workspace, namespaced by workspace path. Honors
+    # XDG_CACHE_HOME (and a RUBYDEX_CACHE_DIR override) instead of hardcoding ~/.cache, and falls
+    # back to ~/.cache only when neither is set and a home directory exists.
     #: -> String
     def store_cache_path
       require "digest"
       key = Digest::SHA1.hexdigest(File.expand_path(@workspace_path))
-      File.join(Dir.home, ".cache", "rubydex", key, "index.redb")
+      File.join(cache_root, "rubydex", key, "index.redb")
+    end
+
+    # Root directory for on-disk stores. RUBYDEX_CACHE_DIR > XDG_CACHE_HOME > ~/.cache.
+    #: -> String
+    def cache_root
+      return ENV["RUBYDEX_CACHE_DIR"] if ENV["RUBYDEX_CACHE_DIR"] && !ENV["RUBYDEX_CACHE_DIR"].empty?
+      return ENV["XDG_CACHE_HOME"] if ENV["XDG_CACHE_HOME"] && !ENV["XDG_CACHE_HOME"].empty?
+      File.join(Dir.home, ".cache")
     end
 
     # Signature of everything that can change the index for this workspace: the Gemfile.lock hash
