@@ -364,7 +364,7 @@ mod tests {
         store.put_string(id, &value).expect("put");
 
         let loaded = store.get_string(id).expect("get").expect("present");
-        assert_eq!(&**loaded, "ActiveRecord::Base");
+        assert_eq!(&*loaded, "ActiveRecord::Base");
         assert_eq!(loaded.ref_count(), 5);
 
         // Absent key returns None.
