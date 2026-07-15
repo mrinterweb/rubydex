@@ -125,7 +125,7 @@ impl<'a> DotBuilder<'a> {
             .filter(|(id, _)| def_ids.contains(*id))
             .filter_map(|(_, definition)| {
                 let decl_id = self.graph.definition_to_declaration_id(definition)?;
-                let declaration = self.graph.declarations().get(&decl_id)?;
+                let declaration = self.graph.declaration(decl_id)?;
                 let sort_key = format!("{}({})", definition.kind(), declaration.name());
                 Some((sort_key, definition))
             })
@@ -314,7 +314,7 @@ impl<'a> DotBuilder<'a> {
     }
 
     fn resolve_ref(&self, ref_id: crate::model::ids::ConstantReferenceId) -> Option<DeclarationId> {
-        let constant_ref = self.graph.constant_references().get(&ref_id)?;
+        let constant_ref = self.graph.constant_reference(ref_id)?;
         self.graph.name_id_to_declaration_id(*constant_ref.name_id())
     }
 
@@ -331,7 +331,8 @@ impl<'a> DotBuilder<'a> {
                 continue;
             }
 
-            match self.graph.declarations().get(&current_id)? {
+            let declaration = self.graph.declaration(current_id)?;
+            match &*declaration {
                 Declaration::Namespace(_) => return Some(current_id),
                 Declaration::ConstantAlias(_) => {
                     queue.extend(self.graph.alias_targets(&current_id)?);
@@ -375,7 +376,7 @@ impl ToDot for Definition {
         let Some(decl_id) = builder.graph().definition_to_declaration_id(self) else {
             return;
         };
-        let Some(declaration) = builder.graph().declarations().get(&decl_id) else {
+        let Some(declaration) = builder.graph().declaration(decl_id) else {
             return;
         };
 

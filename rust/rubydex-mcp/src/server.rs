@@ -136,7 +136,7 @@ macro_rules! ensure_graph_ready {
 macro_rules! lookup_declaration {
     ($graph:expr, $name:expr) => {{
         let declaration_id = DeclarationId::from($name);
-        match $graph.declarations().get(&declaration_id) {
+        match $graph.declaration(declaration_id) {
             Some(decl) => (declaration_id, decl),
             None => {
                 return error_json(
@@ -190,16 +190,16 @@ fn format_ancestors(graph: &Graph, ancestors: &Ancestors) -> Vec<serde_json::Val
         .iter()
         .filter_map(|ancestor| match ancestor {
             Ancestor::Complete(id) => {
-                let ancestor_decl = graph.declarations().get(id)?;
+                let ancestor_decl = graph.declaration(*id)?;
                 Some(serde_json::json!({
                     "name": ancestor_decl.name(),
                     "kind": ancestor_decl.kind(),
                 }))
             }
             Ancestor::Partial(name_id) => {
-                let name_ref = graph.names().get(name_id)?;
+                let name_ref = graph.name(*name_id)?;
                 Some(serde_json::json!({
-                    "name": format!("{name_ref:?}"),
+                    "name": format!("{:?}", &*name_ref),
                     "kind": "Unresolved",
                 }))
             }
@@ -252,7 +252,7 @@ impl RubydexServer {
             offset,
             limit,
             |id| {
-                let Some(decl) = graph.declarations().get(id) else {
+                let Some(decl) = graph.declaration(**id) else {
                     return false;
                 };
                 if let Some(kind) = kind_filter {
@@ -262,14 +262,14 @@ impl RubydexServer {
                 }
             },
             |id| {
-                let decl = graph.declarations().get(id)?;
+                let decl = graph.declaration(*id)?;
                 let locations: Vec<serde_json::Value> = decl
                     .definitions()
                     .iter()
                     .filter_map(|def_id| {
-                        let def = graph.definitions().get(def_id)?;
-                        let doc = graph.documents().get(def.uri_id())?;
-                        let loc = def.offset().to_location(doc).to_presentation();
+                        let def = graph.definition(*def_id)?;
+                        let doc = graph.document(*def.uri_id())?;
+                        let loc = def.offset().to_location(&doc).to_presentation();
                         Some(serde_json::json!({
                             "path": format_path(doc.uri(), &self.root_path),
                             "line": loc.start_line(),
@@ -305,9 +305,9 @@ impl RubydexServer {
             .definitions()
             .iter()
             .filter_map(|def_id| {
-                let def = graph.definitions().get(def_id)?;
-                let doc = graph.documents().get(def.uri_id())?;
-                let loc = def.offset().to_location(doc).to_presentation();
+                let def = graph.definition(*def_id)?;
+                let doc = graph.document(*def.uri_id())?;
+                let loc = def.offset().to_location(&doc).to_presentation();
                 let path = format_path(doc.uri(), &self.root_path);
                 let comments: Vec<String> = def
                     .comments()
@@ -339,11 +339,11 @@ impl RubydexServer {
                 ns.members()
                     .values()
                     .filter_map(|member_id| {
-                        let member_decl = graph.declarations().get(member_id)?;
+                        let member_decl = graph.declaration(*member_id)?;
                         let member_def = member_decl
                             .definitions()
                             .first()
-                            .and_then(|def_id| graph.definitions().get(def_id));
+                            .and_then(|def_id| graph.definition(*def_id));
 
                         let mut member = serde_json::json!({
                             "name": member_decl.name(),
@@ -351,9 +351,9 @@ impl RubydexServer {
                         });
 
                         if let Some(def) = member_def
-                            && let Some(doc) = graph.documents().get(def.uri_id())
+                            && let Some(doc) = graph.document(*def.uri_id())
                         {
-                            let loc = def.offset().to_location(doc).to_presentation();
+                            let loc = def.offset().to_location(&doc).to_presentation();
                             member["location"] = serde_json::json!({
                                 "path": format_path(doc.uri(), &self.root_path),
                                 "line": loc.start_line(),
@@ -393,9 +393,9 @@ impl RubydexServer {
             namespace.descendants().iter(),
             offset,
             limit,
-            |id| graph.declarations().get(id).is_some(),
+            |id| graph.declaration(**id).is_some(),
             |id| {
-                let desc_decl = graph.declarations().get(id)?;
+                let desc_decl = graph.declaration(*id)?;
                 Some(serde_json::json!({
                     "name": desc_decl.name(),
                     "kind": desc_decl.kind(),
@@ -429,15 +429,14 @@ impl RubydexServer {
             limit,
             |ref_id| {
                 graph
-                    .constant_references()
-                    .get(ref_id)
-                    .and_then(|r| graph.documents().get(&r.uri_id()))
+                    .constant_reference(**ref_id)
+                    .and_then(|r| graph.document(r.uri_id()))
                     .is_some()
             },
             |ref_id| {
-                let const_ref = graph.constant_references().get(ref_id)?;
-                let doc = graph.documents().get(&const_ref.uri_id())?;
-                let loc = const_ref.offset().to_location(doc).to_presentation();
+                let const_ref = graph.constant_reference(*ref_id)?;
+                let doc = graph.document(const_ref.uri_id())?;
+                let loc = const_ref.offset().to_location(&doc).to_presentation();
                 Some(serde_json::json!({
                     "path": format_path(doc.uri(), &self.root_path),
                     "line": loc.start_line(),
@@ -478,7 +477,7 @@ impl RubydexServer {
         };
 
         let uri_id = UriId::from(uri.as_str());
-        let Some(doc) = graph.documents().get(&uri_id) else {
+        let Some(doc) = graph.document(uri_id) else {
             return error_json(
                 "not_found",
                 &format!("File '{}' not found in the index", params.file_path),
@@ -489,15 +488,15 @@ impl RubydexServer {
         let mut declarations: Vec<serde_json::Value> = Vec::new();
 
         for def_id in doc.definitions() {
-            let Some(def) = graph.definitions().get(def_id) else {
+            let Some(def) = graph.definition(*def_id) else {
                 continue;
             };
 
-            let loc = def.offset().to_location(doc).to_presentation();
+            let loc = def.offset().to_location(&doc).to_presentation();
 
             let decl_name = graph
                 .definition_id_to_declaration_id(*def_id)
-                .and_then(|decl_id| graph.declarations().get(&decl_id))
+                .and_then(|decl_id| graph.declaration(decl_id))
                 .map(|decl| (decl.name().to_string(), decl.kind()));
 
             if let Some((name, kind)) = decl_name {
