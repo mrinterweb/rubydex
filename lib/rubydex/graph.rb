@@ -24,7 +24,9 @@ module Rubydex
       build_store_via_fork(cache) unless File.exist?(cache) && store_fresh?(cache)
       attach_store(cache)
       []
-    rescue StandardError => e
+    rescue StandardError, NotImplementedError => e
+      # NotImplementedError (from `fork`) is < ScriptError, not < StandardError, so list it
+      # explicitly — otherwise the gem raises on every call on Windows, where fork is unavailable.
       warn("rubydex: disk-backed index unavailable (#{e.class}: #{e.message}); falling back to in-memory")
       index_all(workspace_paths)
     end
@@ -78,6 +80,8 @@ module Rubydex
     # atomically publishes it. The parent never holds the full in-memory index.
     #: (String) -> void
     def build_store_via_fork(cache)
+      raise NotImplementedError, "fork is unavailable on this platform" unless Process.respond_to?(:fork)
+
       require "fileutils"
       FileUtils.mkdir_p(File.dirname(cache))
       tmp = "#{cache}.#{Process.pid}.building"
