@@ -316,6 +316,10 @@ impl RedbStore {
     /// declarations whose short name starts with `prefix` (case-insensitive), up to `limit`. Uses the
     /// ordered `short_name_index` so only the matching key range is scanned, not the whole graph.
     ///
+    /// Results are in lexicographic order of the lowercased short name (the index's key order), not
+    /// by relevance — a core-library and an application match for the same prefix are interchangeable
+    /// here. Rank by relevance upstream if a symbol picker needs it.
+    ///
     /// # Errors
     /// Returns an error if any redb read transaction fails.
     pub fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<String>, redb::Error> {
