@@ -162,16 +162,16 @@ pub unsafe extern "C" fn rdx_declaration_member(
 
     with_graph(pointer, |graph| {
         let name_id = DeclarationId::new(name_id);
-        if let Some(decl) = graph.declaration(name_id) {
-            if let Some(namespace) = decl.as_namespace() {
-                let member_id = StringId::from(member_str.as_str());
+        if let Some(decl) = graph.declaration(name_id)
+            && let Some(namespace) = decl.as_namespace()
+        {
+            let member_id = StringId::from(member_str.as_str());
 
-                if let Some(member_decl_id) = namespace.member(&member_id).copied() {
-                    if let Some(member_decl) = graph.declaration(member_decl_id) {
-                        return Box::into_raw(Box::new(CDeclaration::from_declaration(member_decl_id, &member_decl)))
-                            .cast_const();
-                    }
-                }
+            if let Some(member_decl_id) = namespace.member(&member_id).copied()
+                && let Some(member_decl) = graph.declaration(member_decl_id)
+            {
+                return Box::into_raw(Box::new(CDeclaration::from_declaration(member_decl_id, &member_decl)))
+                    .cast_const();
             }
         }
 
@@ -394,7 +394,11 @@ pub unsafe extern "C" fn rdx_declaration_descendants(pointer: GraphPointer, decl
         namespace
             .descendants()
             .iter()
-            .filter_map(|id| graph.declaration(*id).map(|decl| CDeclaration::from_declaration(*id, &decl)))
+            .filter_map(|id| {
+                graph
+                    .declaration(*id)
+                    .map(|decl| CDeclaration::from_declaration(*id, &decl))
+            })
             .collect::<Vec<_>>()
     });
 
@@ -425,7 +429,11 @@ pub unsafe extern "C" fn rdx_declaration_members(pointer: GraphPointer, decl_id:
         namespace
             .members()
             .values()
-            .filter_map(|id| graph.declaration(*id).map(|decl| CDeclaration::from_declaration(*id, &decl)))
+            .filter_map(|id| {
+                graph
+                    .declaration(*id)
+                    .map(|decl| CDeclaration::from_declaration(*id, &decl))
+            })
             .collect::<Vec<_>>()
     });
 

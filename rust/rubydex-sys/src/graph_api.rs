@@ -62,8 +62,12 @@ where
 /// Persists the resolved graph to an on-disk redb store at `path`, returning `true` on success.
 /// Returns `false` if the path is invalid, the store cannot be built, or the `redb-store` feature
 /// was not compiled in.
+///
+/// # Safety
+///
+/// `path` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
-pub extern "C" fn rdx_graph_build_store(pointer: GraphPointer, path: *const c_char) -> bool {
+pub unsafe extern "C" fn rdx_graph_build_store(pointer: GraphPointer, path: *const c_char) -> bool {
     let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
         return false;
     };
@@ -83,8 +87,13 @@ pub extern "C" fn rdx_graph_build_store(pointer: GraphPointer, path: *const c_ch
 /// Opens a prebuilt redb store and returns a new graph that uses it as its disk-backed base layer.
 /// Returns null if the path is invalid, the store cannot be opened, or the `redb-store` feature was
 /// not compiled in.
+///
+/// # Safety
+///
+/// `path` must be a valid NUL-terminated C string. The caller owns the returned `GraphPointer` and
+/// must free it with the graph free function.
 #[unsafe(no_mangle)]
-pub extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPointer {
+pub unsafe extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPointer {
     let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
         return ptr::null_mut();
     };
@@ -105,8 +114,12 @@ pub extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPointer {
 /// Switches an existing graph over to a prebuilt store as its disk-backed base layer (drops the
 /// in-memory maps). Returns `true` on success. Used by the launcher after a forked child built the
 /// store, so the long-lived server holds the bulk index off-heap.
+///
+/// # Safety
+///
+/// `path` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
-pub extern "C" fn rdx_graph_attach_store(pointer: GraphPointer, path: *const c_char) -> bool {
+pub unsafe extern "C" fn rdx_graph_attach_store(pointer: GraphPointer, path: *const c_char) -> bool {
     let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
         return false;
     };
@@ -236,10 +249,10 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
             let member = rubydex::model::ids::StringId::from(const_name.as_str());
             for depth in (1..=nesting.len()).rev() {
                 let scope_id = DeclarationId::from(nesting[..depth].join("::").as_str());
-                if let Ok(member_id) = rubydex::query::find_member_in_ancestors(graph, scope_id, member, false) {
-                    if let Some(decl) = graph.declaration(member_id) {
-                        return Box::into_raw(Box::new(CDeclaration::from_declaration(member_id, &decl))).cast_const();
-                    }
+                if let Ok(member_id) = rubydex::query::find_member_in_ancestors(graph, scope_id, member, false)
+                    && let Some(decl) = graph.declaration(member_id)
+                {
+                    return Box::into_raw(Box::new(CDeclaration::from_declaration(member_id, &decl))).cast_const();
                 }
             }
             return ptr::null();
@@ -584,7 +597,7 @@ pub unsafe extern "C" fn rdx_graph_declarations_iter_new(pointer: GraphPointer) 
         graph
             .declarations()
             .iter()
-            .map(|(id, decl)| CDeclaration::from_declaration(*id, &decl))
+            .map(|(id, decl)| CDeclaration::from_declaration(*id, decl))
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
     });
@@ -647,7 +660,8 @@ pub unsafe extern "C" fn rdx_graph_constant_references_iter_new(pointer: GraphPo
             .constant_references()
             .iter()
             .map(|(id, cref)| {
-                let declaration_id = graph.name(*cref.name_id())
+                let declaration_id = graph
+                    .name(*cref.name_id())
                     .and_then(|name_ref| match &*name_ref {
                         NameRef::Resolved(resolved) => Some(**resolved.declaration_id()),
                         NameRef::Unresolved(_) => None,
@@ -938,7 +952,8 @@ fn run_and_finalize_completion(
         .into_iter()
         .map(|candidate| match candidate {
             CompletionCandidate::Declaration(id) => {
-                let decl = graph.declaration(id)
+                let decl = graph
+                    .declaration(id)
                     .expect("completion candidate declaration must exist in graph");
                 CCompletionCandidate {
                     kind: CCompletionCandidateKind::Declaration,
@@ -960,7 +975,8 @@ fn run_and_finalize_completion(
                     .cast_const(),
             },
             CompletionCandidate::KeywordArgument(str_id) => {
-                let name_str = graph.string(str_id)
+                let name_str = graph
+                    .string(str_id)
                     .expect("keyword argument string must exist in graph");
                 CCompletionCandidate {
                     kind: CCompletionCandidateKind::KeywordParameter,

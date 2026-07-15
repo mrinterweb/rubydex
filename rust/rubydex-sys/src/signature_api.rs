@@ -152,10 +152,10 @@ pub unsafe extern "C" fn rdx_method_alias_definition_signatures(
             let decl = graph.declaration(declaration_id);
             if let Some(Declaration::Method(method_def)) = decl.as_deref() {
                 for definition_id in method_def.definitions() {
-                    if let Some(def) = graph.definition(*definition_id) {
-                        if let Definition::Method(method_definition) = &*def {
-                            sig_entries.extend(collect_method_signatures(graph, method_definition));
-                        }
+                    if let Some(def) = graph.definition(*definition_id)
+                        && let Definition::Method(method_definition) = &*def
+                    {
+                        sig_entries.extend(collect_method_signatures(graph, method_definition));
                     }
                 }
             } else {

@@ -554,8 +554,7 @@ pub unsafe extern "C" fn rdx_method_alias_definition_target(
 
         match rubydex::query::follow_method_alias(graph, def_id) {
             Ok(target_id) => {
-                let target_decl = graph.declaration(target_id)
-                    .expect("target declaration must exist");
+                let target_decl = graph.declaration(target_id).expect("target declaration must exist");
                 let boxed = Box::new(CDeclaration::from_declaration(target_id, &target_decl));
 
                 CMethodAliasTargetResult {

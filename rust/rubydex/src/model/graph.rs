@@ -154,9 +154,10 @@ impl Graph {
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn with_store(store: crate::model::store::RedbStore) -> Self {
-        let mut graph = Self::default();
-        graph.store = Some(store);
-        graph
+        Self {
+            store: Some(store),
+            ..Self::default()
+        }
     }
 
     /// Switches an existing graph over to a prebuilt store: drops the in-memory node maps (their
@@ -192,10 +193,10 @@ impl Graph {
             return Some(NodeRef::Mem(declaration));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store {
-            if let Ok(Some(declaration)) = store.get_declaration(id) {
-                return Some(NodeRef::Stored(Box::new(declaration)));
-            }
+        if let Some(store) = &self.store
+            && let Ok(Some(declaration)) = store.get_declaration(id)
+        {
+            return Some(NodeRef::Stored(Box::new(declaration)));
         }
         None
     }
@@ -207,10 +208,10 @@ impl Graph {
             return Some(NodeRef::Mem(definition));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store {
-            if let Ok(Some(definition)) = store.get_definition(id) {
-                return Some(NodeRef::Stored(Box::new(definition)));
-            }
+        if let Some(store) = &self.store
+            && let Ok(Some(definition)) = store.get_definition(id)
+        {
+            return Some(NodeRef::Stored(Box::new(definition)));
         }
         None
     }
@@ -222,10 +223,10 @@ impl Graph {
             return Some(NodeRef::Mem(name));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store {
-            if let Ok(Some(name)) = store.get_name(id) {
-                return Some(NodeRef::Stored(Box::new(name)));
-            }
+        if let Some(store) = &self.store
+            && let Ok(Some(name)) = store.get_name(id)
+        {
+            return Some(NodeRef::Stored(Box::new(name)));
         }
         None
     }
@@ -237,10 +238,10 @@ impl Graph {
             return Some(NodeRef::Mem(reference));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store {
-            if let Ok(Some(reference)) = store.get_constant_reference(id) {
-                return Some(NodeRef::Stored(Box::new(reference)));
-            }
+        if let Some(store) = &self.store
+            && let Ok(Some(reference)) = store.get_constant_reference(id)
+        {
+            return Some(NodeRef::Stored(Box::new(reference)));
         }
         None
     }
@@ -252,10 +253,10 @@ impl Graph {
             return Some(NodeRef::Mem(reference));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store {
-            if let Ok(Some(reference)) = store.get_method_reference(id) {
-                return Some(NodeRef::Stored(Box::new(reference)));
-            }
+        if let Some(store) = &self.store
+            && let Ok(Some(reference)) = store.get_method_reference(id)
+        {
+            return Some(NodeRef::Stored(Box::new(reference)));
         }
         None
     }
@@ -267,10 +268,10 @@ impl Graph {
             return Some(NodeRef::Mem(document));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store {
-            if let Ok(Some(document)) = store.get_document(id) {
-                return Some(NodeRef::Stored(Box::new(document)));
-            }
+        if let Some(store) = &self.store
+            && let Ok(Some(document)) = store.get_document(id)
+        {
+            return Some(NodeRef::Stored(Box::new(document)));
         }
         None
     }
@@ -282,10 +283,10 @@ impl Graph {
             return Some(NodeRef::Mem(string));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store {
-            if let Ok(Some(string)) = store.get_string(id) {
-                return Some(NodeRef::Stored(Box::new(string)));
-            }
+        if let Some(store) = &self.store
+            && let Ok(Some(string)) = store.get_string(id)
+        {
+            return Some(NodeRef::Stored(Box::new(string)));
         }
         None
     }
@@ -295,12 +296,11 @@ impl Graph {
     /// node (e.g. recording a workspace class as a descendant of a gem class).
     pub fn declaration_mut(&mut self, id: DeclarationId) -> Option<&mut Declaration> {
         #[cfg(feature = "redb-store")]
-        if !self.declarations.contains_key(&id) {
-            if let Some(store) = &self.store {
-                if let Ok(Some(declaration)) = store.get_declaration(id) {
-                    self.declarations.insert(id, declaration);
-                }
-            }
+        if !self.declarations.contains_key(&id)
+            && let Some(store) = &self.store
+            && let Ok(Some(declaration)) = store.get_declaration(id)
+        {
+            self.declarations.insert(id, declaration);
         }
         self.declarations.get_mut(&id)
     }
@@ -636,7 +636,10 @@ impl Graph {
             Some(name_id) => self.name_id_to_declaration_id(name_id)?,
             None => *OBJECT_ID,
         };
-        let singleton_id = *self.declaration(nesting_declaration_id)?.as_namespace()?.singleton_class()?;
+        let singleton_id = *self
+            .declaration(nesting_declaration_id)?
+            .as_namespace()?
+            .singleton_class()?;
         self.declaration(singleton_id)?
             .as_namespace()?
             .member(definition.str_id())

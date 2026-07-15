@@ -74,7 +74,11 @@ struct Args {
     open_store: Option<String>,
 
     #[cfg(feature = "redb-store")]
-    #[arg(long = "query", value_name = "FQN", help = "Fully qualified name to look up (with --open-store)")]
+    #[arg(
+        long = "query",
+        value_name = "FQN",
+        help = "Fully qualified name to look up (with --open-store)"
+    )]
     query: Option<String>,
 
     #[cfg(feature = "redb-store")]
