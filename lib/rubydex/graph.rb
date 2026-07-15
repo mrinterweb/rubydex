@@ -84,6 +84,7 @@ module Rubydex
     def cache_root
       return ENV["RUBYDEX_CACHE_DIR"] if ENV["RUBYDEX_CACHE_DIR"] && !ENV["RUBYDEX_CACHE_DIR"].empty?
       return ENV["XDG_CACHE_HOME"] if ENV["XDG_CACHE_HOME"] && !ENV["XDG_CACHE_HOME"].empty?
+
       File.join(Dir.home, ".cache")
     end
 
@@ -116,9 +117,11 @@ module Rubydex
       Find.find(@workspace_path) do |path|
         next if File.directory?(path)
         next unless INDEXABLE_EXTENSIONS.include?(File.extname(path))
+
         # Skip ignored directories anywhere in the tree.
         rel = path.delete_prefix(@workspace_path + File::SEPARATOR)
         next if rel.split(File::SEPARATOR).any? { |seg| IGNORED_DIRECTORIES.include?(seg) }
+
         stat = File.stat(path)
         digest.update(rel)
         digest.update("\0")
