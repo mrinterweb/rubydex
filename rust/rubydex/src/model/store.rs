@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use crate::model::declaration::Declaration;
 use crate::model::definitions::Definition;
 use crate::model::document::Document;
-use crate::model::graph::Graph;
+use crate::model::graph::{Graph, NameDependent};
 use crate::model::ids::{ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId};
 use crate::model::name::NameRef;
 use crate::model::references::{ConstantReference, MethodRef};
@@ -95,6 +95,91 @@ impl RedbStore {
         Ok(Self { db })
     }
 
+    /// Creates (or opens) a redb database at `path`.
+    ///
+    /// # Errors
+    /// Returns an error if the database file cannot be created or opened.
+    pub fn create(path: &Path) -> Result<Self, redb::Error> {
+        Ok(Self {
+            db: Database::create(path)?,
+        })
+    }
+
+    /// Inserts or replaces a node of type `V` in `table` at `key`. redb is mutable in place, so this
+    /// is how an incremental edit updates a node — no immutable-snapshot + overlay machinery needed.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or the redb transaction fails.
+    pub(crate) fn put_node<V: serde::Serialize>(
+        &self,
+        table: TableDefinition<u64, &[u8]>,
+        key: u64,
+        value: &V,
+    ) -> Result<(), redb::Error> {
+        let bytes = postcard::to_allocvec(value).expect("node should serialize");
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(table)?;
+            table.insert(key, bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Removes a node from `table` at `key`, returning whether it existed.
+    ///
+    /// # Errors
+    /// Returns an error if the redb transaction fails.
+    pub(crate) fn delete_node(&self, table: TableDefinition<u64, &[u8]>, key: u64) -> Result<bool, redb::Error> {
+        let write_txn = self.db.begin_write()?;
+        let existed = {
+            let mut table = write_txn.open_table(table)?;
+            table.remove(key)?.is_some()
+        };
+        write_txn.commit()?;
+        Ok(existed)
+    }
+
+    /// Inserts or replaces a single interned string.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or the redb transaction fails.
+    pub fn put_string(&self, id: StringId, value: &StringRef) -> Result<(), redb::Error> {
+        self.put_node(STRINGS, id.get(), value)
+    }
+
+    /// Inserts or replaces a single declaration node.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or the redb transaction fails.
+    pub fn put_declaration(&self, id: DeclarationId, value: &Declaration) -> Result<(), redb::Error> {
+        self.put_node(DECLARATIONS, id.get(), value)
+    }
+
+    /// Inserts or replaces a single document node.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or the redb transaction fails.
+    pub fn put_document(&self, id: UriId, value: &Document) -> Result<(), redb::Error> {
+        self.put_node(DOCUMENTS, id.get(), value)
+    }
+
+    /// Removes a declaration node, returning whether it existed.
+    ///
+    /// # Errors
+    /// Returns an error if the redb transaction fails.
+    pub fn delete_declaration(&self, id: DeclarationId) -> Result<bool, redb::Error> {
+        self.delete_node(DECLARATIONS, id.get())
+    }
+
+    /// Removes a document node, returning whether it existed.
+    ///
+    /// # Errors
+    /// Returns an error if the redb transaction fails.
+    pub fn delete_document(&self, id: UriId) -> Result<bool, redb::Error> {
+        self.delete_node(DOCUMENTS, id.get())
+    }
+
     /// Reads and deserializes a node of type `V` from `table` by its `u64` key, if present.
     ///
     /// # Errors
@@ -169,6 +254,14 @@ impl RedbStore {
     pub fn get_document(&self, id: UriId) -> Result<Option<Document>, redb::Error> {
         self.get_node(DOCUMENTS, id.get())
     }
+
+    /// Reads the dependents of a single name, if present.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction fails.
+    pub fn get_name_dependents(&self, id: NameId) -> Result<Option<Vec<NameDependent>>, redb::Error> {
+        self.get_node(NAME_DEPENDENTS, id.get())
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +302,103 @@ mod tests {
         assert_roundtrip!(graph.constant_references(), get_constant_reference);
         assert_roundtrip!(graph.method_references(), get_method_reference);
         assert_roundtrip!(graph.documents(), get_document);
+        assert_roundtrip!(graph.name_dependents(), get_name_dependents);
+    }
+
+    #[test]
+    fn string_round_trips_through_redb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("spike.redb");
+        let store = RedbStore::create(&path).expect("create store");
+
+        let id = StringId::from("ActiveRecord::Base");
+        let mut value = StringRef::new("ActiveRecord::Base".to_string());
+        value.increment_ref_count(4); // ref_count: 1 + 4 = 5
+
+        store.put_string(id, &value).expect("put");
+
+        let loaded = store.get_string(id).expect("get").expect("present");
+        assert_eq!(&*loaded, "ActiveRecord::Base");
+        assert_eq!(loaded.ref_count(), 5);
+
+        // Absent key returns None.
+        let missing = StringId::from("Does::Not::Exist");
+        assert!(store.get_string(missing).expect("get missing").is_none());
+    }
+
+    #[test]
+    fn declaration_round_trips_through_redb() {
+        use crate::model::declaration::{ClassDeclaration, Declaration, Namespace};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("decl.redb");
+        let store = RedbStore::create(&path).expect("create store");
+
+        // Build a class declaration with a member (exercises the nested enum + macro struct +
+        // IdentityHashMap<StringId, DeclarationId> serialization, which is the real risk).
+        let mut class = ClassDeclaration::new("Foo".to_string(), DeclarationId::from("Object"));
+        class.add_member(StringId::from("bar"), DeclarationId::from("Foo::bar"));
+        let decl = Declaration::Namespace(Namespace::Class(Box::new(class)));
+
+        let id = DeclarationId::from("Foo");
+        let before = postcard::to_allocvec(&decl).expect("serialize");
+        store.put_declaration(id, &decl).expect("put");
+
+        let loaded = store.get_declaration(id).expect("get").expect("present");
+        // Round-trip fidelity: serialize -> store -> load -> serialize is byte-identical.
+        let after = postcard::to_allocvec(&loaded).expect("re-serialize");
+        assert_eq!(before, after);
+        assert_eq!(loaded.name(), "Foo");
+        assert_eq!(loaded.kind(), "Class");
+    }
+
+    #[test]
+    fn incremental_mutation_persists() {
+        use crate::model::declaration::{ClassDeclaration, Declaration, Namespace};
+
+        fn class(name: &str) -> ClassDeclaration {
+            ClassDeclaration::new(name.to_string(), DeclarationId::from("Object"))
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mut.redb");
+        let store = RedbStore::create(&path).expect("create store");
+
+        let foo_id = DeclarationId::from("Foo");
+        let bar_id = DeclarationId::from("Bar");
+        store
+            .put_declaration(
+                foo_id,
+                &Declaration::Namespace(Namespace::Class(Box::new(class("Foo")))),
+            )
+            .expect("put Foo");
+        store
+            .put_declaration(
+                bar_id,
+                &Declaration::Namespace(Namespace::Class(Box::new(class("Bar")))),
+            )
+            .expect("put Bar");
+
+        // Update Foo in place (add a member) and delete Bar.
+        let mut foo = class("Foo");
+        foo.add_member(StringId::from("baz"), DeclarationId::from("Foo::baz"));
+        let foo_updated = Declaration::Namespace(Namespace::Class(Box::new(foo)));
+        store.put_declaration(foo_id, &foo_updated).expect("update Foo");
+        assert!(store.delete_declaration(bar_id).expect("delete Bar"), "Bar existed");
+
+        // Reopen as a fresh handle: the in-place mutations must have persisted.
+        drop(store);
+        let store = RedbStore::open(&path).expect("reopen store");
+        let loaded_foo = store.get_declaration(foo_id).expect("get Foo").expect("Foo present");
+        assert_eq!(
+            postcard::to_allocvec(&foo_updated).expect("serialize updated"),
+            postcard::to_allocvec(&loaded_foo).expect("serialize loaded"),
+        );
+        assert!(store.get_declaration(bar_id).expect("get Bar").is_none(), "Bar deleted");
+        assert!(
+            !store.delete_declaration(bar_id).expect("re-delete Bar"),
+            "Bar already gone"
+        );
     }
 
     #[test]
