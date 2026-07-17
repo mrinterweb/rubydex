@@ -50,8 +50,9 @@ This branch is a proof of concept. Turning it into a full backend needs:
 1. **Routing the live query layer through the store** — accessors return owned/
    `Cow` values (the store deserializes), ideally fronted by an LRU cache, with
    `query.rs`/`resolution.rs` call sites migrated.
-2. **Live-edit integration** — workspace edits and incremental resolution writing
-   through to the store (the primitives exist; the indexing/resolution wiring does not).
+2. **Live-edit integration** — workspace edits write through to an in-memory overlay that
+   shadows the store; store-backed nodes are materialized into the overlay before mutation
+   (implemented on this branch). Persisting overlay writes back to the store is a future task.
 3. **`Document` source retention** so an accurate `LineIndex` can be rebuilt from
    the store (currently skipped, so line/column is unavailable for store-loaded docs).
 
