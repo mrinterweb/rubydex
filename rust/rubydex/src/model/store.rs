@@ -402,6 +402,32 @@ mod tests {
     }
 
     #[test]
+    fn materialize_declaration_pulls_store_node_into_overlay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("base.redb");
+
+        // Build a store with built-in declarations, then drop the in-memory graph.
+        let base = Graph::new();
+        let (sample_id, sample_name) = base
+            .declarations()
+            .iter()
+            .next()
+            .map(|(id, declaration)| (*id, declaration.name().to_string()))
+            .expect("built-in declarations exist");
+        RedbStore::build(&path, &base).expect("build store");
+        drop(base);
+
+        // A store-backed graph has empty in-memory maps.
+        let mut graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        assert!(graph.declarations().get(&sample_id).is_none(), "memory layer is empty");
+
+        // Materialize pulls the node into memory so it can be mutated.
+        graph.materialize_declaration(sample_id);
+        let declaration = graph.declarations().get(&sample_id).expect("now in memory");
+        assert_eq!(declaration.name(), sample_name);
+    }
+
+    #[test]
     fn layered_graph_reads_declaration_from_store() {
         use crate::model::graph::DeclRef;
 
