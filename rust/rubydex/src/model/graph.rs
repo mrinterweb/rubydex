@@ -185,6 +185,73 @@ impl Graph {
         self.store.is_some()
     }
 
+    /// Pulls a declaration from the store into the in-memory overlay, if it's not already there.
+    /// After this call, `self.declarations.get_mut(&id)` will find it. No-op if the node is already
+    /// in memory or the graph isn't store-backed.
+    #[cfg(feature = "redb-store")]
+    pub fn materialize_declaration(&mut self, id: DeclarationId) {
+        if self.declarations.contains_key(&id) {
+            return;
+        }
+        if let Some(store) = &self.store
+            && let Ok(Some(declaration)) = store.get_declaration(id)
+        {
+            self.declarations.insert(id, declaration);
+        }
+    }
+
+    /// Pulls a definition from the store into the in-memory overlay. See [`materialize_declaration`].
+    #[cfg(feature = "redb-store")]
+    pub fn materialize_definition(&mut self, id: DefinitionId) {
+        if self.definitions.contains_key(&id) {
+            return;
+        }
+        if let Some(store) = &self.store
+            && let Ok(Some(definition)) = store.get_definition(id)
+        {
+            self.definitions.insert(id, definition);
+        }
+    }
+
+    /// Pulls a document from the store into the in-memory overlay. See [`materialize_declaration`].
+    #[cfg(feature = "redb-store")]
+    pub fn materialize_document(&mut self, id: UriId) {
+        if self.documents.contains_key(&id) {
+            return;
+        }
+        if let Some(store) = &self.store
+            && let Ok(Some(document)) = store.get_document(id)
+        {
+            self.documents.insert(id, document);
+        }
+    }
+
+    /// Pulls a name from the store into the in-memory overlay. See [`materialize_declaration`].
+    #[cfg(feature = "redb-store")]
+    pub fn materialize_name(&mut self, id: NameId) {
+        if self.names.contains_key(&id) {
+            return;
+        }
+        if let Some(store) = &self.store
+            && let Ok(Some(name)) = store.get_name(id)
+        {
+            self.names.insert(id, name);
+        }
+    }
+
+    /// Pulls name dependents from the store into the in-memory overlay. See [`materialize_declaration`].
+    #[cfg(feature = "redb-store")]
+    pub fn materialize_name_dependents(&mut self, id: NameId) {
+        if self.name_dependents.contains_key(&id) {
+            return;
+        }
+        if let Some(store) = &self.store
+            && let Ok(Some(dependents)) = store.get_name_dependents(id)
+        {
+            self.name_dependents.insert(id, dependents);
+        }
+    }
+
     /// Looks up a declaration by ID, checking the in-memory graph first, then the disk-backed store.
     /// Returns a `DeclRef` that derefs to `&Declaration` regardless of which layer it came from.
     #[must_use]
