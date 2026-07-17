@@ -20,7 +20,7 @@ class DiskIndexLiveEditTest < Minitest::Test
     File.write(rb, "class Foo\n  def bar; end\nend\n")
 
     graph = Rubydex::Graph.new(workspace_path: @tmp)
-    graph.index_workspace  # builds + attaches the store
+    graph.index_workspace # builds + attaches the store
 
     # The store-backed graph can still read declarations from disk.
     refute_nil(graph["Foo"], "graph[\"Foo\"] should read from the store")

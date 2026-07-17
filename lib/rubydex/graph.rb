@@ -20,9 +20,10 @@ module Rubydex
     # bulk index off-heap and serves reads from disk. Falls back to the in-memory path if the store
     # can't be built.
     #
-    # The default is the in-memory path: the disk-backed path is read-only today (the FFI
-    # short-circuits drop live `index_source` edits against a store-backed graph), so it must stay
-    # opt-in until live-edit integration (Stage 4) lands.
+    # The disk-backed path now supports live edits via a materialize-on-write overlay: edits
+    # flow through to the in-memory overlay, with store-backed nodes materialized before
+    # mutation. It stays opt-in because the overlay is in-memory only (a fresh boot rebuilds
+    # the store from scratch; persisting overlay writes back is a future task).
     #: -> Array[String]
     def index_workspace
       return index_all(workspace_paths) unless disk_index_enabled?
@@ -63,7 +64,7 @@ module Rubydex
 
     # Whether the disk-backed (low-resident-memory) index is enabled for this process. Opt-in via
     # RUBYDEX_DISK_INDEX=1; the default keeps the in-memory path so live edits keep working (the
-    # store-backed path is read-only until Stage 4 lands live-edit integration).
+    # store-backed path now supports live edits via the overlay).
     #: -> bool
     def disk_index_enabled?
       ENV["RUBYDEX_DISK_INDEX"] == "1" || ENV["RUBYDEX_DISK_INDEX"] == "true"
