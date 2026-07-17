@@ -149,17 +149,27 @@ fn main() {
     #[cfg(feature = "redb-store")]
     if let Some(path) = args.open_store.as_deref() {
         let store = rubydex::model::store::RedbStore::open(std::path::Path::new(path)).expect("open store");
+        let graph = rubydex::model::graph::Graph::with_store(store);
         if let Some(fqn) = args.query.as_deref() {
-            match store.definition_location(fqn).expect("query store") {
+            let id = rubydex::model::ids::DeclarationId::from(fqn);
+            let loc = graph.declaration(id).and_then(|decl| {
+                let def_id = decl.definitions().first().copied()?;
+                let def = graph.definition(def_id)?;
+                let doc = graph.document(*def.uri_id())?;
+                Some((doc.uri().to_string(), def.offset().start()))
+            });
+            match loc {
                 Some((uri, start)) => println!("{fqn} -> {uri} @ {start}"),
                 None => println!("{fqn} -> not found"),
             }
         }
         if let Some(prefix) = args.search.as_deref() {
-            let names = store.search_prefix(prefix, 20).expect("search store");
-            println!("{} match(es) for prefix {prefix:?}:", names.len());
-            for name in names {
-                println!("  {name}");
+            let ids = rubydex::query::declaration_search(&graph, &[prefix], &rubydex::query::MatchMode::Exact);
+            println!("{} match(es) for prefix {prefix:?}:", ids.len());
+            for id in ids {
+                if let Some(decl) = graph.declaration(id) {
+                    println!("  {}", decl.name());
+                }
             }
         }
         MemoryStats::print_memory_usage();
