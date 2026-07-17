@@ -233,6 +233,10 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
 
         // Store-backed (pre-resolved, static) mode: the resolver mutates gem nodes, which would
         // panic against the disk-backed graph. Resolve directly from the pre-resolved store instead.
+        // ponytail: this reimplements lexical-scope + ancestor-walk resolution separately from
+        // Resolver::resolve_constant. The two will diverge if the resolver's resolution rules
+        // change. Replace with a store-aware resolver (materialize-on-write for gem nodes) when
+        // full resolution against store-backed graphs is needed.
         #[cfg(feature = "redb-store")]
         if graph.is_store_backed() {
             // 1. Lexical scope: try `nesting[..depth]::name` from innermost to top level.

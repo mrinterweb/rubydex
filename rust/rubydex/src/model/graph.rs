@@ -105,6 +105,12 @@ assert_mem_size!(Graph, 352);
 /// A reference to a node that is either borrowed from the in-memory graph (`Mem`) or owned, having
 /// been deserialized from the disk-backed store (`Stored`). Derefs to `&T` so most call sites read
 /// identically whether the node lives in memory or on disk.
+///
+/// ponytail: `Stored` allocates a `Box<T>` per store-backed lookup. The materialize-on-write
+/// overlay (`Graph::materialize_*`) caches nodes in memory after first access, so repeated lookups
+/// of the same node hit the in-memory map (zero alloc) rather than re-deserializing from disk.
+/// The allocation ceiling is bounded by distinct nodes touched per session, not lookup count.
+/// An LRU cap on the overlay would bound it further if memory becomes a concern.
 #[derive(Debug)]
 pub enum NodeRef<'a, T> {
     Mem(&'a T),
