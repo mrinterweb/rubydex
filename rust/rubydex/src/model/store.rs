@@ -428,6 +428,72 @@ mod tests {
     }
 
     #[test]
+    fn add_member_materializes_store_backed_owner() {
+        use crate::model::ids::StringId;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("base.redb");
+
+        let base = Graph::new();
+        // Find a namespace declaration (class/module) from the built-ins to use as the owner.
+        let owner_id = base
+            .declarations()
+            .iter()
+            .find(|(_, decl)| decl.as_namespace().is_some())
+            .map(|(id, _)| *id)
+            .expect("built-in namespace exists");
+        RedbStore::build(&path, &base).expect("build store");
+        drop(base);
+
+        let mut graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        let member_id = DeclarationId::from("TestMember");
+        let member_str = StringId::from("TestMember");
+
+        // add_member on a store-backed owner must materialize it first, not silently skip.
+        graph.add_member(&owner_id, member_id, member_str);
+
+        // The owner is now in the overlay with the new member attached.
+        let owner = graph.declarations().get(&owner_id).expect("owner materialized");
+        let members = owner.as_namespace().expect("owner is a namespace").members();
+        assert!(members.values().any(|&id| id == member_id), "member was added");
+    }
+
+    #[test]
+    fn consume_document_changes_replaces_store_backed_document() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("foo.rb");
+        std::fs::write(&rb_path, "class Foo\n  def bar; end\nend\n").expect("write rb v1");
+
+        // Index + resolve + persist.
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph);
+
+        // Reopen store-backed. The in-memory documents map is empty.
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+
+        // Re-index the same file with a changed body. consume_document_changes must find the old
+        // Document (from the store), invalidate it, and apply the new one — not panic.
+        let new_source = "class Foo\n  def baz; end\nend\n";
+        let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
+        crate::indexing::index_source(&mut graph, &uri, new_source, &crate::indexing::LanguageId::Ruby);
+
+        // The new method definition (baz) must be visible in the overlay. Method definitions store
+        // their name as a str_id (unresolved at this stage), so check via the string table.
+        let has_baz = graph.definitions().values().any(|d| {
+            matches!(d, crate::model::definitions::Definition::Method(m)
+                if graph.strings().get(m.str_id()).is_some_and(|s| s.as_str().contains("baz")))
+        });
+        assert!(has_baz, "new definition 'baz' should be in the overlay after re-index");
+    }
+
+    #[test]
     fn layered_graph_reads_declaration_from_store() {
         use crate::model::graph::DeclRef;
 

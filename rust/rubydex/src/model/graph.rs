@@ -1121,6 +1121,8 @@ impl Graph {
         member_declaration_id: DeclarationId,
         member_str_id: StringId,
     ) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_declaration(*owner_id);
         if let Some(declaration) = self.declarations.get_mut(owner_id) {
             match declaration {
                 Declaration::Namespace(namespace) => namespace.add_member(member_str_id, member_declaration_id),
@@ -1255,6 +1257,9 @@ impl Graph {
     pub fn consume_document_changes(&mut self, other: LocalGraph) {
         let uri_id = other.uri_id();
 
+        #[cfg(feature = "redb-store")]
+        self.materialize_document(uri_id);
+
         let old_document = match self.documents.entry(uri_id) {
             Entry::Occupied(entry) => {
                 // No changes to the document, skip invalidation and merging
@@ -1344,6 +1349,8 @@ impl Graph {
             if let Some(constant_ref) = self.constant_references.remove(ref_id) {
                 // Detach from target declaration. References unresolved during invalidation
                 // were already detached; this catches the rest.
+                #[cfg(feature = "redb-store")]
+                self.materialize_name(*constant_ref.name_id());
                 if let NameRef::Resolved(resolved) = self.names.get(constant_ref.name_id()).unwrap()
                     && let Some(declaration) = self.declarations.get_mut(resolved.declaration_id())
                 {
@@ -1379,6 +1386,8 @@ impl Graph {
         }
 
         for def_id in document.definitions() {
+            #[cfg(feature = "redb-store")]
+            self.materialize_definition(*def_id);
             let definition = self.definitions.remove(def_id).unwrap();
 
             if let Some(name_id) = definition.name_id() {
