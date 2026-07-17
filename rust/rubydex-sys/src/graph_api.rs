@@ -807,11 +807,6 @@ pub unsafe extern "C" fn rdx_index_source(
     };
 
     with_mut_graph(pointer, |graph| {
-        // Static store-backed POC mode: ignore live edits (reads come from the prebuilt store).
-        #[cfg(feature = "redb-store")]
-        if graph.is_store_backed() {
-            return IndexSourceResult::Success;
-        }
         indexing::index_source(graph, &uri_str, source_str, &language);
         IndexSourceResult::Success
     })
