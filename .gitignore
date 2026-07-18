@@ -24,3 +24,4 @@ lib/rubydex/*.dylib
 lib/rubydex/*.so
 lib/rubydex/bin/
 .mcp.json
+.codegraph/
