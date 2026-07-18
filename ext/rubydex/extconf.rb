@@ -31,6 +31,8 @@ cargo_args = ["--manifest-path #{root_dir.join("Cargo.toml")}"]
 cargo_args << "$(CARGO_PROFILE_FLAG)"
 cargo_args << "--features rubydex-sys/generate_bindings"
 # Disk-backed (low-resident-memory) index is compiled by default; set RUBYDEX_NO_REDB_STORE=1 to opt out.
+# `redb` is pure Rust and builds on every target. Store building needs Process#fork, unavailable on
+# Windows, so index_workspace falls back to in-memory there; attach_store/open_store still work.
 cargo_args << "--features rubydex-sys/redb-store" unless ENV["RUBYDEX_NO_REDB_STORE"]
 
 if Gem.win_platform?
