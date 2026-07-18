@@ -35,12 +35,16 @@ class DiskIndexLiveEditTest < Minitest::Test
     # The store-backed graph can still read declarations from disk.
     refute_nil(graph["Foo"], "graph[\"Foo\"] should read from the store")
 
-    # Live edit: change the method name. Before this task, rdx_index_source short-circuited
-    # and silently dropped the edit. Now it must flow through to the overlay without panicking.
-    graph.index_source(rb, "class Foo\n  def baz; end\nend\n", "ruby")
+    # Live edit: change the method name. Store documents are keyed by `file://` URIs (from
+    # index_workspace), so the edit must use the same URI to replace the store-backed document.
+    graph.index_source("file://#{rb}", "class Foo\n  def baz; end\nend\n", "ruby")
+    graph.resolve
 
-    # The layered accessor still reads "Foo" from the store (resolution of the new "baz"
-    # member requires Graph#resolve, which is a separate concern).
-    refute_nil(graph["Foo"], "graph[\"Foo\"] still readable after live edit")
+    # The overlay document shadows the store's, and resolution surfaces the edited members.
+    foo = graph["Foo"]
+    refute_nil(foo, "graph[\"Foo\"] still readable after live edit")
+    member_names = foo.members.map(&:name)
+    assert_includes(member_names, "Foo#baz()")
+    refute_includes(member_names, "Foo#bar()")
   end
 end
