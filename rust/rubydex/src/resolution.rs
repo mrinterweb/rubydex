@@ -160,7 +160,7 @@ impl<'a> Resolver<'a> {
     fn handle_definition_unit(&mut self, unit_id: Unit, id: DefinitionId) {
         let mut needs_linearization = false;
 
-        let outcome = match self.graph.definitions().get(&id).unwrap() {
+        let outcome = match self.graph.definition(id).as_deref().unwrap() {
             Definition::Class(class) => {
                 self.handle_constant_declaration(*class.name_id(), id, false, |name, owner_id| {
                     needs_linearization = true;
@@ -236,7 +236,7 @@ impl<'a> Resolver<'a> {
 
     /// Handles a unit of work for resolving a constant reference
     fn handle_reference_unit(&mut self, unit_id: Unit, id: ConstantReferenceId) {
-        let constant_ref = self.graph.constant_references().get(&id).unwrap();
+        let constant_ref = self.graph.constant_reference(id).unwrap();
 
         match self.resolve_constant_internal(*constant_ref.name_id()) {
             Outcome::Resolved(declaration_id) => {
@@ -275,7 +275,7 @@ impl<'a> Resolver<'a> {
         let mut method_visibility_ids = Vec::new();
 
         for id in other_ids {
-            match self.graph.definitions().get(&id).unwrap() {
+            match self.graph.definition(id).as_deref().unwrap() {
                 Definition::Method(method_definition) => {
                     let str_id = *method_definition.str_id();
                     // SelfReceiver methods are handled in the convergence loop
@@ -347,7 +347,7 @@ impl<'a> Resolver<'a> {
                 Definition::GlobalVariable(var) => {
                     let owner_id = *OBJECT_ID;
                     let str_id = *var.str_id();
-                    let name = self.graph.strings().get(&str_id).unwrap().as_str().to_string();
+                    let name = self.graph.string(str_id).unwrap().as_str().to_string();
 
                     let declaration_id = self.graph.add_declaration(id, name, |fully_qualified_name| {
                         Declaration::GlobalVariable(Box::new(GlobalVariableDeclaration::new(
@@ -367,11 +367,11 @@ impl<'a> Resolver<'a> {
                         continue;
                     };
 
-                    let Some(nesting_def) = self.graph.definitions().get(&nesting_id) else {
+                    let Some(nesting_def) = self.graph.definition(nesting_id) else {
                         continue;
                     };
 
-                    match nesting_def {
+                    match &*nesting_def {
                         // When the instance variable is inside a method body, we determine the owner based on the method's receiver
                         Definition::Method(method) => {
                             if let Some(receiver) = method.receiver() {
@@ -404,7 +404,7 @@ impl<'a> Resolver<'a> {
                                 {
                                     debug_assert!(
                                         matches!(
-                                            self.graph.declarations().get(&owner_id),
+                                            self.graph.declaration(owner_id).as_deref(),
                                             Some(Declaration::Namespace(Namespace::SingletonClass(_)))
                                         ),
                                         "Instance variable in singleton method should be owned by a SingletonClass"
@@ -426,8 +426,8 @@ impl<'a> Resolver<'a> {
 
                             // If the method is in a singleton class, the instance variable belongs to the class object
                             // Like `class << Foo; def bar; @bar = 1; end; end`, where `@bar` is owned by `Foo::<Foo>`
-                            if let Some(decl) = self.graph.declarations().get(&method_owner_id)
-                                && matches!(decl, Declaration::Namespace(Namespace::SingletonClass(_)))
+                            if let Some(decl) = self.graph.declaration(method_owner_id)
+                                && matches!(&*decl, Declaration::Namespace(Namespace::SingletonClass(_)))
                             {
                                 // Method in singleton class - owner is the singleton class itself
                                 self.create_declaration(str_id, id, method_owner_id, |name| {
@@ -463,7 +463,7 @@ impl<'a> Resolver<'a> {
                             {
                                 debug_assert!(
                                     matches!(
-                                        self.graph.declarations().get(&owner_id),
+                                        self.graph.declaration(owner_id).as_deref(),
                                         Some(Declaration::Namespace(Namespace::SingletonClass(_)))
                                     ),
                                     "Instance variable in class/module body should be owned by a SingletonClass"
@@ -492,7 +492,7 @@ impl<'a> Resolver<'a> {
                             {
                                 debug_assert!(
                                     matches!(
-                                        self.graph.declarations().get(&owner_id),
+                                        self.graph.declaration(owner_id).as_deref(),
                                         Some(Declaration::Namespace(Namespace::SingletonClass(_)))
                                     ),
                                     "Instance variable in singleton class body should be owned by a SingletonClass"
@@ -567,11 +567,11 @@ impl<'a> Resolver<'a> {
                     let uri_id = *constant_visibility.uri_id();
                     let offset = constant_visibility.offset().clone();
                     let lexical_nesting_id = *constant_visibility.lexical_nesting_id();
-                    let constant_name = self.graph.strings().get(&target).unwrap().as_str().to_string();
+                    let constant_name = self.graph.string(target).unwrap().as_str().to_string();
 
                     let owner_id = if let Some(receiver_name_id) = receiver {
-                        let NameRef::Resolved(resolved_receiver) = self.graph.names().get(&receiver_name_id).unwrap()
-                        else {
+                        let receiver_name = self.graph.name(receiver_name_id).unwrap();
+                        let NameRef::Resolved(resolved_receiver) = &*receiver_name else {
                             continue;
                         };
                         let Some(namespace_id) = self.resolve_to_namespace(*resolved_receiver.declaration_id()) else {
@@ -585,15 +585,16 @@ impl<'a> Resolver<'a> {
                         decl_id
                     };
 
-                    let Some(Declaration::Namespace(namespace)) = self.graph.declarations().get(&owner_id) else {
+                    let owner_node = self.graph.declaration(owner_id);
+                    let Some(Declaration::Namespace(namespace)) = owner_node.as_deref() else {
                         continue;
                     };
 
                     if let Some(member) = namespace
                         .member(&target)
-                        .and_then(|member_id| self.graph.declarations().get(member_id))
+                        .and_then(|member_id| self.graph.declaration(*member_id))
                         && matches!(
-                            member,
+                            &*member,
                             Declaration::Constant(_)
                                 | Declaration::ConstantAlias(_)
                                 | Declaration::Namespace(Namespace::Class(_) | Namespace::Module(_))
@@ -642,7 +643,8 @@ impl<'a> Resolver<'a> {
         let mut pending_work = Vec::new();
 
         for id in visibility_ids {
-            let Definition::MethodVisibility(method_visibility) = self.graph.definitions().get(&id).unwrap() else {
+            let method_visibility_def = self.graph.definition(id).unwrap();
+            let Definition::MethodVisibility(method_visibility) = &*method_visibility_def else {
                 unreachable!()
             };
 
@@ -667,7 +669,8 @@ impl<'a> Resolver<'a> {
                 lexical_owner_id
             };
 
-            let Some(Declaration::Namespace(namespace)) = self.graph.declarations().get(&owner_id) else {
+            let owner_node = self.graph.declaration(owner_id);
+            let Some(Declaration::Namespace(namespace)) = owner_node.as_deref() else {
                 continue;
             };
 
@@ -679,10 +682,8 @@ impl<'a> Resolver<'a> {
                     Ancestor::Complete(ancestor_id) => {
                         let has_member = self
                             .graph
-                            .declarations()
-                            .get(ancestor_id)
-                            .and_then(|decl| decl.as_namespace())
-                            .and_then(|ns| ns.member(&str_id))
+                            .declaration(*ancestor_id)
+                            .and_then(|decl| decl.as_namespace().and_then(|ns| ns.member(&str_id)).copied())
                             .is_some();
 
                         if has_member {
@@ -709,8 +710,8 @@ impl<'a> Resolver<'a> {
                 pending_work.push(Unit::Definition(id));
             } else {
                 // Ancestors are fully resolved — method definitively doesn't exist.
-                let method_name = self.graph.strings().get(&str_id).unwrap().as_str().to_string();
-                let owner_name = self.graph.declarations().get(&owner_id).unwrap().name().to_string();
+                let method_name = self.graph.string(str_id).unwrap().as_str().to_string();
+                let owner_name = self.graph.declaration(owner_id).unwrap().name().to_string();
                 let diagnostic = Diagnostic::new(
                     Rule::UndefinedMethodVisibilityTarget,
                     uri_id,
@@ -730,7 +731,7 @@ impl<'a> Resolver<'a> {
     /// If the receiver name is unresolved, preserve the definition for a later
     /// resolve cycle instead of dropping work during an incremental delete/re-add gap.
     fn resolve_constant_receiver(&mut self, name_id: NameId, id: DefinitionId) -> Option<DeclarationId> {
-        match self.graph.names().get(&name_id).unwrap() {
+        match self.graph.name(name_id).as_deref().unwrap() {
             NameRef::Resolved(resolved) => Some(*resolved.declaration_id()),
             NameRef::Unresolved(_) => {
                 self.graph.push_work(Unit::Definition(id));
@@ -749,8 +750,8 @@ impl<'a> Resolver<'a> {
         F: FnOnce(String) -> Declaration,
     {
         let fully_qualified_name = {
-            let owner = self.graph.declarations().get(&owner_id).unwrap();
-            let name_str = self.graph.strings().get(&str_id).unwrap();
+            let owner = self.graph.declaration(owner_id).unwrap();
+            let name_str = self.graph.string(str_id).unwrap();
             format!("{}#{}", owner.name(), name_str.as_str())
         };
 
@@ -765,8 +766,8 @@ impl<'a> Resolver<'a> {
     fn resolve_class_variable_owner(&self, lexical_nesting_id: Option<DefinitionId>) -> Option<DeclarationId> {
         let mut current_nesting = lexical_nesting_id;
         while let Some(nesting_id) = current_nesting {
-            if let Some(nesting_def) = self.graph.definitions().get(&nesting_id)
-                && matches!(nesting_def, Definition::SingletonClass(_))
+            if let Some(nesting_def) = self.graph.definition(nesting_id)
+                && matches!(&*nesting_def, Definition::SingletonClass(_))
             {
                 current_nesting = *nesting_def.lexical_nesting_id();
             } else {
@@ -778,7 +779,7 @@ impl<'a> Resolver<'a> {
         // If the declaration is a constant alias, follow the alias chain to find the
         // target namespace. Returns None if the alias target is unresolved.
         if matches!(
-            self.graph.declarations().get(&declaration_id),
+            self.graph.declaration(declaration_id).as_deref(),
             Some(Declaration::ConstantAlias(_))
         ) {
             self.resolve_to_namespace(declaration_id)
@@ -809,33 +810,33 @@ impl<'a> Resolver<'a> {
             // is an exception: returning the surrounding scope would attach its members to
             // the wrong owner (e.g. `Object`) and never recover, so retry later instead.
             let Some(declaration_id) = self.graph.definition_id_to_declaration_id(id) else {
-                let definition = self.graph.definitions().get(&id).unwrap();
-                if matches!(definition, Definition::SingletonClass(_)) {
+                let definition = self.graph.definition(id).unwrap();
+                if matches!(&*definition, Definition::SingletonClass(_)) {
                     break None;
                 }
                 current_nesting = *definition.lexical_nesting_id();
                 continue;
             };
 
-            let decl = self.graph.declarations().get(&declaration_id).unwrap();
+            let decl = self.graph.declaration(declaration_id).unwrap();
 
             // If the associated declaration is a namespace that can own things, we found the right owner. Otherwise, we might
             // have found something nested inside something else (like a method), in which case we have to walk up until we find
             // the appropriate owner.
             if matches!(
-                decl,
+                &*decl,
                 Declaration::Namespace(Namespace::Class(_) | Namespace::Module(_) | Namespace::SingletonClass(_))
             ) {
                 break Some(declaration_id);
             }
 
-            if matches!(decl, Declaration::ConstantAlias(_)) {
+            if matches!(&*decl, Declaration::ConstantAlias(_)) {
                 // Follow the alias chain to find the target namespace. If the alias is unresolved,
                 // the definition cannot be properly owned yet and should be retried later.
                 break self.resolve_to_namespace(declaration_id);
             }
 
-            let definition = self.graph.definitions().get(&id).unwrap();
+            let definition = self.graph.definition(id).unwrap();
             current_nesting = *definition.lexical_nesting_id();
         };
 
@@ -860,18 +861,18 @@ impl<'a> Resolver<'a> {
         attached_id: DeclarationId,
         mode: SingletonAncestors,
     ) -> Option<DeclarationId> {
-        let attached_decl = self.graph.declarations().get(&attached_id).unwrap();
+        let attached_decl = self.graph.declaration(attached_id).unwrap();
 
         // If the attached object is a constant alias, follow the alias chain to find the actual namespace
-        if matches!(attached_decl, Declaration::ConstantAlias(_)) {
+        if matches!(&*attached_decl, Declaration::ConstantAlias(_)) {
             return match self.resolve_to_namespace(attached_id) {
                 Some(id) => self.get_or_create_singleton_class(id, mode),
                 None => None,
             };
         }
 
-        if matches!(attached_decl, Declaration::Constant(_)) {
-            if self.graph.all_definitions_promotable(attached_decl) {
+        if matches!(&*attached_decl, Declaration::Constant(_)) {
+            if self.graph.all_definitions_promotable(&attached_decl) {
                 self.graph.promote_constant_to_namespace(attached_id, |name, owner_id| {
                     Declaration::Namespace(Namespace::Module(Box::new(ModuleDeclaration::new(name, owner_id))))
                 });
@@ -882,7 +883,7 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        let attached_decl = self.graph.declarations_mut().get_mut(&attached_id).unwrap();
+        let attached_decl = self.graph.declaration_mut(attached_id).unwrap();
         let fully_qualified_name = format!("{}::<{}>", attached_decl.name(), attached_decl.unqualified_name());
 
         let namespace_decl = attached_decl
@@ -943,7 +944,7 @@ impl<'a> Resolver<'a> {
     #[must_use]
     fn linearize_ancestors(&mut self, declaration_id: DeclarationId, context: &mut LinearizationContext) -> Ancestors {
         {
-            let declaration = self.graph.declarations_mut().get_mut(&declaration_id).unwrap();
+            let declaration = self.graph.declaration_mut(declaration_id).unwrap();
 
             // Add this declaration to the descendants so that we capture transitive descendant relationships
             context.descendants.insert(declaration_id);
@@ -981,8 +982,7 @@ impl<'a> Resolver<'a> {
             // already linearized the parent's ancestors, but it's the first time we're discovering the descendant
             for descendant in &context.descendants {
                 self.graph
-                    .declarations_mut()
-                    .get_mut(&declaration_id)
+                    .declaration_mut(declaration_id)
                     .unwrap()
                     .as_namespace_mut()
                     .unwrap()
@@ -991,14 +991,14 @@ impl<'a> Resolver<'a> {
         }
 
         let parent_ancestors = self.linearize_parent_ancestors(declaration_id, context);
-        let declaration = self.graph.declarations().get(&declaration_id).unwrap();
+        let declaration = self.graph.declaration(declaration_id).unwrap();
         let mut mixins = Vec::new();
 
-        let is_singleton_class = matches!(declaration, Declaration::Namespace(Namespace::SingletonClass(_)));
+        let is_singleton_class = matches!(&*declaration, Declaration::Namespace(Namespace::SingletonClass(_)));
 
         // If we're linearizing a singleton class, add the extends of the attached class to the list of mixins to process
         if is_singleton_class {
-            let attached_decl = self.graph.declarations().get(declaration.owner_id()).unwrap();
+            let attached_decl = self.graph.declaration(*declaration.owner_id()).unwrap();
 
             mixins.extend(
                 attached_decl
@@ -1050,8 +1050,7 @@ impl<'a> Resolver<'a> {
         };
 
         self.graph
-            .declarations_mut()
-            .get_mut(&declaration_id)
+            .declaration_mut(declaration_id)
             .unwrap()
             .as_namespace_mut()
             .unwrap()
@@ -1070,9 +1069,9 @@ impl<'a> Resolver<'a> {
             return None;
         }
 
-        let declaration = self.graph.declarations().get(&declaration_id).unwrap();
+        let declaration = self.graph.declaration(declaration_id).unwrap();
 
-        match declaration {
+        match &*declaration {
             Declaration::Namespace(Namespace::Class(_)) => {
                 let definition_ids = declaration.definitions().to_vec();
 
@@ -1127,15 +1126,11 @@ impl<'a> Resolver<'a> {
         // collect ahead of time. This is the reason why we apparently treat an extend like an include, because an extend in
         // the attached object is equivalent to an include in the singleton class
         for mixin in mixins {
-            let constant_reference = self
-                .graph
-                .constant_references()
-                .get(mixin.constant_reference_id())
-                .unwrap();
+            let constant_reference = self.graph.constant_reference(*mixin.constant_reference_id()).unwrap();
 
             match mixin {
                 Mixin::Prepend(_) => {
-                    match self.graph.names().get(constant_reference.name_id()).unwrap() {
+                    match self.graph.name(*constant_reference.name_id()).as_deref().unwrap() {
                         NameRef::Resolved(resolved) => {
                             let Some(module_id) = self.resolve_to_namespace(*resolved.declaration_id()) else {
                                 continue;
@@ -1174,7 +1169,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 Mixin::Include(_) | Mixin::Extend(_) => {
-                    match self.graph.names().get(constant_reference.name_id()).unwrap() {
+                    match self.graph.name(*constant_reference.name_id()).as_deref().unwrap() {
                         NameRef::Resolved(resolved) => {
                             let Some(module_id) = self.resolve_to_namespace(*resolved.declaration_id()) else {
                                 continue;
@@ -1230,8 +1225,7 @@ impl<'a> Resolver<'a> {
                 if let Ancestor::Complete(ancestor_id) = ancestor {
                     let namespace = self
                         .graph
-                        .declarations_mut()
-                        .get_mut(ancestor_id)
+                        .declaration_mut(*ancestor_id)
                         .unwrap()
                         .as_namespace_mut()
                         .unwrap();
@@ -1255,7 +1249,7 @@ impl<'a> Resolver<'a> {
     where
         F: FnOnce(String, DeclarationId) -> Declaration,
     {
-        let name_ref = self.graph.names().get(&name_id).unwrap();
+        let name_ref = self.graph.name(name_id).unwrap();
         let str_id = *name_ref.str();
 
         let outcome = match self.name_owner_id(name_id, singleton) {
@@ -1279,14 +1273,14 @@ impl<'a> Resolver<'a> {
         // depending on whether the name has a parent scope
         match outcome {
             Outcome::Resolved(owner_id) => {
-                let mut fully_qualified_name = self.graph.strings().get(&str_id).unwrap().to_string();
+                let mut fully_qualified_name = self.graph.string(str_id).unwrap().to_string();
 
                 // If the owner is a promotable constant and something is being defined inside it, promote it to a
                 // module
                 {
-                    let owner = self.graph.declarations().get(&owner_id).unwrap();
+                    let owner = self.graph.declaration(owner_id).unwrap();
                     let is_promotable_constant =
-                        matches!(owner, Declaration::Constant(_)) && self.graph.all_definitions_promotable(owner);
+                        matches!(&*owner, Declaration::Constant(_)) && self.graph.all_definitions_promotable(&owner);
 
                     if is_promotable_constant {
                         self.graph.promote_constant_to_namespace(owner_id, |name, owner_id| {
@@ -1296,7 +1290,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
 
-                let owner = self.graph.declarations().get(&owner_id).unwrap();
+                let owner = self.graph.declaration(owner_id).unwrap();
                 let owner_is_namespace = owner.as_namespace().is_some();
 
                 // Skip creating singletons when the target is a not a namespace or not promotable. For example:
@@ -1321,8 +1315,7 @@ impl<'a> Resolver<'a> {
                 if owner_is_namespace {
                     if singleton {
                         self.graph
-                            .declarations_mut()
-                            .get_mut(&owner_id)
+                            .declaration_mut(owner_id)
                             .unwrap()
                             .as_namespace_mut()
                             .unwrap()
@@ -1347,7 +1340,7 @@ impl<'a> Resolver<'a> {
     // Unresolved(None). This is used by the singleton path so the unit can retry when the
     // receiver might resolve later rather than being dropped.
     fn name_owner_id(&mut self, name_id: NameId, preserve_retry: bool) -> Outcome {
-        let name_ref = self.graph.names().get(&name_id).unwrap();
+        let name_ref = self.graph.name(name_id).unwrap();
 
         if let Some(&parent_scope) = name_ref.parent_scope().as_ref() {
             // If we have `A::B`, the owner of `B` is whatever `A` resolves to.
@@ -1370,7 +1363,7 @@ impl<'a> Resolver<'a> {
             //     CONST = 1  # CONST's nesting is the class, which may resolve to an alias target
             //   end
             // If `ALIAS` points to `Outer`, `CONST` should be owned by `Outer::Target`, not `ALIAS::Target`.
-            match self.graph.names().get(nesting_id).unwrap() {
+            match self.graph.name(*nesting_id).as_deref().unwrap() {
                 NameRef::Resolved(resolved) => self.resolve_to_primary_namespace(*resolved.declaration_id()),
                 NameRef::Unresolved(_) => {
                     // The only case where we wouldn't have the nesting resolved at this point is if it's available through
@@ -1390,10 +1383,10 @@ impl<'a> Resolver<'a> {
     /// so `B::C` can still be placed. Recurses for multi-level cases. Todos get promoted
     /// when real definitions appear later.
     fn create_todo_for_parent(&mut self, name_id: NameId) -> DeclarationId {
-        let name_ref = self.graph.names().get(&name_id).unwrap();
+        let name_ref = self.graph.name(name_id).unwrap();
         let parent_scope = *name_ref.parent_scope().as_ref().unwrap();
 
-        let parent_name = self.graph.names().get(&parent_scope).unwrap();
+        let parent_name = self.graph.name(parent_scope).unwrap();
         let parent_str_id = *parent_name.str();
         let parent_has_parent_scope = parent_name.parent_scope().as_ref().is_some();
         // Non-Lexical Lifetimes: borrow of parent_name ends here
@@ -1417,17 +1410,21 @@ impl<'a> Resolver<'a> {
         };
 
         let fully_qualified_name = if parent_owner_id == *OBJECT_ID {
-            self.graph.strings().get(&parent_str_id).unwrap().to_string()
+            self.graph.string(parent_str_id).unwrap().to_string()
         } else {
             format!(
                 "{}::{}",
-                self.graph.declarations().get(&parent_owner_id).unwrap().name(),
-                self.graph.strings().get(&parent_str_id).unwrap().as_str()
+                self.graph.declaration(parent_owner_id).unwrap().name(),
+                self.graph.string(parent_str_id).unwrap().as_str()
             )
         };
 
         let declaration_id = DeclarationId::from(&fully_qualified_name);
 
+        // Materialize a store-backed declaration first so the entry below sees it; otherwise a
+        // fresh Todo would shadow the store's real declaration in the in-memory layer.
+        #[cfg(feature = "redb-store")]
+        self.graph.materialize_declaration(declaration_id);
         if let Entry::Vacant(e) = self.graph.declarations_mut().entry(declaration_id) {
             e.insert(Declaration::Namespace(Namespace::Todo(Box::new(TodoDeclaration::new(
                 fully_qualified_name,
@@ -1453,7 +1450,7 @@ impl<'a> Resolver<'a> {
 
         // Check if the primary result is still an unresolved alias
         if matches!(
-            self.graph.declarations().get(&primary_id),
+            self.graph.declaration(primary_id).as_deref(),
             Some(Declaration::ConstantAlias(_))
         ) {
             return Outcome::Retry {
@@ -1469,7 +1466,7 @@ impl<'a> Resolver<'a> {
     /// resolved
     #[allow(clippy::too_many_lines)]
     fn resolve_constant_internal(&mut self, name_id: NameId) -> Outcome {
-        let name = match self.graph.names().get(&name_id).unwrap() {
+        let name = match self.graph.name(name_id).as_deref().unwrap() {
             NameRef::Resolved(resolved) => return Outcome::Resolved(*resolved.declaration_id()),
             NameRef::Unresolved(name) => name.as_ref().clone(),
         };
@@ -1485,24 +1482,27 @@ impl<'a> Resolver<'a> {
                 result
             }
             ParentScope::Attached(parent_scope_id) => {
-                let NameRef::Resolved(parent_scope) = self.graph.names().get(parent_scope_id).unwrap() else {
+                let parent_scope_node = self.graph.name(*parent_scope_id).unwrap();
+                let NameRef::Resolved(parent_scope) = &*parent_scope_node else {
                     return Outcome::Retry {
                         partial_ancestors: false,
                     };
                 };
 
                 let mut target_decl_id = *parent_scope.declaration_id();
-                let target_decl = self.graph.declarations().get(&target_decl_id).unwrap();
+                let target_decl = self.graph.declaration(target_decl_id).unwrap();
 
                 // If the attached object is a constant alias, resolve it to the target namespace
                 // (e.g., ALIAS.bar where ALIAS = Foo should create the singleton class on Foo, not ALIAS)
-                if matches!(target_decl, Declaration::ConstantAlias(_)) {
+                if matches!(&*target_decl, Declaration::ConstantAlias(_)) {
                     let resolved_ids = self.resolve_alias_chains(target_decl_id);
 
-                    if resolved_ids
-                        .iter()
-                        .any(|id| matches!(self.graph.declarations().get(id), Some(Declaration::ConstantAlias(_))))
-                    {
+                    if resolved_ids.iter().any(|id| {
+                        matches!(
+                            self.graph.declaration(*id).as_deref(),
+                            Some(Declaration::ConstantAlias(_))
+                        )
+                    }) {
                         return Outcome::Retry {
                             partial_ancestors: false,
                         };
@@ -1510,7 +1510,7 @@ impl<'a> Resolver<'a> {
 
                     let Some(&namespace_id) = resolved_ids
                         .iter()
-                        .find(|id| matches!(self.graph.declarations().get(id), Some(Declaration::Namespace(_))))
+                        .find(|id| matches!(self.graph.declaration(**id).as_deref(), Some(Declaration::Namespace(_))))
                     else {
                         return Outcome::Unresolved;
                     };
@@ -1541,7 +1541,8 @@ impl<'a> Resolver<'a> {
                 result
             }
             ParentScope::Some(parent_scope_id) => {
-                let NameRef::Resolved(parent_scope) = self.graph.names().get(parent_scope_id).unwrap() else {
+                let parent_scope_node = self.graph.name(*parent_scope_id).unwrap();
+                let NameRef::Resolved(parent_scope) = &*parent_scope_node else {
                     return Outcome::Retry {
                         partial_ancestors: false,
                     };
@@ -1556,7 +1557,7 @@ impl<'a> Resolver<'a> {
                 let mut found_namespace = false;
 
                 for &id in &resolved_ids {
-                    match self.graph.declarations().get(&id) {
+                    match self.graph.declaration(id).as_deref() {
                         Some(Declaration::ConstantAlias(_)) => {
                             // Alias not fully resolved yet
                             return Outcome::Retry {
@@ -1609,7 +1610,7 @@ impl<'a> Resolver<'a> {
     /// chain and returns the first namespace found. Returns `None` for all other declaration types or unresolved alias
     /// chains.
     fn resolve_to_namespace(&self, declaration_id: DeclarationId) -> Option<DeclarationId> {
-        match self.graph.declarations().get(&declaration_id)? {
+        match self.graph.declaration(declaration_id).as_deref()? {
             Declaration::Namespace(_) => Some(declaration_id),
             Declaration::ConstantAlias(_) => self
                 .resolve_alias_chains(declaration_id)
@@ -1637,7 +1638,7 @@ impl<'a> Resolver<'a> {
                 continue;
             }
 
-            match self.graph.declarations().get(&current) {
+            match self.graph.declaration(current).as_deref() {
                 Some(Declaration::ConstantAlias(_)) => {
                     let targets = self.graph.alias_targets(&current).unwrap_or_default();
                     if targets.is_empty() {
@@ -1671,14 +1672,14 @@ impl<'a> Resolver<'a> {
                 return scope_outcome;
             }
 
-            let (ancestor_outcome, nesting_decl_id) = match self.graph.names().get(nesting).unwrap() {
+            let (ancestor_outcome, nesting_decl_id) = match self.graph.name(*nesting).as_deref().unwrap() {
                 NameRef::Resolved(nesting_name_ref) => {
                     let resolved_ids = self.resolve_alias_chains(*nesting_name_ref.declaration_id());
                     let mut result = Outcome::Unresolved;
                     let mut decl_id = None;
 
                     for &id in &resolved_ids {
-                        match self.graph.declarations().get(&id) {
+                        match self.graph.declaration(id).as_deref() {
                             Some(Declaration::ConstantAlias(_)) => {
                                 result = Outcome::Retry {
                                     partial_ancestors: false,
@@ -1712,7 +1713,7 @@ impl<'a> Resolver<'a> {
             // For incomplete ancestor chains, we also try Object as a tentative resolution to avoid unnecessary retries.
             let is_module = nesting_decl_id.is_some_and(|id| {
                 matches!(
-                    self.graph.declarations().get(&id),
+                    self.graph.declaration(id).as_deref(),
                     Some(Declaration::Namespace(Namespace::Module(_) | Namespace::Todo(_)))
                 )
             });
@@ -1748,8 +1749,7 @@ impl<'a> Resolver<'a> {
                 .find_map(|ancestor_id| {
                     if let Ancestor::Complete(ancestor_id) = ancestor_id {
                         self.graph
-                            .declarations()
-                            .get(ancestor_id)
+                            .declaration(*ancestor_id)
                             .unwrap()
                             .as_namespace()
                             .unwrap()
@@ -1766,7 +1766,7 @@ impl<'a> Resolver<'a> {
                         Ancestor::Partial(name_id) => {
                             // Stop at unresolved ancestors to avoid resolving to a later one.
                             // Skip if the name matches what we're searching for.
-                            if *self.graph.names().get(&name_id).unwrap().str() != str_id {
+                            if *self.graph.name(name_id).unwrap().str() != str_id {
                                 return Outcome::Retry {
                                     partial_ancestors: true,
                                 };
@@ -1775,8 +1775,7 @@ impl<'a> Resolver<'a> {
                         Ancestor::Complete(ancestor_id) => {
                             if let Some(id) = self
                                 .graph
-                                .declarations()
-                                .get(&ancestor_id)
+                                .declaration(ancestor_id)
                                 .unwrap()
                                 .as_namespace()
                                 .unwrap()
@@ -1796,20 +1795,24 @@ impl<'a> Resolver<'a> {
 
     /// Look for the constant in the lexical scopes that are a part of its nesting
     fn search_lexical_scopes(&self, name: &Name, str_id: StringId) -> Outcome {
-        let mut current_name = name;
+        let mut current_nesting = *name.nesting();
 
-        while let Some(nesting_id) = current_name.nesting() {
-            if let NameRef::Resolved(nesting_name_ref) = self.graph.names().get(nesting_id).unwrap() {
+        while let Some(nesting_id) = current_nesting {
+            let nesting_node = self.graph.name(nesting_id).unwrap();
+            if let NameRef::Resolved(nesting_name_ref) = &*nesting_node {
                 let declaration_id = *nesting_name_ref.declaration_id();
 
-                if let Some(namespace_id) = self.resolve_to_namespace(declaration_id)
-                    && let Some(namespace) = self.graph.declarations().get(&namespace_id).unwrap().as_namespace()
-                    && let Some(member) = namespace.member(&str_id)
-                {
-                    return Outcome::Resolved(*member);
+                if let Some(namespace_id) = self.resolve_to_namespace(declaration_id) {
+                    let namespace_node = self.graph.declaration(namespace_id).unwrap();
+                    if let Some(member) = namespace_node
+                        .as_namespace()
+                        .and_then(|namespace| namespace.member(&str_id))
+                    {
+                        return Outcome::Resolved(*member);
+                    }
                 }
 
-                current_name = nesting_name_ref.name();
+                current_nesting = *nesting_name_ref.name().nesting();
             } else {
                 return Outcome::Retry {
                     partial_ancestors: false,
@@ -1987,7 +1990,10 @@ impl<'a> Resolver<'a> {
                     if !seen_ancestors.insert(id) {
                         continue;
                     }
-                    // Declaration may have been removed by invalidation — skip stale items
+                    // Declaration may have been removed by invalidation — skip stale items.
+                    // Intentionally checks only the in-memory map: pending_work only ever contains
+                    // overlay units (the store is pre-resolved), and overlay declarations are always
+                    // in memory.
                     if self.graph.declarations().contains_key(&id) {
                         ancestors.push(id);
                     }
@@ -2024,9 +2030,9 @@ impl<'a> Resolver<'a> {
             return (*CLASS_ID, false);
         }
 
-        let decl = self.graph.declarations().get(&attached_id).unwrap();
+        let decl = self.graph.declaration(attached_id).unwrap();
 
-        match decl {
+        match &*decl {
             Declaration::Namespace(Namespace::Module(_)) => (*MODULE_ID, false),
             Declaration::Namespace(Namespace::SingletonClass(_)) => {
                 // For singleton classes, we keep recursively wrapping parents until we can reach the original attached
@@ -2064,15 +2070,15 @@ impl<'a> Resolver<'a> {
         let mut unresolved_parent = None;
 
         for definition_id in definition_ids {
-            let definition = self.graph.definitions().get(definition_id).unwrap();
+            let definition = self.graph.definition(*definition_id).unwrap();
 
-            if let Definition::Class(class) = definition
+            if let Definition::Class(class) = &*definition
                 && let Some(superclass) = class.superclass_ref()
             {
-                let constant_reference = self.graph.constant_references().get(superclass).unwrap();
-                let name = self.graph.names().get(constant_reference.name_id()).unwrap();
+                let constant_reference = self.graph.constant_reference(*superclass).unwrap();
+                let name = self.graph.name(*constant_reference.name_id()).unwrap();
 
-                match name {
+                match &*name {
                     NameRef::Resolved(resolved) => {
                         if let Some(parent_id) = self.resolve_to_namespace(*resolved.declaration_id()) {
                             explicit_parents.push(parent_id);
@@ -2118,9 +2124,9 @@ impl<'a> Resolver<'a> {
     }
 
     fn mixins_of(&self, definition_id: DefinitionId) -> Option<Vec<Mixin>> {
-        let definition = self.graph.definitions().get(&definition_id).unwrap();
+        let definition = self.graph.definition(definition_id).unwrap();
 
-        match definition {
+        match &*definition {
             Definition::Class(class) => Some(class.mixins().to_vec()),
             Definition::SingletonClass(class) => Some(class.mixins().to_vec()),
             Definition::Module(module) => Some(module.mixins().to_vec()),

@@ -231,37 +231,6 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
         let nesting: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(nesting, count).unwrap() };
         let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
 
-        // Store-backed (pre-resolved, static) mode: the resolver mutates gem nodes, which would
-        // panic against the disk-backed graph. Resolve directly from the pre-resolved store instead.
-        // ponytail: this reimplements lexical-scope + ancestor-walk resolution separately from
-        // Resolver::resolve_constant. The two will diverge if the resolver's resolution rules
-        // change. Replace with a store-aware resolver (materialize-on-write for gem nodes) when
-        // full resolution against store-backed graphs is needed.
-        #[cfg(feature = "redb-store")]
-        if graph.is_store_backed() {
-            // 1. Lexical scope: try `nesting[..depth]::name` from innermost to top level.
-            for depth in (0..=nesting.len()).rev() {
-                let mut parts = nesting[..depth].to_vec();
-                parts.push(const_name.clone());
-                let id = DeclarationId::from(parts.join("::").as_str());
-                if let Some(decl) = graph.declaration(id) {
-                    return Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))).cast_const();
-                }
-            }
-            // 2. Inheritance: the constant may be defined in an ancestor (parent class / included
-            // module / concern) of an enclosing namespace. Walk each enclosing scope's ancestors.
-            let member = rubydex::model::ids::StringId::from(const_name.as_str());
-            for depth in (1..=nesting.len()).rev() {
-                let scope_id = DeclarationId::from(nesting[..depth].join("::").as_str());
-                if let Ok(member_id) = rubydex::query::find_member_in_ancestors(graph, scope_id, member, false)
-                    && let Some(decl) = graph.declaration(member_id)
-                {
-                    return Box::into_raw(Box::new(CDeclaration::from_declaration(member_id, &decl))).cast_const();
-                }
-            }
-            return ptr::null();
-        }
-
         let Some((name_id, names_to_untrack)) = name_api::nesting_stack_to_name_id(graph, &const_name, nesting) else {
             return ptr::null();
         };
@@ -432,14 +401,6 @@ pub unsafe extern "C" fn rdx_index_all(
     let file_paths: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(file_paths, count).unwrap() };
 
     with_mut_graph(pointer, |graph| {
-        // Static store-backed POC mode: don't index into the in-memory layer (would require
-        // store-aware resolution to be correct). Reads are served from the prebuilt store.
-        #[cfg(feature = "redb-store")]
-        if graph.is_store_backed() {
-            unsafe { *out_error_count = 0 };
-            return ptr::null();
-        }
-
         let (file_paths, listing_errors) = listing::collect_file_paths(file_paths, &graph.excluded_patterns());
         let indexing_errors = indexing::index_files(graph, file_paths, indexing::IndexerBackend::RubyIndexer);
 
@@ -516,12 +477,6 @@ pub unsafe extern "C" fn rdx_graph_delete_document(pointer: GraphPointer, uri: *
 #[unsafe(no_mangle)]
 pub extern "C" fn rdx_graph_resolve(pointer: GraphPointer) {
     with_mut_graph(pointer, |graph| {
-        // A store-backed graph is pre-resolved and static (POC mode): skip resolution so the
-        // unmigrated resolver never runs against disk-backed nodes.
-        #[cfg(feature = "redb-store")]
-        if graph.is_store_backed() {
-            return;
-        }
         let mut resolver = Resolver::new(graph);
         resolver.resolve();
     });

@@ -30,7 +30,7 @@ thread_local! {
 
 /// Returns the rebuilt `(LineIndex, source_len)` for a store-loaded document, serving from the
 /// thread-local memo on hit and reading+parsing from disk on miss. Returns `None` if the source can
-/// not be read (the caller falls back to the document's empty in-memory index).
+/// not be read.
 #[cfg(feature = "redb-store")]
 fn rebuilt_line_index(document: &Document) -> Option<(LineIndex, usize)> {
     let uri = document.uri().to_string();
@@ -65,13 +65,21 @@ pub struct Location {
 /// - If the offset cannot be converted to a position.
 #[must_use]
 pub(crate) fn create_location_for_uri_and_offset(graph: &Graph, document: &Document, offset: &Offset) -> *mut Location {
-    // Store-loaded documents have an empty `LineIndex` (source is discarded on serialize), so rebuild
-    // it from the file and clamp offsets to avoid the "invalid offset" panic. Falls back to the
-    // document's own index (and empty source) if the file can't be read.
+    // Store-loaded documents carry the empty placeholder `LineIndex` (source is discarded on
+    // serialize); only for those, rebuild the index from the file on disk. Live documents keep their
+    // own index, which reflects the in-memory (possibly unsaved) source — rebuilding from disk would
+    // shift every reported position. Offsets are always clamped to the length of the index in use so
+    // a stale offset degrades to a clamped position instead of panicking across the FFI boundary.
     #[cfg(feature = "redb-store")]
-    let (line_index, max_offset): (LineIndex, u32) = match rebuilt_line_index(document) {
-        Some((index, len)) => (index, u32::try_from(len).unwrap_or(u32::MAX)),
-        None => (document.line_index().clone(), u32::MAX),
+    let (line_index, max_offset): (LineIndex, u32) = if u32::from(document.line_index().len()) == 0 {
+        match rebuilt_line_index(document) {
+            Some((index, len)) => (index, u32::try_from(len).unwrap_or(u32::MAX)),
+            // Unreadable source: clamp to 0 on the empty index — `line_col(0)` is valid (0:0).
+            None => (document.line_index().clone(), 0),
+        }
+    } else {
+        let len = u32::from(document.line_index().len());
+        (document.line_index().clone(), len)
     };
     #[cfg(not(feature = "redb-store"))]
     let (line_index, max_offset) = (document.line_index(), u32::MAX);

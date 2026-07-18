@@ -117,13 +117,17 @@ module Rubydex
       digest = Digest::SHA1.new
       root = workspace_path
       excluded = excluded_patterns
+      # Excluded patterns are absolute globs anchored at the workspace root (e.g.
+      # "/workspace/.git", "/workspace/**/fixtures"), matching the Rust listing's semantics.
+      excluded_match = ->(path) { excluded.any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
       Find.find(root) do |path|
         if File.directory?(path)
           # Prune excluded directories (e.g. .git, node_modules) so Find doesn't descend into them.
-          Find.prune if excluded.include?(path)
+          Find.prune if excluded_match.call(path)
           next
         end
         next unless INDEXABLE_EXTENSIONS.include?(File.extname(path))
+        next if excluded_match.call(path)
 
         rel = path.delete_prefix(root + File::SEPARATOR)
         stat = File.stat(path)

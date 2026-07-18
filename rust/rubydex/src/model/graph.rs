@@ -98,6 +98,11 @@ pub struct Graph {
     /// in-memory maps above fall back to the store, keeping the bulk index off the heap.
     #[cfg(feature = "redb-store")]
     store: Option<crate::model::store::RedbStore>,
+
+    /// IDs of declarations removed from the in-memory overlay while a store is attached. Blocks
+    /// the layered accessors from resurrecting the store's stale copy of a deleted node.
+    #[cfg(feature = "redb-store")]
+    removed_declarations: IdentityHashSet<DeclarationId>,
 }
 #[cfg(not(feature = "redb-store"))]
 assert_mem_size!(Graph, 352);
@@ -148,6 +153,8 @@ impl Graph {
             config: Config::new(),
             #[cfg(feature = "redb-store")]
             store: None,
+            #[cfg(feature = "redb-store")]
+            removed_declarations: IdentityHashSet::default(),
         };
 
         add_built_in_data(&mut graph);
@@ -181,6 +188,7 @@ impl Graph {
         self.method_references = IdentityHashMap::default();
         self.name_dependents = IdentityHashMap::default();
         self.pending_work = Vec::new();
+        self.removed_declarations = IdentityHashSet::default();
         self.store = Some(store);
     }
 
@@ -196,7 +204,7 @@ impl Graph {
     /// in memory or the graph isn't store-backed.
     #[cfg(feature = "redb-store")]
     pub fn materialize_declaration(&mut self, id: DeclarationId) {
-        if self.declarations.contains_key(&id) {
+        if self.declarations.contains_key(&id) || self.removed_declarations.contains(&id) {
             return;
         }
         if let Some(store) = &self.store
@@ -266,7 +274,8 @@ impl Graph {
             return Some(NodeRef::Mem(declaration));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store
+        if !self.removed_declarations.contains(&id)
+            && let Some(store) = &self.store
             && let Ok(Some(declaration)) = store.get_declaration(id)
         {
             return Some(NodeRef::Stored(Box::new(declaration)));
@@ -370,6 +379,7 @@ impl Graph {
     pub fn declaration_mut(&mut self, id: DeclarationId) -> Option<&mut Declaration> {
         #[cfg(feature = "redb-store")]
         if !self.declarations.contains_key(&id)
+            && !self.removed_declarations.contains(&id)
             && let Some(store) = &self.store
             && let Ok(Some(declaration)) = store.get_declaration(id)
         {
@@ -443,6 +453,12 @@ impl Graph {
     {
         let declaration_id = DeclarationId::from(&fully_qualified_name);
 
+        // A matching declaration may live only in the store (e.g. a gem `Foo = Struct.new`
+        // promoted by a workspace `class Foo`); materialize so it is promoted or extended
+        // rather than shadowed by a duplicate in-memory entry.
+        #[cfg(feature = "redb-store")]
+        self.materialize_declaration(declaration_id);
+
         let is_namespace_definition = matches!(
             self.definitions.get(&definition_id),
             Some(Definition::Class(_) | Definition::Module(_) | Definition::SingletonClass(_))
@@ -508,6 +524,9 @@ impl Graph {
     where
         F: FnOnce(String, DeclarationId) -> Declaration,
     {
+        // The constant may live only in the store; materialize before removing.
+        #[cfg(feature = "redb-store")]
+        self.materialize_declaration(declaration_id);
         let old_decl = self.declarations.remove(&declaration_id).unwrap();
         let name = old_decl.name().to_string();
         let owner_id = *old_decl.owner_id();
@@ -520,8 +539,7 @@ impl Graph {
 
     #[must_use]
     pub fn is_namespace(&self, declaration_id: &DeclarationId) -> bool {
-        self.declarations
-            .get(declaration_id)
+        self.declaration(*declaration_id)
             .is_some_and(|decl| decl.as_namespace().is_some())
     }
 
@@ -1193,6 +1211,10 @@ impl Graph {
     ///
     /// Will panic if invoked for a non existing declaration
     pub fn record_resolved_reference(&mut self, reference_id: ConstantReferenceId, declaration_id: DeclarationId) {
+        // The target may live only in the store (e.g. an overlay reference resolving to a gem
+        // class); materialize it so the reference is recorded on the in-memory copy.
+        #[cfg(feature = "redb-store")]
+        self.materialize_declaration(declaration_id);
         self.declarations
             .get_mut(&declaration_id)
             .expect("Tried to record a constant reference for a declaration that doesn't exist")
@@ -1206,6 +1228,9 @@ impl Graph {
     /// accumulates pending work items for the resolver to process.
     pub fn delete_document(&mut self, uri: &str) -> Option<UriId> {
         let uri_id = UriId::from(uri);
+        // A store-backed document must be materialized before removal so invalidation sees it.
+        #[cfg(feature = "redb-store")]
+        self.materialize_document(uri_id);
         let document = self.documents.remove(&uri_id)?;
         self.invalidate(Some(&document), None);
         self.remove_document_data(&document);
@@ -1485,6 +1510,11 @@ impl Graph {
         queue: &mut Vec<InvalidationItem>,
         visited_declarations: &mut IdentityHashSet<DeclarationId>,
     ) {
+        // Materialize a store-backed declaration so detachment and the checks below see it;
+        // tombstoned declarations are skipped by materialize_declaration and stay gone.
+        #[cfg(feature = "redb-store")]
+        self.materialize_declaration(decl_id);
+
         // Collect names before detaching — after detachment, definitions() may be empty
         let seed_names = self.names_for_declaration(decl_id);
 
@@ -1567,6 +1597,10 @@ impl Graph {
             }
 
             self.declarations.remove(&decl_id);
+            // Tombstone so the store's stale copy of this declaration is never resurrected by the
+            // layered accessors.
+            #[cfg(feature = "redb-store")]
+            self.removed_declarations.insert(decl_id);
         } else {
             // Update: the declaration still has definitions so it stays in the graph,
             // but its ancestor chain may have changed (e.g. a mixin was added/removed).

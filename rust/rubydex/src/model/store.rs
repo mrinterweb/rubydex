@@ -66,6 +66,14 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the database cannot be created or any redb transaction fails.
     pub fn build(path: &Path, graph: &Graph) -> Result<Self, redb::Error> {
+        // `Database::create` opens an existing file rather than truncating it, which would merge
+        // stale nodes from a previous build into the new store. Remove any existing file first so
+        // the build always replaces.
+        if let Err(err) = std::fs::remove_file(path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err.into());
+        }
         let db = Database::create(path)?;
         {
             let write_txn = db.begin_write()?;
@@ -491,6 +499,50 @@ mod tests {
                 if graph.strings().get(m.str_id()).is_some_and(|s| s.as_str().contains("baz")))
         });
         assert!(has_baz, "new definition 'baz' should be in the overlay after re-index");
+    }
+
+    #[test]
+    fn resolve_applies_live_edits_on_store_backed_graph() {
+        use crate::indexing::{IndexerBackend, LanguageId, index_files, index_source};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("foo.rb");
+        std::fs::write(&rb_path, "class Foo\n  def bar; end\nend\n").expect("write rb v1");
+
+        // Index + resolve + persist a graph containing `class Foo; def bar; end`.
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph);
+
+        // Reopen store-backed: `Foo` reads from disk with `bar` as a member.
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        assert!(graph.declarations().is_empty(), "memory layer is empty");
+        let foo_id = DeclarationId::from("Foo");
+        let removed_member = StringId::from("bar()");
+        let added_member = StringId::from("baz()");
+        {
+            let foo = graph.declaration(foo_id).expect("Foo from store");
+            let namespace = foo.as_namespace().expect("Foo is a namespace");
+            assert!(namespace.member(&removed_member).is_some(), "store has bar");
+        }
+
+        // Live edit: replace bar with baz, then resolve. The resolver must see the overlay
+        // document and rewrite the store-backed declaration through the layered accessors.
+        let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
+        index_source(&mut graph, &uri, "class Foo\n  def baz; end\nend\n", &LanguageId::Ruby);
+        Resolver::new(&mut graph).resolve();
+
+        let foo = graph.declaration(foo_id).expect("Foo after edit");
+        let namespace = foo.as_namespace().expect("Foo is a namespace");
+        assert!(namespace.member(&added_member).is_some(), "edited member baz resolves");
+        assert!(
+            namespace.member(&removed_member).is_none(),
+            "removed member bar is gone"
+        );
     }
 
     #[test]
