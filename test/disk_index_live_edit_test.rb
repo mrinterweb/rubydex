@@ -1,9 +1,12 @@
 # frozen_string_literal: true
 
+require "tmpdir"
+require "fileutils"
 require "test_helper"
 
 class DiskIndexLiveEditTest < Minitest::Test
   def setup
+    super
     @tmp = Dir.mktmpdir
     ENV["RUBYDEX_DISK_INDEX"] = "1"
     ENV["RUBYDEX_CACHE_DIR"] = @tmp
@@ -13,9 +16,16 @@ class DiskIndexLiveEditTest < Minitest::Test
     ENV.delete("RUBYDEX_DISK_INDEX")
     ENV.delete("RUBYDEX_CACHE_DIR")
     FileUtils.remove_entry(@tmp) if @tmp && File.exist?(@tmp)
+    super
   end
 
   def test_index_source_applies_to_store_backed_graph
+    # `index_workspace` builds the store via `build_store_via_fork`, which requires
+    # `Process#fork` (unavailable on Windows). Without it, `index_workspace` silently falls back
+    # to the in-memory path, which is covered by other tests — there's nothing store-backed to
+    # verify here. Mirrors the same check `build_store_via_fork` itself makes.
+    skip("fork unavailable; index_workspace can't build a store on this platform") unless Process.respond_to?(:fork)
+
     rb = File.join(@tmp, "foo.rb")
     File.write(rb, "class Foo\n  def bar; end\nend\n")
 
