@@ -281,6 +281,19 @@ impl RedbStore {
             .collect()
     }
 
+    /// Reads all definition node ids for enumeration (keys only, no deserialization).
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn definition_ids(&self) -> Result<Vec<DefinitionId>, redb::Error> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(DEFINITIONS)?;
+        table
+            .range(..u64::MAX)?
+            .map(|entry| -> Result<DefinitionId, redb::Error> { Ok(DefinitionId::new(entry?.0.value())) })
+            .collect()
+    }
+
     /// Reads a single definition node, if present.
     ///
     /// # Errors

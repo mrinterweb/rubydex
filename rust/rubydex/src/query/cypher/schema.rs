@@ -421,15 +421,36 @@ impl GraphProvider for Graph {
     }
 }
 
+/// All document ids the graph can see: in-memory map ∪ disk store.
+fn document_node_ids(graph: &Graph) -> Vec<UriId> {
+    let mut ids = graph.documents().keys().copied().collect::<Vec<_>>();
+    ids.extend(graph.store_document_uris().into_iter().map(|(id, _)| id));
+    ids
+}
+
+/// All definition ids the graph can see: in-memory map ∪ disk store.
+fn definition_node_ids(graph: &Graph) -> Vec<DefinitionId> {
+    let mut ids = graph.definitions().keys().copied().collect::<Vec<_>>();
+    ids.extend(graph.store_definition_ids());
+    ids
+}
+
+/// All declaration ids the graph can see: in-memory map ∪ disk store.
+fn declaration_node_ids(graph: &Graph) -> Vec<DeclarationId> {
+    let mut ids = graph.declarations().keys().copied().collect::<Vec<_>>();
+    ids.extend(graph.store_declaration_names().into_iter().map(|(id, _)| id));
+    ids
+}
+
 /// Returns all nodes matching the given labels. An empty slice matches every node; otherwise a node
 /// is returned if it matches **any** of the labels (label disjunction, e.g. `(:Class|Module)`).
 #[must_use]
 pub fn scan(graph: &Graph, labels: &[String]) -> Vec<NodeRef> {
     if labels.is_empty() {
         let mut nodes = Vec::new();
-        nodes.extend(graph.documents().keys().map(|id| NodeRef::Document(*id)));
-        nodes.extend(graph.definitions().keys().map(|id| NodeRef::Definition(*id)));
-        nodes.extend(graph.declarations().keys().map(|id| NodeRef::Declaration(*id)));
+        nodes.extend(document_node_ids(graph).into_iter().map(NodeRef::Document));
+        nodes.extend(definition_node_ids(graph).into_iter().map(NodeRef::Definition));
+        nodes.extend(declaration_node_ids(graph).into_iter().map(NodeRef::Declaration));
         return nodes;
     }
 
@@ -448,13 +469,16 @@ pub fn scan(graph: &Graph, labels: &[String]) -> Vec<NodeRef> {
 /// Returns all nodes matching a single label.
 fn scan_label(graph: &Graph, label: &str) -> Vec<NodeRef> {
     match label {
-        "Document" => graph.documents().keys().map(|id| NodeRef::Document(*id)).collect(),
-        "Definition" => graph.definitions().keys().map(|id| NodeRef::Definition(*id)).collect(),
-        other => graph
-            .declarations()
-            .iter()
-            .filter(|(_, declaration)| declaration_matches_label(declaration, other))
-            .map(|(id, _)| NodeRef::Declaration(*id))
+        "Document" => document_node_ids(graph).into_iter().map(NodeRef::Document).collect(),
+        "Definition" => definition_node_ids(graph).into_iter().map(NodeRef::Definition).collect(),
+        other => declaration_node_ids(graph)
+            .into_iter()
+            .filter(|id| {
+                graph
+                    .declaration(*id)
+                    .is_some_and(|declaration| declaration_matches_label(&declaration, other))
+            })
+            .map(NodeRef::Declaration)
             .collect(),
     }
 }
@@ -466,9 +490,8 @@ pub fn matches_label(graph: &Graph, node: NodeRef, label: &str) -> bool {
         NodeRef::Document(_) => label == "Document",
         NodeRef::Definition(_) => label == "Definition",
         NodeRef::Declaration(id) => graph
-            .declarations()
-            .get(&id)
-            .is_some_and(|declaration| declaration_matches_label(declaration, label)),
+            .declaration(id)
+            .is_some_and(|declaration| declaration_matches_label(&declaration, label)),
     }
 }
 
@@ -486,13 +509,11 @@ pub fn node_label(graph: &Graph, node: NodeRef) -> String {
     match node {
         NodeRef::Document(_) => "Document".to_string(),
         NodeRef::Definition(id) => graph
-            .definitions()
-            .get(&id)
+            .definition(id)
             .map_or_else(|| "Definition".to_string(), |definition| definition.kind().to_string()),
-        NodeRef::Declaration(id) => graph.declarations().get(&id).map_or_else(
-            || "Declaration".to_string(),
-            |declaration| declaration.kind().to_string(),
-        ),
+        NodeRef::Declaration(id) => graph
+            .declaration(id)
+            .map_or_else(|| "Declaration".to_string(), |declaration| declaration.kind().to_string()),
     }
 }
 
@@ -501,16 +522,14 @@ pub fn node_label(graph: &Graph, node: NodeRef) -> String {
 pub fn node_name(graph: &Graph, node: NodeRef) -> String {
     match node {
         NodeRef::Declaration(id) => graph
-            .declarations()
-            .get(&id)
+            .declaration(id)
             .map_or_else(String::new, |declaration| declaration.name().to_string()),
         NodeRef::Definition(id) => graph
-            .definitions()
-            .get(&id)
-            .and_then(|definition| graph.definition_to_declaration_id(definition))
-            .and_then(|decl_id| graph.declarations().get(&decl_id))
+            .definition(id)
+            .and_then(|definition| graph.definition_to_declaration_id(&definition))
+            .and_then(|decl_id| graph.declaration(decl_id))
             .map_or_else(String::new, |declaration| declaration.name().to_string()),
-        NodeRef::Document(id) => graph.documents().get(&id).map_or_else(String::new, |document| {
+        NodeRef::Document(id) => graph.document(id).map_or_else(String::new, |document| {
             document.file_name().unwrap_or_else(|| document.uri().to_string())
         }),
     }
@@ -531,7 +550,7 @@ pub fn property(graph: &Graph, node: NodeRef, prop: &str) -> CypherValue {
 }
 
 fn declaration_property(graph: &Graph, id: DeclarationId, prop: &str) -> CypherValue {
-    let Some(declaration) = graph.declarations().get(&id) else {
+    let Some(declaration) = graph.declaration(id) else {
         return CypherValue::Null;
     };
 
@@ -547,23 +566,21 @@ fn declaration_property(graph: &Graph, id: DeclarationId, prop: &str) -> CypherV
 }
 
 fn definition_property(graph: &Graph, id: DefinitionId, prop: &str) -> CypherValue {
-    let Some(definition) = graph.definitions().get(&id) else {
+    let Some(definition) = graph.definition(id) else {
         return CypherValue::Null;
     };
 
     match prop {
         "name" => CypherValue::Str(node_name(graph, NodeRef::Definition(id))),
         "file" => graph
-            .documents()
-            .get(definition.uri_id())
+            .document(*definition.uri_id())
             .map_or(CypherValue::Null, |document| {
                 CypherValue::Str(document.uri().to_string())
             }),
         "line" => graph
-            .documents()
-            .get(definition.uri_id())
+            .document(*definition.uri_id())
             .map_or(CypherValue::Null, |document| {
-                let location = definition.offset().to_location(document).to_presentation();
+                let location = definition.offset().to_location(&document).to_presentation();
                 CypherValue::Int(i64::from(location.start_line()))
             }),
         _ => CypherValue::Null,
@@ -571,7 +588,7 @@ fn definition_property(graph: &Graph, id: DefinitionId, prop: &str) -> CypherVal
 }
 
 fn document_property(graph: &Graph, id: UriId, prop: &str) -> CypherValue {
-    let Some(document) = graph.documents().get(&id) else {
+    let Some(document) = graph.document(id) else {
         return CypherValue::Null;
     };
 
@@ -595,9 +612,11 @@ fn document_property(graph: &Graph, id: UriId, prop: &str) -> CypherValue {
 #[must_use]
 pub fn rel_source_nodes(graph: &Graph, rel: RelType) -> Vec<NodeRef> {
     match rel {
-        RelType::Defines | RelType::References => graph.documents().keys().map(|id| NodeRef::Document(*id)).collect(),
+        RelType::Defines | RelType::References => {
+            document_node_ids(graph).into_iter().map(NodeRef::Document).collect()
+        }
         RelType::Declares | RelType::Contains => {
-            graph.definitions().keys().map(|id| NodeRef::Definition(*id)).collect()
+            definition_node_ids(graph).into_iter().map(NodeRef::Definition).collect()
         }
         RelType::HasParent
         | RelType::Includes
@@ -605,11 +624,9 @@ pub fn rel_source_nodes(graph: &Graph, rel: RelType) -> Vec<NodeRef> {
         | RelType::Extends
         | RelType::Owns
         | RelType::HasAncestor
-        | RelType::HasDescendant => graph
-            .declarations()
-            .keys()
-            .map(|id| NodeRef::Declaration(*id))
-            .collect(),
+        | RelType::HasDescendant => {
+            declaration_node_ids(graph).into_iter().map(NodeRef::Declaration).collect()
+        }
     }
 }
 
@@ -650,8 +667,7 @@ pub fn expand_in(graph: &Graph, node: NodeRef, rel: RelType) -> Option<Vec<NodeR
 pub fn expand_out(graph: &Graph, node: NodeRef, rel: RelType) -> Vec<NodeRef> {
     match (node, rel) {
         (NodeRef::Document(uri_id), RelType::Defines) => graph
-            .documents()
-            .get(&uri_id)
+            .document(uri_id)
             .map(|document| {
                 document
                     .definitions()
@@ -662,9 +678,8 @@ pub fn expand_out(graph: &Graph, node: NodeRef, rel: RelType) -> Vec<NodeRef> {
             .unwrap_or_default(),
         (NodeRef::Document(uri_id), RelType::References) => document_references(graph, uri_id),
         (NodeRef::Definition(def_id), RelType::Declares) => graph
-            .definitions()
-            .get(&def_id)
-            .and_then(|definition| graph.definition_to_declaration_id(definition))
+            .definition(def_id)
+            .and_then(|definition| graph.definition_to_declaration_id(&definition))
             .map(|decl_id| vec![NodeRef::Declaration(decl_id)])
             .unwrap_or_default(),
         (NodeRef::Definition(def_id), RelType::Contains) => definition_children(graph, def_id),
@@ -680,7 +695,7 @@ pub fn expand_out(graph: &Graph, node: NodeRef, rel: RelType) -> Vec<NodeRef> {
 }
 
 fn document_references(graph: &Graph, uri_id: UriId) -> Vec<NodeRef> {
-    let Some(document) = graph.documents().get(&uri_id) else {
+    let Some(document) = graph.document(uri_id) else {
         return Vec::new();
     };
 
@@ -697,11 +712,11 @@ fn document_references(graph: &Graph, uri_id: UriId) -> Vec<NodeRef> {
 }
 
 fn definition_children(graph: &Graph, def_id: DefinitionId) -> Vec<NodeRef> {
-    let Some(definition) = graph.definitions().get(&def_id) else {
+    let Some(definition) = graph.definition(def_id) else {
         return Vec::new();
     };
 
-    let children: &[DefinitionId] = match definition {
+    let children: &[DefinitionId] = match &*definition {
         Definition::Class(d) => d.members(),
         Definition::Module(d) => d.members(),
         Definition::SingletonClass(d) => d.members(),
@@ -711,14 +726,15 @@ fn definition_children(graph: &Graph, def_id: DefinitionId) -> Vec<NodeRef> {
 }
 
 fn superclasses(graph: &Graph, decl_id: DeclarationId) -> Vec<NodeRef> {
-    let Some(declaration) = graph.declarations().get(&decl_id) else {
+    let Some(declaration) = graph.declaration(decl_id) else {
         return Vec::new();
     };
 
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
     for definition_id in declaration.definitions() {
-        if let Some(Definition::Class(class_def)) = graph.definitions().get(definition_id)
+        if let Some(definition) = graph.definition(*definition_id)
+            && let Definition::Class(class_def) = &*definition
             && let Some(superclass_ref) = class_def.superclass_ref()
             && let Some(target) = resolve_ref_to_namespace(graph, *superclass_ref)
             && seen.insert(target)
@@ -737,17 +753,20 @@ enum MixinKind {
 }
 
 fn mixin_targets(graph: &Graph, decl_id: DeclarationId, kind: MixinKind) -> Vec<NodeRef> {
-    let Some(declaration) = graph.declarations().get(&decl_id) else {
+    let Some(declaration) = graph.declaration(decl_id) else {
         return Vec::new();
     };
 
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
     for definition_id in declaration.definitions() {
-        let mixins: &[Mixin] = match graph.definitions().get(definition_id) {
-            Some(Definition::Class(d)) => d.mixins(),
-            Some(Definition::Module(d)) => d.mixins(),
-            Some(Definition::SingletonClass(d)) => d.mixins(),
+        let Some(definition) = graph.definition(*definition_id) else {
+            continue;
+        };
+        let mixins: &[Mixin] = match &*definition {
+            Definition::Class(d) => d.mixins(),
+            Definition::Module(d) => d.mixins(),
+            Definition::SingletonClass(d) => d.mixins(),
             _ => &[],
         };
 
@@ -770,58 +789,58 @@ fn mixin_targets(graph: &Graph, decl_id: DeclarationId, kind: MixinKind) -> Vec<
 }
 
 fn members(graph: &Graph, decl_id: DeclarationId) -> Vec<NodeRef> {
-    graph
-        .declarations()
-        .get(&decl_id)
-        .and_then(Declaration::as_namespace)
-        .map(|namespace| {
-            namespace
-                .members()
-                .values()
-                .map(|id| NodeRef::Declaration(*id))
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(declaration) = graph.declaration(decl_id) else {
+        return Vec::new();
+    };
+    let Some(namespace) = declaration.as_namespace() else {
+        return Vec::new();
+    };
+
+    namespace
+        .members()
+        .values()
+        .map(|id| NodeRef::Declaration(*id))
+        .collect()
 }
 
 fn ancestors(graph: &Graph, decl_id: DeclarationId) -> Vec<NodeRef> {
     use crate::model::declaration::Ancestor;
 
-    graph
-        .declarations()
-        .get(&decl_id)
-        .and_then(Declaration::as_namespace)
-        .map(|namespace| {
-            namespace
-                .ancestors()
-                .iter()
-                .filter_map(|ancestor| match ancestor {
-                    Ancestor::Complete(id) if *id != decl_id => Some(NodeRef::Declaration(*id)),
-                    _ => None,
-                })
-                .collect()
+    let Some(declaration) = graph.declaration(decl_id) else {
+        return Vec::new();
+    };
+    let Some(namespace) = declaration.as_namespace() else {
+        return Vec::new();
+    };
+
+    namespace
+        .ancestors()
+        .iter()
+        .filter_map(|ancestor| match ancestor {
+            Ancestor::Complete(id) if *id != decl_id => Some(NodeRef::Declaration(*id)),
+            _ => None,
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn descendants(graph: &Graph, decl_id: DeclarationId) -> Vec<NodeRef> {
-    graph
-        .declarations()
-        .get(&decl_id)
-        .and_then(Declaration::as_namespace)
-        .map(|namespace| {
-            namespace
-                .descendants()
-                .iter()
-                .map(|id| NodeRef::Declaration(*id))
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(declaration) = graph.declaration(decl_id) else {
+        return Vec::new();
+    };
+    let Some(namespace) = declaration.as_namespace() else {
+        return Vec::new();
+    };
+
+    namespace
+        .descendants()
+        .iter()
+        .map(|id| NodeRef::Declaration(*id))
+        .collect()
 }
 
 /// Resolves a constant reference to the declaration of the name it points to.
 fn resolve_ref(graph: &Graph, ref_id: ConstantReferenceId) -> Option<DeclarationId> {
-    let constant_ref = graph.constant_references().get(&ref_id)?;
+    let constant_ref = graph.constant_reference(ref_id)?;
     graph.name_id_to_declaration_id(*constant_ref.name_id())
 }
 
@@ -840,7 +859,8 @@ fn resolve_to_namespace(graph: &Graph, declaration_id: DeclarationId) -> Option<
             continue;
         }
 
-        match graph.declarations().get(&current_id)? {
+        let declaration = graph.declaration(current_id)?;
+        match &*declaration {
             Declaration::Namespace(_) => return Some(current_id),
             Declaration::ConstantAlias(_) => {
                 queue.extend(graph.alias_targets(&current_id)?);

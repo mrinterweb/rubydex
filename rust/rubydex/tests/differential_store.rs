@@ -45,15 +45,63 @@ fn build_store_graph_from(root: &Path, store_dir: &Path) -> Graph {
 }
 
 /// Runs the full probe battery. Probes are added by later tasks; entries are
-/// `(case, normalized_value)` pairs.
-fn probe_all(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, String)>) {
-    probe_declarations(graph, out);
-    probe_completion(graph, name_ids, out);
-    probe_search(graph, out);
-    probe_aliases(graph, out);
+/// `(case, normalized_value)` pairs. `sample` caps full-corpus walks (0 = no cap): the
+/// fixture corpus probes everything; large corpora sample a deterministic prefix.
+fn probe_all(graph: &Graph, name_ids: &[NameId], sample: usize, out: &mut Vec<(String, String)>) {
+    probe_declarations(graph, sample, out);
+    probe_completion(graph, name_ids, sample, out);
+    probe_search(graph, sample, out);
+    probe_aliases(graph, sample, out);
     probe_find_member(graph, out);
     probe_require(graph, out);
-    probe_documents(graph, out);
+    probe_documents(graph, sample, out);
+    probe_cypher(graph, out);
+}
+
+/// Deterministic prefix of a sorted id set: `sample` entries, or all when `sample == 0`.
+fn cap_sample<T: Ord>(set: BTreeSet<T>, sample: usize) -> Vec<T> {
+    if sample == 0 {
+        set.into_iter().collect()
+    } else {
+        set.into_iter().take(sample).collect()
+    }
+}
+
+/// Heavy: differential on the Ruby stdlib corpus (the POC's 20k-file corpus).
+/// Run: `RUBYDEX_DIFF_CORPUS=$(ruby -e 'print RbConfig::CONFIG["rubylibdir"]')/.. \
+///   cargo test -p rubydex --features redb-store --test differential_store -- --ignored`
+#[test]
+#[ignore = "set RUBYDEX_DIFF_CORPUS to a Ruby source tree to run"]
+fn differential_on_stdlib() {
+    let root = std::env::var("RUBYDEX_DIFF_CORPUS")
+        .expect("set RUBYDEX_DIFF_CORPUS to a Ruby source tree (e.g. $(ruby -e 'print RbConfig::CONFIG[\"rubylibdir\"]')/..)");
+    let root = PathBuf::from(root);
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let memory = build_graph_from(&root);
+    let store_graph = build_store_graph_from(&root, dir.path());
+    // Sample the completion probe: 350k+ names on stdlib is too slow per-name.
+    let mut name_ids: Vec<NameId> = memory
+        .names()
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    name_ids.truncate(1000);
+
+    let mut mem_probe = Vec::new();
+    probe_all(&memory, &name_ids, 2000, &mut mem_probe);
+    let mut store_probe = Vec::new();
+    probe_all(&store_graph, &name_ids, 2000, &mut store_probe);
+    normalize(&mut mem_probe);
+    normalize(&mut store_probe);
+
+    assert_eq!(mem_probe.len(), store_probe.len(), "probe case count differs");
+    for (m, s) in mem_probe.iter().zip(store_probe.iter()) {
+        assert_eq!(m.0, s.0, "probe case sets differ");
+        assert_eq!(m.1, s.1, "divergence in case {}", m.0);
+    }
 }
 
 /// All declaration ids a graph can see: in-memory map ∪ store-backed names.
@@ -73,8 +121,8 @@ fn declaration_fqn(graph: &Graph, id: DeclarationId) -> String {
 
 /// Probes every declaration's full structure: name, kind, owner, members, ancestors,
 /// descendants, singleton class, and each definition's kind/uri/offset.
-fn probe_declarations(graph: &Graph, out: &mut Vec<(String, String)>) {
-    for raw in all_declaration_ids(graph) {
+fn probe_declarations(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) {
+    for raw in cap_sample(all_declaration_ids(graph), sample) {
         let id = DeclarationId::new(raw);
         let Some(decl) = graph.declaration(id) else {
             out.push((format!("decl:id:{raw}"), "<missing>".into()));
@@ -161,7 +209,7 @@ fn candidate_names(graph: &Graph, candidates: &[rubydex::query::CompletionCandid
         .join(",")
 }
 
-fn probe_completion(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, String)>) {
+fn probe_completion(graph: &Graph, name_ids: &[NameId], sample: usize, out: &mut Vec<(String, String)>) {
     use rubydex::query::{completion_candidates, CompletionContext, CompletionReceiver};
 
     // Expression completion at every interned name (lexical scope = that name, self derived).
@@ -180,18 +228,19 @@ fn probe_completion(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, S
     }
 
     // Namespace-access and method-call completion at every namespace declaration.
-    let namespaces: Vec<String> = all_declaration_ids(graph)
-        .iter()
-        .filter(|raw| {
-            let id = DeclarationId::new(**raw);
-            graph
-                .declaration(id)
-                .is_some_and(|d| d.as_namespace().is_some())
-        })
-        .map(|raw| declaration_fqn(graph, DeclarationId::new(*raw)))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let namespaces = cap_sample(
+        all_declaration_ids(graph)
+            .iter()
+            .filter(|raw| {
+                let id = DeclarationId::new(**raw);
+                graph
+                    .declaration(id)
+                    .is_some_and(|d| d.as_namespace().is_some())
+            })
+            .map(|raw| declaration_fqn(graph, DeclarationId::new(*raw)))
+            .collect::<BTreeSet<_>>(),
+        sample,
+    );
     for fqn in &namespaces {
         let id = DeclarationId::from(fqn.as_str());
         let ns_ctx = CompletionContext::new(CompletionReceiver::NamespaceAccess {
@@ -216,12 +265,12 @@ fn probe_completion(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, S
     }
 }
 
-fn probe_aliases(graph: &Graph, out: &mut Vec<(String, String)>) {
+fn probe_aliases(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) {
     use rubydex::query::follow_method_alias;
 
     // Every definition of every declaration: alias definitions resolve to a target,
     // non-alias definitions error deterministically. Both must match across graphs.
-    for raw in all_declaration_ids(graph) {
+    for raw in cap_sample(all_declaration_ids(graph), sample) {
         let id = DeclarationId::new(raw);
         let Some(decl) = graph.declaration(id) else { continue };
         for def_id in decl.definitions() {
@@ -290,14 +339,14 @@ fn probe_require(graph: &Graph, out: &mut Vec<(String, String)>) {
     }
 }
 
-fn probe_documents(graph: &Graph, out: &mut Vec<(String, String)>) {
+fn probe_documents(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) {
     use rubydex::model::ids::UriId;
 
     let mut uris: BTreeSet<u64> = graph.documents().keys().map(rubydex::model::id::Id::get).collect();
     for (id, _uri) in graph.store_document_uris() {
         uris.insert(id.get());
     }
-    for raw in uris {
+    for raw in cap_sample(uris, sample) {
         let uri_id = UriId::new(raw);
         let Some(doc) = graph.document(uri_id) else {
             out.push((format!("doc:id:{raw}"), "<missing>".into()));
@@ -353,17 +402,46 @@ fn probe_documents(graph: &Graph, out: &mut Vec<(String, String)>) {
     }
 }
 
-fn probe_search(graph: &Graph, out: &mut Vec<(String, String)>) {
+fn probe_cypher(graph: &Graph, out: &mut Vec<(String, String)>) {
+    use rubydex::query::cypher::{run_query, OutputFormat};
+
+    for q in [
+        "MATCH (c:Class) RETURN c.name",
+        "MATCH (c:Class) WHERE c.name = 'Child' RETURN c.name",
+        "MATCH (c:Class) RETURN c.name, c.definition_count, c.visibility",
+        "MATCH (d:Definition) RETURN d.name",
+        "MATCH (doc:Document) RETURN doc.uri",
+        "MATCH (c:Class)-[:HasParent]->(p) RETURN c.name, p.name",
+        "MATCH (c:Class)-[:Owns]->(m) RETURN c.name, m.name",
+        "MATCH (c:Class)-[:HasAncestor]->(a) RETURN c.name, a.name",
+    ] {
+        // Table output, sorted lines: iteration order over graph maps can differ
+        // between the memory and store graphs, so only sorted content is comparable.
+        let result = run_query(graph, q, OutputFormat::Table)
+            .unwrap_or_else(|error| format!("Err({error})"));
+        let lines: Vec<&str> = result.lines().collect();
+        let body: Vec<&str> = if lines.last().is_some_and(|l| l.contains("row")) {
+            lines[..lines.len() - 1].to_vec()
+        } else {
+            lines
+        };
+        let mut sorted = body;
+        sorted.sort_unstable();
+        out.push((format!("cypher:{q}"), sorted.join("\n")));
+    }
+}
+
+fn probe_search(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) {
     use rubydex::query::{declaration_search, MatchMode};
 
     // Every declaration must be findable by exact-FQN search (search is substring-based,
     // so the result set may include other names — the invariant is an identical result
     // set on both graphs).
-    let fqns: Vec<String> = all_declaration_ids(graph)
-        .iter()
+    let fqns: Vec<String> = cap_sample(all_declaration_ids(graph), sample)
+        .into_iter()
         .filter_map(|raw| {
             graph
-                .declaration(DeclarationId::new(*raw))
+                .declaration(DeclarationId::new(raw))
                 .map(|d| d.name().to_string())
         })
         .collect();
@@ -413,9 +491,9 @@ fn harness_detects_divergence() {
     let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
 
     let mut mem_probe = Vec::new();
-    probe_all(&memory, &name_ids, &mut mem_probe);
+    probe_all(&memory, &name_ids, 0, &mut mem_probe);
     let mut store_probe = Vec::new();
-    probe_all(&store_graph, &name_ids, &mut store_probe);
+    probe_all(&store_graph, &name_ids, 0, &mut store_probe);
     normalize(&mut mem_probe);
     normalize(&mut store_probe);
 
@@ -433,9 +511,9 @@ fn differential_memory_vs_store() {
     let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
 
     let mut mem_probe = Vec::new();
-    probe_all(&memory, &name_ids, &mut mem_probe);
+    probe_all(&memory, &name_ids, 0, &mut mem_probe);
     let mut store_probe = Vec::new();
-    probe_all(&store_graph, &name_ids, &mut store_probe);
+    probe_all(&store_graph, &name_ids, 0, &mut store_probe);
     normalize(&mut mem_probe);
     normalize(&mut store_probe);
 
