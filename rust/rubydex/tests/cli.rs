@@ -29,15 +29,17 @@ fn prints_help() {
 
 #[test]
 fn paths_argument_variants() {
+    // Count = 1 built-in document (model/built_in.rs) + 6 files in tests/fixtures/diff_corpus.
+    const EXPECTED: &str = "Indexed 7 files";
     rdx(&[])
         .success()
         .stderr(predicate::str::is_empty())
-        .stdout(predicate::str::contains("Indexed 1 files"));
+        .stdout(predicate::str::contains(EXPECTED));
 
     rdx(&["."])
         .success()
         .stderr(predicate::str::is_empty())
-        .stdout(predicate::str::contains("Indexed 1 files"));
+        .stdout(predicate::str::contains(EXPECTED));
 
     with_context(|context| {
         context.write("dir1/file1.rb", "class Class1\nend\n");

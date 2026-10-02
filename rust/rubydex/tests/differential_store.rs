@@ -8,12 +8,14 @@ use rubydex::{
     indexing::{index_files, IndexerBackend},
     listing::collect_file_paths,
     model::{
+        declaration::Ancestor,
         graph::Graph,
-        ids::NameId,
+        ids::{DeclarationId, NameId},
         store::RedbStore,
     },
     resolution::Resolver,
 };
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 fn corpus_dir() -> PathBuf {
@@ -45,10 +47,137 @@ fn build_store_graph_from(root: &Path, store_dir: &Path) -> Graph {
 /// Runs the full probe battery. Probes are added by later tasks; entries are
 /// `(case, normalized_value)` pairs.
 fn probe_all(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, String)>) {
-    let _ = (graph, name_ids, out);
+    probe_declarations(graph, out);
+    probe_search(graph, out);
+    let _ = name_ids;
 }
 
-fn normalize(entries: &mut Vec<(String, String)>) {
+/// All declaration ids a graph can see: in-memory map ∪ store-backed names.
+fn all_declaration_ids(graph: &Graph) -> BTreeSet<u64> {
+    let mut ids: BTreeSet<u64> = graph.declarations().keys().map(rubydex::model::id::Id::get).collect();
+    for (id, _name) in graph.store_declaration_names() {
+        ids.insert(id.get());
+    }
+    ids
+}
+
+fn declaration_fqn(graph: &Graph, id: DeclarationId) -> String {
+    graph
+        .declaration(id)
+        .map_or_else(|| format!("<missing {}>", id.get()), |d| d.name().to_string())
+}
+
+/// Probes every declaration's full structure: name, kind, owner, members, ancestors,
+/// descendants, singleton class, and each definition's kind/uri/offset.
+fn probe_declarations(graph: &Graph, out: &mut Vec<(String, String)>) {
+    for raw in all_declaration_ids(graph) {
+        let id = DeclarationId::new(raw);
+        let Some(decl) = graph.declaration(id) else {
+            out.push((format!("decl:id:{raw}"), "<missing>".into()));
+            continue;
+        };
+        let fqn = decl.name().to_string();
+        let owner = declaration_fqn(graph, *decl.owner_id());
+        let (members, ancestors, descendants): (Vec<String>, Vec<String>, Vec<String>) =
+            match decl.as_namespace() {
+                Some(ns) => (
+                    ns.members()
+                        .values()
+                        .map(|m| declaration_fqn(graph, *m))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    ns.ancestors()
+                        .iter()
+                        .map(|a| match a {
+                            Ancestor::Complete(ancestor_id) => declaration_fqn(graph, *ancestor_id),
+                            Ancestor::Partial(name_id) => format!("partial:{}", name_id.get()),
+                        })
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    ns.descendants()
+                        .iter()
+                        .map(|d| declaration_fqn(graph, *d))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                ),
+                None => (Vec::new(), Vec::new(), Vec::new()),
+            };
+        let singleton = decl
+            .as_namespace()
+            .and_then(|ns| ns.singleton_class())
+            .map(|id| declaration_fqn(graph, *id))
+            .unwrap_or_default();
+        let definitions: Vec<String> = decl
+            .definitions()
+            .iter()
+            .map(|def_id| {
+                let def = graph.definition(*def_id).expect("definition present for declaration");
+                let uri = graph
+                    .document(*def.uri_id())
+                    .map(|d| d.uri().to_string())
+                    .unwrap_or_default();
+                format!("{}@{}@{}", def.kind(), uri, def.offset().start())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        out.push((
+            format!("decl:{fqn}"),
+            format!(
+                "kind:{}|owner:{}|members:{}|ancestors:{}|descendants:{}|singleton:{}|definitions:{}",
+                decl.kind(),
+                owner,
+                members.join(","),
+                ancestors.join(","),
+                descendants.join(","),
+                singleton,
+                definitions.join(";"),
+            ),
+        ));
+    }
+}
+
+fn probe_search(graph: &Graph, out: &mut Vec<(String, String)>) {
+    use rubydex::query::{declaration_search, MatchMode};
+
+    // Every declaration must be findable by exact-FQN search (search is substring-based,
+    // so the result set may include other names — the invariant is an identical result
+    // set on both graphs).
+    let fqns: Vec<String> = all_declaration_ids(graph)
+        .iter()
+        .filter_map(|raw| {
+            graph
+                .declaration(DeclarationId::new(*raw))
+                .map(|d| d.name().to_string())
+        })
+        .collect();
+    for fqn in &fqns {
+        let found = declaration_search(graph, &[fqn.as_str()], &MatchMode::Exact);
+        let names: Vec<String> = found
+            .iter()
+            .map(|id| declaration_fqn(graph, *id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        out.push((format!("search:exact:{fqn}"), names.join(",")));
+    }
+
+    for (label, mode, q) in [("exact", &MatchMode::Exact, "Ch"), ("fuzzy", &MatchMode::Fuzzy, "chd"), ("fuzzy", &MatchMode::Fuzzy, "base")] {
+        let found = declaration_search(graph, &[q], mode);
+        let names: Vec<String> = found
+            .iter()
+            .map(|id| declaration_fqn(graph, *id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        out.push((format!("search:{label}:{q}"), names.join(",")));
+    }
+}
+
+fn normalize(entries: &mut [(String, String)]) {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 }
 
