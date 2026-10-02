@@ -234,7 +234,8 @@ pub unsafe extern "C" fn rdx_resolved_constant_reference_declaration(
 pub unsafe extern "C" fn rdx_constant_reference_document(pointer: GraphPointer, reference_id: u64) -> *const u64 {
     with_graph(pointer, |graph| {
         let ref_id = ConstantReferenceId::new(reference_id);
-        if let Some(reference) = graph.constant_references().get(&ref_id) {
+        // Layered lookup: in disk mode the reference lives in the store, not the in-memory overlay.
+        if let Some(reference) = graph.constant_reference(ref_id) {
             Box::into_raw(Box::new(*reference.uri_id())).cast_const()
         } else {
             ptr::null()
@@ -314,7 +315,8 @@ pub unsafe extern "C" fn rdx_method_reference_location(pointer: GraphPointer, re
 pub unsafe extern "C" fn rdx_method_reference_document(pointer: GraphPointer, reference_id: u64) -> *const u64 {
     with_graph(pointer, |graph| {
         let ref_id = MethodReferenceId::new(reference_id);
-        if let Some(reference) = graph.method_references().get(&ref_id) {
+        // Layered lookup: in disk mode the reference lives in the store, not the in-memory overlay.
+        if let Some(reference) = graph.method_reference(ref_id) {
             Box::into_raw(Box::new(*reference.uri_id())).cast_const()
         } else {
             ptr::null()

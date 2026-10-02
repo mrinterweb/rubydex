@@ -572,7 +572,8 @@ pub unsafe extern "C" fn rdx_definition_mixins(pointer: GraphPointer, definition
 pub unsafe extern "C" fn rdx_definition_document(pointer: GraphPointer, definition_id: u64) -> *const u64 {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        if let Some(defn) = graph.definitions().get(&def_id) {
+        // Layered lookup: in disk mode the definition lives in the store, not the in-memory overlay.
+        if let Some(defn) = graph.definition(def_id) {
             Box::into_raw(Box::new(**defn.uri_id())).cast_const()
         } else {
             ptr::null()

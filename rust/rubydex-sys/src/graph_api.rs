@@ -543,7 +543,8 @@ pub unsafe extern "C" fn rdx_graph_get_document(pointer: GraphPointer, uri: *con
     with_graph(pointer, |graph| {
         let uri_id = UriId::from(uri_str.as_str());
 
-        if graph.documents().contains_key(&uri_id) {
+        // Layered lookup: in disk mode the document lives in the store, not the in-memory overlay.
+        if graph.document(uri_id).is_some() {
             Box::into_raw(Box::new(*uri_id)).cast_const()
         } else {
             ptr::null()
@@ -1304,6 +1305,94 @@ mod tests {
     use rubydex::indexing::ruby_indexer::RubyIndexer;
 
     use super::*;
+
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn document_getters_find_store_backed_nodes() {
+        use rubydex::model::store::RedbStore;
+
+        let mut indexer = RubyIndexer::new(
+            "file:///foo.rb".into(),
+            "
+            class Foo
+              BAR = 1
+              def bar
+                BAR + baz
+              end
+            end
+            ",
+        );
+        indexer.index();
+
+        let mut graph = Graph::new();
+        graph.consume_document_changes(indexer.local_graph());
+        Resolver::new(&mut graph).resolve();
+
+        let uri_id = UriId::from("file:///foo.rb");
+        let def_id = graph
+            .definitions()
+            .iter()
+            .find(|(_, def)| def.uri_id().get() == uri_id.get())
+            .map(|(id, _)| *id)
+            .expect("a definition in foo.rb");
+        let const_ref_id = graph
+            .constant_references()
+            .iter()
+            .find(|(_, reference)| reference.uri_id().get() == uri_id.get())
+            .map(|(id, _)| *id)
+            .expect("a constant reference in foo.rb");
+        let method_ref_id = graph
+            .method_references()
+            .iter()
+            .find(|(_, reference)| reference.uri_id().get() == uri_id.get())
+            .map(|(id, _)| *id)
+            .expect("a method reference in foo.rb");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // the nodes live only in the store now
+
+        let graph_ptr = Box::into_raw(Box::new(Graph::with_store(
+            RedbStore::open(&store_path).expect("open store"),
+        ))) as GraphPointer;
+
+        unsafe {
+            // In-memory-only lookups: these returned NULL for store-backed nodes, which killed
+            // hover, documentation and source for the whole disk-backed index.
+            let doc = rdx_graph_get_document(graph_ptr, CString::new("file:///foo.rb").unwrap().as_ptr());
+            assert!(
+                !doc.is_null(),
+                "rdx_graph_get_document returned NULL for a store-backed file"
+            );
+            assert_eq!(*doc, uri_id.get());
+            drop(Box::from_raw(doc.cast_mut()));
+
+            let doc = crate::definition_api::rdx_definition_document(graph_ptr, def_id.get());
+            assert!(
+                !doc.is_null(),
+                "rdx_definition_document returned NULL for a store-backed definition"
+            );
+            assert_eq!(*doc, uri_id.get());
+            drop(Box::from_raw(doc.cast_mut()));
+
+            let doc = crate::reference_api::rdx_constant_reference_document(graph_ptr, const_ref_id.get());
+            assert!(
+                !doc.is_null(),
+                "rdx_constant_reference_document returned NULL for a store-backed reference"
+            );
+            drop(Box::from_raw(doc.cast_mut()));
+
+            let doc = crate::reference_api::rdx_method_reference_document(graph_ptr, method_ref_id.get());
+            assert!(
+                !doc.is_null(),
+                "rdx_method_reference_document returned NULL for a store-backed reference"
+            );
+            drop(Box::from_raw(doc.cast_mut()));
+        };
+
+        drop(unsafe { Box::from_raw(graph_ptr.cast::<Graph>()) });
+    }
 
     #[test]
     fn names_are_untracked_after_resolving_constant() {
