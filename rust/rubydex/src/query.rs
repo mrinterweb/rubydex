@@ -825,11 +825,10 @@ pub fn follow_method_alias(graph: &Graph, alias_id: DefinitionId) -> Result<Decl
             return Err(AliasResolutionError::Cycle);
         }
 
-        let Declaration::Method(target) = graph
-            .declarations()
-            .get(&target_id)
-            .expect("member returned by find_member_in_ancestors must exist")
-        else {
+        let target_node = graph
+            .declaration(target_id)
+            .ok_or(AliasResolutionError::TargetNotFound)?;
+        let Declaration::Method(target) = &*target_node else {
             return Err(AliasResolutionError::TargetNotMethod);
         };
 
@@ -838,13 +837,12 @@ pub fn follow_method_alias(graph: &Graph, alias_id: DefinitionId) -> Result<Decl
         let mut maybe_next_alias: Option<DefinitionId> = None;
 
         for &def_id in target.definitions() {
-            if !matches!(
-                graph
-                    .definitions()
-                    .get(&def_id)
-                    .expect("declaration definition_id must exist in the graph"),
-                Definition::MethodAlias(_),
-            ) {
+            // A missing definition node is a graph inconsistency; treat the target as final
+            // rather than panicking across the FFI boundary.
+            let Some(def) = graph.definition(def_id) else {
+                return Ok(target_id);
+            };
+            if !matches!(&*def, Definition::MethodAlias(_)) {
                 return Ok(target_id);
             }
 
