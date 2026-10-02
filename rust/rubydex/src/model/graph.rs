@@ -98,10 +98,12 @@ pub struct Graph {
     #[cfg(feature = "redb-store")]
     store: Option<crate::model::store::RedbStore>,
 
-    /// IDs of declarations removed from the in-memory overlay while a store is attached. Blocks
-    /// the layered accessors from resurrecting the store's stale copy of a deleted node.
+    /// Raw IDs of nodes removed from the in-memory overlay while a store is attached. Blocks the
+    /// layered accessors and materialize paths from resurrecting the store's stale copy of a
+    /// deleted node. Shared across node types and keyed by the ID's raw value: a cross-type u64
+    /// collision would at worst make one store lookup miss, which is practically impossible (xxh64).
     #[cfg(feature = "redb-store")]
-    removed_declarations: IdentityHashSet<DeclarationId>,
+    removed: IdentityHashSet<u64>,
 }
 #[cfg(not(feature = "redb-store"))]
 assert_mem_size!(Graph, 368);
@@ -154,7 +156,7 @@ impl Graph {
             #[cfg(feature = "redb-store")]
             store: None,
             #[cfg(feature = "redb-store")]
-            removed_declarations: IdentityHashSet::default(),
+            removed: IdentityHashSet::default(),
         };
 
         add_built_in_data(&mut graph);
@@ -188,7 +190,7 @@ impl Graph {
         self.method_references = IdentityHashMap::default();
         self.name_dependents = IdentityHashMap::default();
         self.pending_work = Vec::new();
-        self.removed_declarations = IdentityHashSet::default();
+        self.removed = IdentityHashSet::default();
         self.store = Some(store);
     }
 
@@ -199,12 +201,26 @@ impl Graph {
         self.store.is_some()
     }
 
+    /// Marks a node's raw ID as removed, so the layered accessors and materialize paths stop
+    /// serving the store's stale copy of it.
+    #[cfg(feature = "redb-store")]
+    fn tombstone(&mut self, id: u64) {
+        self.removed.insert(id);
+    }
+
+    /// Whether a node's raw ID was tombstoned by a live edit while a store is attached.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    fn is_tombstoned(&self, id: u64) -> bool {
+        self.removed.contains(&id)
+    }
+
     /// Pulls a declaration from the store into the in-memory overlay, if it's not already there.
     /// After this call, `self.declarations.get_mut(&id)` will find it. No-op if the node is already
     /// in memory or the graph isn't store-backed.
     #[cfg(feature = "redb-store")]
     pub fn materialize_declaration(&mut self, id: DeclarationId) {
-        if self.declarations.contains_key(&id) || self.removed_declarations.contains(&id) {
+        if self.declarations.contains_key(&id) || self.is_tombstoned(id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -217,7 +233,7 @@ impl Graph {
     /// Pulls a definition from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_definition(&mut self, id: DefinitionId) {
-        if self.definitions.contains_key(&id) {
+        if self.definitions.contains_key(&id) || self.is_tombstoned(id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -230,7 +246,7 @@ impl Graph {
     /// Pulls a document from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_document(&mut self, id: UriId) {
-        if self.documents.contains_key(&id) {
+        if self.documents.contains_key(&id) || self.is_tombstoned(id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -243,7 +259,7 @@ impl Graph {
     /// Pulls a name from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_name(&mut self, id: NameId) {
-        if self.names.contains_key(&id) {
+        if self.names.contains_key(&id) || self.is_tombstoned(id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -256,7 +272,7 @@ impl Graph {
     /// Pulls name dependents from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_name_dependents(&mut self, id: NameId) {
-        if self.name_dependents.contains_key(&id) {
+        if self.name_dependents.contains_key(&id) || self.is_tombstoned(id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -274,7 +290,7 @@ impl Graph {
             return Some(NodeRef::Mem(declaration));
         }
         #[cfg(feature = "redb-store")]
-        if !self.removed_declarations.contains(&id)
+        if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
             && let Ok(Some(declaration)) = store.get_declaration(id)
         {
@@ -290,7 +306,8 @@ impl Graph {
             return Some(NodeRef::Mem(definition));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store
+        if !self.is_tombstoned(id.get())
+            && let Some(store) = &self.store
             && let Ok(Some(definition)) = store.get_definition(id)
         {
             return Some(NodeRef::Stored(Box::new(definition)));
@@ -310,11 +327,12 @@ impl Graph {
             .search_names()
             .unwrap_or_default()
             .into_iter()
-            .filter(|(id, _)| !self.removed_declarations.contains(id))
+            .filter(|(id, _)| !self.is_tombstoned(id.get()))
             .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
+    #[allow(clippy::unused_self)]
     pub(crate) fn store_declaration_names(&self) -> Vec<(DeclarationId, String)> {
         Vec::new()
     }
@@ -326,10 +344,16 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        store.document_uris().unwrap_or_default()
+        store
+            .document_uris()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(id, _)| !self.is_tombstoned(id.get()))
+            .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
+    #[allow(clippy::unused_self)]
     pub(crate) fn store_document_uris(&self) -> Vec<(UriId, String)> {
         Vec::new()
     }
@@ -341,7 +365,8 @@ impl Graph {
             return Some(NodeRef::Mem(name));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store
+        if !self.is_tombstoned(id.get())
+            && let Some(store) = &self.store
             && let Ok(Some(name)) = store.get_name(id)
         {
             return Some(NodeRef::Stored(Box::new(name)));
@@ -356,7 +381,8 @@ impl Graph {
             return Some(NodeRef::Mem(reference));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store
+        if !self.is_tombstoned(id.get())
+            && let Some(store) = &self.store
             && let Ok(Some(reference)) = store.get_constant_reference(id)
         {
             return Some(NodeRef::Stored(Box::new(reference)));
@@ -371,7 +397,8 @@ impl Graph {
             return Some(NodeRef::Mem(reference));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store
+        if !self.is_tombstoned(id.get())
+            && let Some(store) = &self.store
             && let Ok(Some(reference)) = store.get_method_reference(id)
         {
             return Some(NodeRef::Stored(Box::new(reference)));
@@ -386,7 +413,8 @@ impl Graph {
             return Some(NodeRef::Mem(document));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store
+        if !self.is_tombstoned(id.get())
+            && let Some(store) = &self.store
             && let Ok(Some(document)) = store.get_document(id)
         {
             return Some(NodeRef::Stored(Box::new(document)));
@@ -401,7 +429,8 @@ impl Graph {
             return Some(NodeRef::Mem(string));
         }
         #[cfg(feature = "redb-store")]
-        if let Some(store) = &self.store
+        if !self.is_tombstoned(id.get())
+            && let Some(store) = &self.store
             && let Ok(Some(string)) = store.get_string(id)
         {
             return Some(NodeRef::Stored(Box::new(string)));
@@ -415,7 +444,7 @@ impl Graph {
     pub fn declaration_mut(&mut self, id: DeclarationId) -> Option<&mut Declaration> {
         #[cfg(feature = "redb-store")]
         if !self.declarations.contains_key(&id)
-            && !self.removed_declarations.contains(&id)
+            && !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
             && let Ok(Some(declaration)) = store.get_declaration(id)
         {
@@ -1071,7 +1100,12 @@ impl Graph {
             }
         }
         self.name_dependents.remove(&name_id);
-        self.names.remove(&name_id);
+        // Names are interned and shared across documents, so only tombstone when the name
+        // actually left the overlay — a surviving sibling document keeps its copy alive.
+        if self.names.remove(&name_id).is_some() {
+            #[cfg(feature = "redb-store")]
+            self.tombstone(name_id.get());
+        }
     }
 
     /// Removes a specific dependent from the `name_dependents` entry for `name_id`,
@@ -1102,7 +1136,11 @@ impl Graph {
         if let Some(string_ref) = self.strings.get_mut(&string_id)
             && !string_ref.decrement_ref_count()
         {
-            self.strings.remove(&string_id);
+            // Strings are interned and shared, so only tombstone when the last reference is gone.
+            if self.strings.remove(&string_id).is_some() {
+                #[cfg(feature = "redb-store")]
+                self.tombstone(string_id.get());
+            }
         }
     }
 
@@ -1240,6 +1278,9 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         self.materialize_document(uri_id);
         let document = self.documents.remove(&uri_id)?;
+        // Tombstone so the store's copy of the deleted document is never resurrected.
+        #[cfg(feature = "redb-store")]
+        self.tombstone(uri_id.get());
         self.invalidate(Some(&document), None);
         self.remove_document_data(&document);
         Some(uri_id)
@@ -1410,15 +1451,21 @@ impl Graph {
             if let Some(method_ref) = self.method_references.remove(ref_id) {
                 self.untrack_string(*method_ref.str());
             }
+            // The reference ID belongs to this document alone (its content embeds the document),
+            // so the store's copy is stale whether or not the overlay held it.
+            #[cfg(feature = "redb-store")]
+            self.tombstone(ref_id.get());
         }
 
         for ref_id in document.constant_references() {
             if let Some(constant_ref) = self.constant_references.remove(ref_id) {
                 // Detach from target declaration. References unresolved during invalidation
-                // were already detached; this catches the rest.
+                // were already detached; this catches the rest. The name may already be gone
+                // (tombstoned by an earlier edit — materialize_name skips it), in which case
+                // there is nothing to detach.
                 #[cfg(feature = "redb-store")]
                 self.materialize_name(*constant_ref.name_id());
-                if let NameRef::Resolved(resolved) = self.names.get(constant_ref.name_id()).unwrap()
+                if let Some(NameRef::Resolved(resolved)) = self.names.get(constant_ref.name_id())
                     && let Some(declaration) = self.declarations.get_mut(resolved.declaration_id())
                 {
                     declaration.remove_constant_reference(ref_id);
@@ -1427,6 +1474,8 @@ impl Graph {
                 self.remove_name_dependent(*constant_ref.name_id(), NameDependent::Reference(*ref_id));
                 self.untrack_name(*constant_ref.name_id());
             }
+            #[cfg(feature = "redb-store")]
+            self.tombstone(ref_id.get());
         }
 
         // Detach removed definitions from their declarations.
@@ -1462,6 +1511,9 @@ impl Graph {
                 self.untrack_name(*name_id);
             }
             self.untrack_definition_strings(&definition);
+            // Definition IDs embed the document and offsets, so the store's copy is stale.
+            #[cfg(feature = "redb-store")]
+            self.tombstone(def_id.get());
         }
     }
 
@@ -1608,7 +1660,7 @@ impl Graph {
             // Tombstone so the store's stale copy of this declaration is never resurrected by the
             // layered accessors.
             #[cfg(feature = "redb-store")]
-            self.removed_declarations.insert(decl_id);
+            self.tombstone(decl_id.get());
         } else {
             // Update: the declaration still has definitions so it stays in the graph,
             // but its ancestor chain may have changed (e.g. a mixin was added/removed).

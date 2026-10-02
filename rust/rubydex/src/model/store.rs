@@ -808,6 +808,81 @@ mod tests {
     }
 
     #[test]
+    fn live_edit_tombstones_removed_nodes() {
+        use crate::indexing::ruby_indexer::RubyIndexer;
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::model::definitions::Definition;
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a_path = dir.path().join("a.rb");
+        std::fs::write(&a_path, "class A\n  def go\n    B + baz\n  end\nend\n").expect("write a");
+        let b_path = dir.path().join("b.rb");
+        std::fs::write(&b_path, "class B; end\n").expect("write b");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![a_path.clone(), b_path.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        // Capture a.rb's node IDs while they are in memory.
+        let a_uri = url::Url::from_file_path(&a_path).expect("url").to_string();
+        let a_uri_id = UriId::from(a_uri.as_str());
+        // The method definition, not the class namespace one — the latter survives the edit
+        // (same content, same ID) and is legitimately re-inserted.
+        let old_def_id = graph
+            .definitions()
+            .iter()
+            .find(|(_, def)| {
+                def.uri_id().get() == a_uri_id.get() && matches!(def, Definition::Method(_))
+            })
+            .map(|(id, _)| *id)
+            .expect("a method definition in a.rb");
+        let old_mref_id = graph
+            .method_references()
+            .iter()
+            .find(|(_, reference)| reference.uri_id().get() == a_uri_id.get())
+            .map(|(id, _)| *id)
+            .expect("a method reference in a.rb");
+        let old_const_ref_id = graph
+            .constant_references()
+            .iter()
+            .find(|(_, reference)| reference.uri_id().get() == a_uri_id.get())
+            .map(|(id, _)| *id)
+            .expect("a constant reference in a.rb");
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // the nodes live only in the store now
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+
+        // Sanity: the pre-edit nodes are served by the store.
+        assert!(graph.definition(old_def_id).is_some(), "store should serve the pre-edit definition");
+        assert!(graph.method_reference(old_mref_id).is_some(), "store should serve the pre-edit method reference");
+
+        // Edit a.rb away the method, so its old nodes are removed from the overlay.
+        std::fs::write(&a_path, "class A\nend\n").expect("rewrite a");
+        let mut indexer = RubyIndexer::new(a_uri, "class A\nend\n");
+        indexer.index();
+        graph.consume_document_changes(indexer.local_graph());
+        Resolver::new(&mut graph).resolve();
+
+        // The layered getters must not resurrect the store's stale copies of the removed nodes.
+        assert!(
+            graph.definition(old_def_id).is_none(),
+            "removed definition was resurrected from the store"
+        );
+        assert!(
+            graph.method_reference(old_mref_id).is_none(),
+            "removed method reference was resurrected from the store"
+        );
+        assert!(
+            graph.constant_reference(old_const_ref_id).is_none(),
+            "removed constant reference was resurrected from the store"
+        );
+    }
+
+    #[test]
     fn require_resolution_on_store_backed_graph() {
         use crate::indexing::{IndexerBackend, index_files};
         use crate::query::{require_paths, resolve_require_path};

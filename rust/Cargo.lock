@@ -839,6 +839,7 @@ dependencies = [
  "libc",
  "line-index",
  "rubydex",
+ "tempfile",
  "url",
 ]
 
