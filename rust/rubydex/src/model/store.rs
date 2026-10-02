@@ -667,4 +667,40 @@ mod tests {
             "expected `speak` from store-backed expression completion, got {names:?}"
         );
     }
+
+    #[test]
+    fn follow_method_alias_on_store_backed_graph() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::query::follow_method_alias;
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("animal.rb");
+        std::fs::write(&rb_path, "class Animal\n  def speak; end\n  alias talk speak\nend\n").expect("write rb");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        // Grab the alias's DefinitionId while the in-memory graph is alive.
+        let alias_def_id = graph
+            .definitions()
+            .iter()
+            .find_map(|(id, def)| matches!(def, Definition::MethodAlias(_)).then_some(*id))
+            .expect("alias definition");
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // the alias and its target live only in the store now
+
+        let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        assert!(graph.declarations().is_empty(), "memory layer is empty");
+
+        // Aliasing a store-only method used to panic in the in-memory-only member lookup; it must
+        // resolve to the real method's declaration through the layered accessors.
+        assert_eq!(
+            follow_method_alias(&graph, alias_def_id),
+            Ok(DeclarationId::from("Animal#speak()"))
+        );
+    }
 }
