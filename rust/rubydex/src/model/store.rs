@@ -409,6 +409,48 @@ mod tests {
     }
 
     #[test]
+    fn untracking_overlay_names_does_not_tombstone_store_nodes() {
+        use crate::model::name::{Name, ParentScope};
+
+        // StringId, NameId and DeclarationId all derive from name hashes, so their raw u64
+        // spaces overlap: StringId::from("Object") == DeclarationId::from("Object"). In a
+        // store-backed graph, refcount cleanup of a transient overlay name must not tombstone
+        // ids the store still holds — the store's copy is the snapshot of record and has no
+        // overlay refcount. (Tombstoning here made the store's Object declaration unresolvable
+        // after the first `Graph#resolve_constant("Object")` FFI call, aborting the process.)
+        let base = Graph::new();
+        let s = StringId::from("Object");
+        let d = DeclarationId::from("Object");
+        assert_eq!(s.get(), d.get(), "test relies on the shared raw id space");
+        assert!(
+            base.declarations().contains_key(&d),
+            "built-in seed should include the Object declaration"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        let store = RedbStore::build(&path, &base).expect("build store");
+        let mut graph = Graph::with_store(store);
+
+        // One FFI resolve_constant cycle: intern the string, register the name, untrack it.
+        let sid = graph.intern_string("Object".to_string());
+        let name_id = graph.add_name(Name::new(sid, ParentScope::None, None));
+        graph.untrack_name(name_id);
+
+        assert!(
+            graph.declaration(d).is_some(),
+            "store-backed declaration must survive overlay refcount cleanup"
+        );
+        // Repeat: the transient name is recreated on every query and must stay harmless.
+        for _ in 0..3 {
+            let sid = graph.intern_string("Object".to_string());
+            let name_id = graph.add_name(Name::new(sid, ParentScope::None, None));
+            graph.untrack_name(name_id);
+        }
+        assert!(graph.declaration(d).is_some(), "store-backed declaration must stay resolvable");
+    }
+
+    #[test]
     fn declaration_ids_matching_filters_during_scan() {
         let graph = Graph::new();
         let dir = tempfile::tempdir().expect("tempdir");

@@ -211,7 +211,10 @@ pub unsafe extern "C" fn rdx_declaration_find_member(
             ),
         };
 
-        let member_decl = graph.declaration(member_decl_id).unwrap();
+        // The member's target may have been deleted by a live edit (tombstoned).
+        let Some(member_decl) = graph.declaration(member_decl_id) else {
+            return ptr::null();
+        };
         Box::into_raw(Box::new(CDeclaration::from_declaration(member_decl_id, &member_decl))).cast_const()
     })
 }
@@ -284,8 +287,10 @@ pub unsafe extern "C" fn rdx_declaration_singleton_class(pointer: GraphPointer, 
             .singleton_class()
             .copied();
 
-        if let Some(singleton_id) = singleton_id {
-            let singleton = graph.declaration(singleton_id).unwrap();
+        if let Some(singleton_id) = singleton_id
+            && let Some(singleton) = graph.declaration(singleton_id)
+        {
+            // The singleton may have been deleted by a live edit (tombstoned).
             Box::into_raw(Box::new(CDeclaration::from_declaration(singleton_id, &singleton))).cast_const()
         } else {
             ptr::null()
@@ -463,7 +468,10 @@ pub unsafe extern "C" fn rdx_constant_alias_target(pointer: GraphPointer, decl_i
             return ptr::null();
         };
 
-        let target_decl = graph.declaration(target_id).unwrap();
+        // The alias target may have been deleted by a live edit (tombstoned).
+        let Some(target_decl) = graph.declaration(target_id) else {
+            return ptr::null();
+        };
         Box::into_raw(Box::new(CDeclaration::from_declaration(target_id, &target_decl))).cast_const()
     })
 }

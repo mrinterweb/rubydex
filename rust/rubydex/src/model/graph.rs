@@ -1156,9 +1156,15 @@ impl Graph {
         self.name_dependents.remove(&name_id);
         // Names are interned and shared across documents, so only tombstone when the name
         // actually left the overlay — a surviving sibling document keeps its copy alive.
+        // With a store attached, refcount cleanup never tombstones: store nodes are snapshot
+        // copies with no overlay refcount, and the shared raw-id space means a name tombstone
+        // could kill an unrelated store node with the same u64 (e.g., a DeclarationId).
+        // Only explicit live-edit deletions tombstone store-backed nodes.
         if self.names.remove(&name_id).is_some() {
             #[cfg(feature = "redb-store")]
-            self.tombstone(name_id.get());
+            if self.store.is_none() {
+                self.tombstone(name_id.get());
+            }
         }
     }
 
@@ -1191,9 +1197,13 @@ impl Graph {
             && !string_ref.decrement_ref_count()
         {
             // Strings are interned and shared, so only tombstone when the last reference is gone.
+            // With a store attached, refcount cleanup never tombstones (see `remove_name`):
+            // the store's copy is the snapshot of record and has no overlay refcount.
             if self.strings.remove(&string_id).is_some() {
                 #[cfg(feature = "redb-store")]
-                self.tombstone(string_id.get());
+                if self.store.is_none() {
+                    self.tombstone(string_id.get());
+                }
             }
         }
     }
