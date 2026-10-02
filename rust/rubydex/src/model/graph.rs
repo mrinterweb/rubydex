@@ -298,6 +298,27 @@ impl Graph {
         None
     }
 
+    /// `(id, FQN name)` pairs for all declarations held by the disk store, excluding tombstoned
+    /// declarations so a live edit's deletion is not resurrected by search. Empty when no store is
+    /// attached. Used by declaration search to cover store-backed declarations.
+    #[cfg(feature = "redb-store")]
+    pub(crate) fn store_declaration_names(&self) -> Vec<(DeclarationId, String)> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        store
+            .search_names()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(id, _)| !self.removed_declarations.contains(id))
+            .collect()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    pub(crate) fn store_declaration_names(&self) -> Vec<(DeclarationId, String)> {
+        Vec::new()
+    }
+
     /// Looks up a name node by ID, checking the in-memory graph first, then the disk-backed store.
     #[must_use]
     pub fn name(&self, id: NameId) -> Option<NodeRef<'_, NameRef>> {

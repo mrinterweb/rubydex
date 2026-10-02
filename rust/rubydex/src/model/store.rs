@@ -34,6 +34,10 @@ const METHOD_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("met
 const DOCUMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("documents");
 const NAME_DEPENDENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("name_dependents");
 
+/// Declaration FQN names for search: `declaration_id -> FQN string`. A compact projection so
+/// name-based search scans short strings instead of deserializing full declaration nodes.
+const SEARCH_NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("search_names");
+
 /// A redb-backed node store.
 pub struct RedbStore {
     db: Database,
@@ -97,6 +101,12 @@ impl RedbStore {
             write_map!(METHOD_REFERENCES, graph.method_references());
             write_map!(DOCUMENTS, graph.documents());
             write_map!(NAME_DEPENDENTS, graph.name_dependents());
+            {
+                let mut table = write_txn.open_table(SEARCH_NAMES)?;
+                for (id, declaration) in graph.declarations() {
+                    table.insert(id.get(), declaration.name().as_bytes())?;
+                }
+            }
 
             write_txn.commit()?;
         }
@@ -221,6 +231,25 @@ impl RedbStore {
     /// Returns an error if the redb read transaction fails.
     pub fn get_declaration(&self, id: DeclarationId) -> Result<Option<Declaration>, redb::Error> {
         self.get_node(DECLARATIONS, id.get())
+    }
+
+    /// Reads all `(declaration_id, FQN name)` pairs for name-based search.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn search_names(&self) -> Result<Vec<(DeclarationId, String)>, redb::Error> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(SEARCH_NAMES)?;
+        table
+            .range(..u64::MAX)?
+            .map(|entry| -> Result<(DeclarationId, String), redb::Error> {
+                let (id, name) = entry?;
+                Ok((
+                    DeclarationId::new(id.value()),
+                    String::from_utf8_lossy(name.value()).into_owned(),
+                ))
+            })
+            .collect()
     }
 
     /// Reads a single definition node, if present.
@@ -701,6 +730,51 @@ mod tests {
         assert_eq!(
             follow_method_alias(&graph, alias_def_id),
             Ok(DeclarationId::from("Animal#speak()"))
+        );
+    }
+
+    #[test]
+    fn declaration_search_on_store_backed_graph() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::query::{MatchMode, declaration_search};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("animal.rb");
+        std::fs::write(&rb_path, "class Animal\n  def speak; end\nend\n").expect("write rb");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // the declarations live only in the store now
+
+        let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        assert!(graph.declarations().is_empty(), "memory layer is empty");
+
+        let animal_id = DeclarationId::from("Animal");
+
+        // Search used to scan only the in-memory overlay and silently returned nothing in disk mode.
+        let found = declaration_search(&graph, &["Animal"], &MatchMode::Exact);
+        assert!(
+            found.contains(&animal_id),
+            "exact search found no store declarations: {found:?}"
+        );
+
+        let found = declaration_search(&graph, &["anml"], &MatchMode::Fuzzy);
+        assert!(
+            found.contains(&animal_id),
+            "fuzzy search found no store declarations: {found:?}"
+        );
+
+        // An empty query matches all declarations, including the store's.
+        let all = declaration_search(&graph, &[""], &MatchMode::Exact);
+        assert!(all.contains(&animal_id), "empty query must return store declarations");
+        assert!(
+            all.len() > graph.declarations().len(),
+            "store declarations must be included"
         );
     }
 }
