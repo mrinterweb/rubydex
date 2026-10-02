@@ -319,6 +319,21 @@ impl Graph {
         Vec::new()
     }
 
+    /// `(uri_id, URI)` pairs for all documents held by the disk store. Empty when no store is
+    /// attached. Used by require-path resolution and completion to cover store-backed documents.
+    #[cfg(feature = "redb-store")]
+    pub(crate) fn store_document_uris(&self) -> Vec<(UriId, String)> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        store.document_uris().unwrap_or_default()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    pub(crate) fn store_document_uris(&self) -> Vec<(UriId, String)> {
+        Vec::new()
+    }
+
     /// Looks up a name node by ID, checking the in-memory graph first, then the disk-backed store.
     #[must_use]
     pub fn name(&self, id: NameId) -> Option<NodeRef<'_, NameRef>> {

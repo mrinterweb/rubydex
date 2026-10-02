@@ -145,28 +145,51 @@ impl Document {
     /// Panics if load path entries exceed u16.
     #[must_use]
     pub fn require_path(&self, load_paths: &[PathBuf]) -> Option<(String, u16)> {
-        let file_path = self.file_path()?;
-        if file_path.extension().is_none_or(|ext| ext != "rb") {
-            return None;
-        }
-
-        for (load_path_index, load_path) in load_paths.iter().enumerate() {
-            if let Ok(relative) = file_path.strip_prefix(load_path) {
-                let file_path = relative
-                    .components()
-                    .filter_map(|c| c.as_os_str().to_str())
-                    .collect::<Vec<_>>()
-                    .join("/");
-
-                let require_path = file_path.trim_end_matches(".rb").to_string();
-                return Some((
-                    require_path,
-                    load_path_index.try_into().expect("Load path entries exceed u16"),
-                ));
-            }
-        }
-        None
+        require_path_for_uri(&self.uri, load_paths)
     }
+}
+
+/// Computes the require path for a document URI given load paths.
+///
+/// Shared by in-memory documents and store-backed documents, which are enumerated by URI alone
+/// without deserializing the full document node.
+///
+/// Returns `None` if:
+/// - URI is not `file://` scheme
+/// - URI doesn't end with `.rb`
+/// - File path doesn't match any load path
+/// - `Url::to_file_path()` fails
+///
+/// # Panics
+///
+/// Panics if load path entries exceed u16.
+#[must_use]
+pub fn require_path_for_uri(uri: &str, load_paths: &[PathBuf]) -> Option<(String, u16)> {
+    let url = Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    let file_path = url.to_file_path().ok()?;
+    if file_path.extension().is_none_or(|ext| ext != "rb") {
+        return None;
+    }
+
+    for (load_path_index, load_path) in load_paths.iter().enumerate() {
+        if let Ok(relative) = file_path.strip_prefix(load_path) {
+            let file_path = relative
+                .components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .collect::<Vec<_>>()
+                .join("/");
+
+            let require_path = file_path.trim_end_matches(".rb").to_string();
+            return Some((
+                require_path,
+                load_path_index.try_into().expect("Load path entries exceed u16"),
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
