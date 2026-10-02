@@ -10,6 +10,10 @@ require "rdoc/task"
 
 GEMSPEC = Gem::Specification.load("rubydex.gemspec")
 
+# The disk-backed index is opt-in for gem consumers (see ext/rubydex/extconf.rb); this repo's own
+# builds keep it compiled in so development and the test suite exercise the store path.
+ENV["RUBYDEX_REDB_STORE"] = "1"
+
 Rake::ExtensionTask.new("rubydex", GEMSPEC) do |ext|
   ext.lib_dir = "lib/rubydex"
 end

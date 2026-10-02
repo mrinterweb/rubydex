@@ -62,5 +62,7 @@ resident beyond what each lookup touches.
 - **First-definition selection.** `definition_location` returns the first of a
   name's definitions (e.g. `Set` may resolve to a monkey-patch rather than core);
   multi-definition ranking is a refinement, not a memory concern.
-- **Mutation / live edits (Stage 4)** and **prefix/fuzzy search indexes
-  (Stage 5)** are the remaining work to turn this POC into a full backend.
+- Live edits (Stage 4) are implemented on the disk path: edits flow through a
+  materialize-on-write overlay over the store. Remaining work to turn this POC into a
+  full backend: **prefix/fuzzy search indexes (Stage 5)** and persisting overlay writes back
+  into the store (a fresh boot rebuilds the store from scratch).

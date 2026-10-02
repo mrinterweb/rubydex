@@ -20,8 +20,10 @@ fn read_source(uri: &str) -> Option<String> {
 // ponytail: per-thread, unbounded memo of rebuilt LineIndexes keyed by document URI. A hover that
 // computes several locations re-reads the file and reparses it on every call without this; with it,
 // the file read + LineIndex::new happen once per URI per thread (LineIndex is Rc-based, so the
-// cache hit is a cheap clone). Unbounded — fine for the opt-in disk path; add an LRU bound if a
-// workspace with many touched files ever makes it matter.
+// cache hit is a cheap clone). The cache is never invalidated and lives for the process lifetime:
+// gem/stdlib sources don't change under us, but a workspace file edited on disk outside the LSP
+// serves stale positions until the process restarts. Unbounded — fine for the opt-in disk path;
+// add an LRU bound if a workspace with many touched files ever makes it matter.
 #[cfg(feature = "redb-store")]
 thread_local! {
     static REBUILT_LINE_INDEXES: std::cell::RefCell<std::collections::HashMap<String, (LineIndex, usize)>> =

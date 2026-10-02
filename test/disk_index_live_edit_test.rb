@@ -47,4 +47,33 @@ class DiskIndexLiveEditTest < Minitest::Test
     assert_includes(member_names, "Foo#baz()")
     refute_includes(member_names, "Foo#bar()")
   end
+
+  def test_failed_store_build_cleans_up_temp_files
+    skip("fork unavailable; build_store_via_fork can't run on this platform") unless Process.respond_to?(:fork)
+
+    ws = File.join(@tmp, "ws")
+    FileUtils.mkdir_p(ws)
+    File.write(File.join(ws, "a.rb"), "class A; end\n")
+
+    graph = Rubydex::Graph.new(workspace_path: ws)
+    cache_dir = File.join(@tmp, "cache", "key")
+    cache = File.join(cache_dir, "index.redb")
+    original_build_store = nil
+
+    # `build_store` is a C method; `define_method` replaces its table entry, so capture the
+    # original and rebind it afterwards (remove_method would delete the C method for good).
+    original_build_store = Rubydex::Graph.instance_method(:build_store)
+    Rubydex::Graph.send(:define_method, :build_store) do |path|
+      File.binwrite(path, "partial")
+      exit!(1) # simulate a child that dies after writing a partial store
+    end
+
+    assert_raises(RuntimeError) { graph.send(:build_store_via_fork, cache) }
+    assert_empty(
+      Dir.glob(File.join(cache_dir, "*.building")),
+      "temp files leaked after a failed store build",
+    )
+  ensure
+    Rubydex::Graph.send(:define_method, :build_store, original_build_store) if original_build_store
+  end
 end

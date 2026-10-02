@@ -113,11 +113,11 @@ assert_send_sync!(Graph);
 /// been deserialized from the disk-backed store (`Stored`). Derefs to `&T` so most call sites read
 /// identically whether the node lives in memory or on disk.
 ///
-/// ponytail: `Stored` allocates a `Box<T>` per store-backed lookup. The materialize-on-write
-/// overlay (`Graph::materialize_*`) caches nodes in memory after first access, so repeated lookups
-/// of the same node hit the in-memory map (zero alloc) rather than re-deserializing from disk.
-/// The allocation ceiling is bounded by distinct nodes touched per session, not lookup count.
-/// An LRU cap on the overlay would bound it further if memory becomes a concern.
+/// ponytail: `Stored` allocates a `Box<T>` per store-backed lookup. Read paths (the layered
+/// getters) never materialize, so a store-backed node re-deserializes on every read; only write
+/// paths (`Graph::materialize_*`, used by the resolver and invalidation) promote nodes into the
+/// in-memory overlay, where later lookups of the same node then hit the in-memory map (zero
+/// alloc). An LRU cap on the overlay would bound write-touched memory, not read-path allocations.
 #[derive(Debug)]
 pub enum NodeRef<'a, T> {
     Mem(&'a T),
