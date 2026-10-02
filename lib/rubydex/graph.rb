@@ -104,7 +104,9 @@ module Rubydex
     #: -> String
     def store_signature
       require "digest"
-      Digest::SHA1.hexdigest(lockfile_hash + workspace_source_signature)
+      # The gem version is part of the key so store schema changes (e.g. new tables) invalidate
+      # existing stores instead of silently degrading against an old layout.
+      Digest::SHA1.hexdigest(Rubydex::VERSION + lockfile_hash + workspace_source_signature)
     end
 
     # SHA of the workspace Gemfile.lock, used to invalidate the store when dependencies change.

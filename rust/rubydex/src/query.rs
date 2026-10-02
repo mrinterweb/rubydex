@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::PathBuf;
 use std::thread;
@@ -41,14 +41,27 @@ pub fn declaration_search(graph: &Graph, queries: &[&str], match_mode: &MatchMod
     let num_threads = thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let declarations = graph.declarations();
 
+    // A store-backed graph keeps its bulk declarations on disk; pull their (id, name) pairs so
+    // search covers them too. Tombstoned declarations are already excluded by the accessor.
+    let store_names: Vec<(DeclarationId, String)> = graph.store_declaration_names();
+    let store_name_map: HashMap<DeclarationId, &str> =
+        store_names.iter().map(|(id, name)| (*id, name.as_str())).collect();
+
+    let mut seen: IdentityHashSet<DeclarationId> = IdentityHashSet::default();
+    let ids: Vec<DeclarationId> = declarations
+        .keys()
+        .copied()
+        .chain(store_names.iter().map(|(id, _)| *id))
+        .filter(|id| seen.insert(*id))
+        .collect();
+
     // An empty query matches all declarations as per the LSP specification and is equivalent to fetching all of them
     // directly. Since an empty query matches all, there's no point in checking the other queries or pay the price of
     // spawning threads.
     if queries.iter().any(|q| q.is_empty()) {
-        return declarations.keys().copied().collect();
+        return ids;
     }
 
-    let ids: Vec<DeclarationId> = declarations.keys().copied().collect();
     let chunk_size = ids.len().div_ceil(num_threads);
 
     if chunk_size == 0 {
@@ -63,7 +76,13 @@ pub fn declaration_search(graph: &Graph, queries: &[&str], match_mode: &MatchMod
                     chunk
                         .iter()
                         .filter(|id| {
-                            let name = declarations.get(id).unwrap().name();
+                            let name = declarations
+                                .get(id)
+                                .map(Declaration::name)
+                                .or_else(|| store_name_map.get(id).copied());
+                            let Some(name) = name else {
+                                return false;
+                            };
                             queries.iter().any(|query| matches_query(query, name, match_mode))
                         })
                         .copied()
