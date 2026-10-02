@@ -48,8 +48,8 @@ fn build_store_graph_from(root: &Path, store_dir: &Path) -> Graph {
 /// `(case, normalized_value)` pairs.
 fn probe_all(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, String)>) {
     probe_declarations(graph, out);
+    probe_completion(graph, name_ids, out);
     probe_search(graph, out);
-    let _ = name_ids;
 }
 
 /// All declaration ids a graph can see: in-memory map ∪ store-backed names.
@@ -137,6 +137,78 @@ fn probe_declarations(graph: &Graph, out: &mut Vec<(String, String)>) {
                 definitions.join(";"),
             ),
         ));
+    }
+}
+
+fn candidate_names(graph: &Graph, candidates: &[rubydex::query::CompletionCandidate]) -> String {
+    use rubydex::query::CompletionCandidate;
+    candidates
+        .iter()
+        .map(|c| match c {
+            CompletionCandidate::Declaration(id) => declaration_fqn(graph, *id),
+            CompletionCandidate::KeywordArgument(str_id) => graph
+                .string(*str_id)
+                .map_or_else(|| format!("<missing string {}>", str_id.get()), |s| s.as_str().to_string()),
+            CompletionCandidate::Keyword(keyword) => format!("kw:{}", keyword.name()),
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn probe_completion(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, String)>) {
+    use rubydex::query::{completion_candidates, CompletionContext, CompletionReceiver};
+
+    // Expression completion at every interned name (lexical scope = that name, self derived).
+    // Name ids are taken from the in-memory graph: ids are deterministic content hashes,
+    // so the same ids are valid keys in the store.
+    for name_id in name_ids {
+        let ctx = CompletionContext::new(CompletionReceiver::Expression {
+            self_decl_id: None,
+            nesting_name_id: *name_id,
+        });
+        let entry = match completion_candidates(graph, ctx) {
+            Ok(candidates) => candidate_names(graph, &candidates),
+            Err(error) => format!("Err({error})"),
+        };
+        out.push((format!("complete:expression:{}", name_id.get()), entry));
+    }
+
+    // Namespace-access and method-call completion at every namespace declaration.
+    let namespaces: Vec<String> = all_declaration_ids(graph)
+        .iter()
+        .filter(|raw| {
+            let id = DeclarationId::new(**raw);
+            graph
+                .declaration(id)
+                .is_some_and(|d| d.as_namespace().is_some())
+        })
+        .map(|raw| declaration_fqn(graph, DeclarationId::new(*raw)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for fqn in &namespaces {
+        let id = DeclarationId::from(fqn.as_str());
+        let ns_ctx = CompletionContext::new(CompletionReceiver::NamespaceAccess {
+            self_decl_id: None,
+            namespace_decl_id: id,
+        });
+        let ns_entry = match completion_candidates(graph, ns_ctx) {
+            Ok(candidates) => candidate_names(graph, &candidates),
+            Err(error) => format!("Err({error})"),
+        };
+        out.push((format!("complete:namespace:{fqn}"), ns_entry));
+
+        let call_ctx = CompletionContext::new(CompletionReceiver::MethodCall {
+            self_decl_id: None,
+            receiver_decl_id: id,
+        });
+        let call_entry = match completion_candidates(graph, call_ctx) {
+            Ok(candidates) => candidate_names(graph, &candidates),
+            Err(error) => format!("Err({error})"),
+        };
+        out.push((format!("complete:methodcall:{fqn}"), call_entry));
     }
 }
 
