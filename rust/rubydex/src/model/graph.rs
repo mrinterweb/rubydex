@@ -339,6 +339,33 @@ impl Graph {
         Vec::new()
     }
 
+    /// Store-backed declaration ids whose FQN passes `predicate`, streamed from the store
+    /// (the name table is not materialized). Tombstoned declarations are excluded so a live
+    /// edit's deletion is not resurrected. Empty when no store is attached.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_declaration_ids_matching(
+        &self,
+        predicate: &dyn Fn(&DeclarationId, &str) -> bool,
+    ) -> Vec<DeclarationId> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        store
+            .declaration_ids_matching(&|id, name| !self.is_tombstoned(id.get()) && predicate(id, name))
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn store_declaration_ids_matching(
+        &self,
+        _predicate: &dyn Fn(&DeclarationId, &str) -> bool,
+    ) -> Vec<DeclarationId> {
+        Vec::new()
+    }
+
     /// `(uri_id, URI)` pairs for all documents held by the disk store. Empty when no store is
     /// attached. Used by require-path resolution and completion to cover store-backed documents.
     #[cfg(feature = "redb-store")]
