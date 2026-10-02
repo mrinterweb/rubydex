@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::path::PathBuf;
 use std::thread;
@@ -42,45 +42,38 @@ pub fn declaration_search(graph: &Graph, queries: &[&str], match_mode: &MatchMod
     let num_threads = thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let declarations = graph.declarations();
 
-    // A store-backed graph keeps its bulk declarations on disk; pull their (id, name) pairs so
-    // search covers them too. Tombstoned declarations are already excluded by the accessor.
-    let store_names: Vec<(DeclarationId, String)> = graph.store_declaration_names();
-    let store_name_map: HashMap<DeclarationId, &str> =
-        store_names.iter().map(|(id, name)| (*id, name.as_str())).collect();
-
-    let mut seen: IdentityHashSet<DeclarationId> = IdentityHashSet::default();
-    let ids: Vec<DeclarationId> = declarations
-        .keys()
-        .copied()
-        .chain(store_names.iter().map(|(id, _)| *id))
-        .filter(|id| seen.insert(*id))
-        .collect();
+    // A store-backed graph keeps its bulk declarations on disk; they are streamed from the store
+    // below (the name table is never materialized). Declarations that also exist in the overlay
+    // are excluded from the store stream: the overlay name shadows the stored one.
+    let memory_ids: Vec<DeclarationId> = declarations.keys().copied().collect();
 
     // An empty query matches all declarations as per the LSP specification and is equivalent to fetching all of them
     // directly. Since an empty query matches all, there's no point in checking the other queries or pay the price of
     // spawning threads.
     if queries.iter().any(|q| q.is_empty()) {
+        let mut ids = memory_ids;
+        ids.extend(graph.store_declaration_ids_matching(&|id, _| !declarations.contains_key(id)));
         return ids;
     }
 
-    let chunk_size = ids.len().div_ceil(num_threads);
-
-    if chunk_size == 0 {
-        return Vec::new();
+    if memory_ids.is_empty() {
+        // Store-backed graph with no overlay: the whole result set comes from the store stream.
+        return graph.store_declaration_ids_matching(&|_id, name| {
+            queries.iter().any(|query| matches_query(query, name, match_mode))
+        });
     }
 
-    thread::scope(|s| {
-        let handles: Vec<_> = ids
+    let chunk_size = memory_ids.len().div_ceil(num_threads);
+
+    let mut results: Vec<DeclarationId> = thread::scope(|s| {
+        let handles: Vec<_> = memory_ids
             .chunks(chunk_size)
             .map(|chunk| {
                 s.spawn(|| {
                     chunk
                         .iter()
                         .filter(|id| {
-                            let name = declarations
-                                .get(id)
-                                .map(Declaration::name)
-                                .or_else(|| store_name_map.get(id).copied());
+                            let name = declarations.get(id).map(Declaration::name);
                             let Some(name) = name else {
                                 return false;
                             };
@@ -93,7 +86,14 @@ pub fn declaration_search(graph: &Graph, queries: &[&str], match_mode: &MatchMod
             .collect();
 
         handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
-    })
+    });
+
+    // Store-backed declarations not shadowed by the overlay (tombstones already excluded).
+    results.extend(graph.store_declaration_ids_matching(&|id, name| {
+        !declarations.contains_key(id) && queries.iter().any(|query| matches_query(query, name, match_mode))
+    }));
+
+    results
 }
 
 /// Returns whether a single `query` matches `name` under the given [`MatchMode`].

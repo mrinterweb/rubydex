@@ -281,6 +281,30 @@ impl RedbStore {
             .collect()
     }
 
+    /// Streams the `SEARCH_NAMES` table, returning the ids whose FQN passes `predicate`.
+    /// Filtering during the scan avoids materializing the full name table (hundreds of MB
+    /// on large corpora) for a single search.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn declaration_ids_matching(
+        &self,
+        predicate: &dyn Fn(&DeclarationId, &str) -> bool,
+    ) -> Result<Vec<DeclarationId>, redb::Error> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(SEARCH_NAMES)?;
+        let ids = table
+            .range(..u64::MAX)?
+            .filter_map(|entry| {
+                let (id, name) = entry.ok()?;
+                let id = DeclarationId::new(id.value());
+                let name = String::from_utf8_lossy(name.value());
+                predicate(&id, &name).then_some(id)
+            })
+            .collect::<Vec<_>>();
+        Ok(ids)
+    }
+
     /// Reads all definition node ids for enumeration (keys only, no deserialization).
     ///
     /// # Errors
@@ -382,6 +406,36 @@ mod tests {
         assert_roundtrip!(graph.method_references(), get_method_reference);
         assert_roundtrip!(graph.documents(), get_document);
         assert_roundtrip!(graph.name_dependents(), get_name_dependents);
+    }
+
+    #[test]
+    fn declaration_ids_matching_filters_during_scan() {
+        let graph = Graph::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        let store = RedbStore::build(&path, &graph).expect("build store");
+
+        let all = store.search_names().expect("search_names");
+        assert!(!all.is_empty(), "built-in declarations should populate SEARCH_NAMES");
+
+        // Subset predicate (first character of the first FQN guarantees a non-empty match):
+        // streaming results must equal filtering the materialized table.
+        let first_char = all[0].1.chars().next().expect("FQN non-empty");
+        let subset = store
+            .declaration_ids_matching(&|_id, name| name.starts_with(first_char))
+            .expect("streaming subset");
+        let expected: Vec<DeclarationId> = all
+            .iter()
+            .filter(|(_, name)| name.starts_with(first_char))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(subset, expected);
+
+        // Always-true returns every id; never-true returns none.
+        let everything = store.declaration_ids_matching(&|_id, _name| true).expect("streaming all");
+        assert_eq!(everything.len(), all.len());
+        let nothing = store.declaration_ids_matching(&|_id, _name| false).expect("streaming none");
+        assert!(nothing.is_empty());
     }
 
     #[test]
