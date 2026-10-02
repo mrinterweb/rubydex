@@ -168,29 +168,36 @@ module Rubydex
       require "fileutils"
       FileUtils.mkdir_p(File.dirname(cache))
       tmp = "#{cache}.#{Process.pid}.building"
-
-      pid = fork do
-        builder = Rubydex::Graph.new(workspace_path: workspace_path)
-        builder.index_all(builder.workspace_paths)
-        builder.resolve
-        builder.build_store(tmp)
-        exit!(0)
-      end
-      _, status = Process.wait2(pid)
-      raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
-
-      # Publish order matters for concurrent correctness: rename the store first, then the marker.
-      # Both renames are atomic on POSIX, so a concurrent reader (attach_store) never sees a
-      # partially-written file. A reader that lands between the two renames sees a NEW store with an
-      # OLD marker, so store_fresh? compares the old marker to the new signature, mismatches, and
-      # rebuilds — a wasted rebuild, never staleness (a stale store can only be served when the
-      # marker says fresh, which requires the new marker, which is written last). Concurrent builders
-      # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
       marker = "#{cache}.hash"
       marker_tmp = "#{marker}.#{Process.pid}.building"
-      File.write(marker_tmp, store_signature)
-      File.rename(tmp, cache)
-      File.rename(marker_tmp, marker)
+
+      begin
+        pid = fork do
+          builder = Rubydex::Graph.new(workspace_path: workspace_path)
+          builder.index_all(builder.workspace_paths)
+          builder.resolve
+          builder.build_store(tmp)
+          exit!(0)
+        end
+        _, status = Process.wait2(pid)
+        raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
+
+        # Publish order matters for concurrent correctness: rename the store first, then the marker.
+        # Both renames are atomic on POSIX, so a concurrent reader (attach_store) never sees a
+        # partially-written file. A reader that lands between the two renames sees a NEW store with an
+        # OLD marker, so store_fresh? compares the old marker to the new signature, mismatches, and
+        # rebuilds — a wasted rebuild, never staleness (a stale store can only be served when the
+        # marker says fresh, which requires the new marker, which is written last). Concurrent builders
+        # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
+        File.write(marker_tmp, store_signature)
+        File.rename(tmp, cache)
+        File.rename(marker_tmp, marker)
+      ensure
+        # A failed build (or a crash mid-publish) must not leave .building temps behind; after a
+        # successful publish both were renamed, so these are no-ops.
+        File.delete(tmp) if File.exist?(tmp)
+        File.delete(marker_tmp) if File.exist?(marker_tmp)
+      end
     end
 
     # Gathers the paths we have to index for all workspace dependencies
