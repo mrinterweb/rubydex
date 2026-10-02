@@ -38,6 +38,10 @@ const NAME_DEPENDENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("name_
 /// name-based search scans short strings instead of deserializing full declaration nodes.
 const SEARCH_NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("search_names");
 
+/// Document URIs for require-path resolution: `uri_id -> URI string`. A compact projection so
+/// require completion can enumerate file paths without deserializing full document nodes.
+const DOCUMENT_URIS: TableDefinition<u64, &[u8]> = TableDefinition::new("document_uris");
+
 /// A redb-backed node store.
 pub struct RedbStore {
     db: Database,
@@ -105,6 +109,12 @@ impl RedbStore {
                 let mut table = write_txn.open_table(SEARCH_NAMES)?;
                 for (id, declaration) in graph.declarations() {
                     table.insert(id.get(), declaration.name().as_bytes())?;
+                }
+            }
+            {
+                let mut table = write_txn.open_table(DOCUMENT_URIS)?;
+                for (id, document) in graph.documents() {
+                    table.insert(id.get(), document.uri().as_bytes())?;
                 }
             }
 
@@ -247,6 +257,25 @@ impl RedbStore {
                 Ok((
                     DeclarationId::new(id.value()),
                     String::from_utf8_lossy(name.value()).into_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Reads all `(uri_id, URI)` pairs for require-path resolution.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn document_uris(&self) -> Result<Vec<(UriId, String)>, redb::Error> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(DOCUMENT_URIS)?;
+        table
+            .range(..u64::MAX)?
+            .map(|entry| -> Result<(UriId, String), redb::Error> {
+                let (id, uri) = entry?;
+                Ok((
+                    UriId::new(id.value()),
+                    String::from_utf8_lossy(uri.value()).into_owned(),
                 ))
             })
             .collect()
@@ -769,12 +798,50 @@ mod tests {
             "fuzzy search found no store declarations: {found:?}"
         );
 
-        // An empty query matches all declarations, including the store's.
+        // An empty query returns all declarations, including store-backed ones.
         let all = declaration_search(&graph, &[""], &MatchMode::Exact);
-        assert!(all.contains(&animal_id), "empty query must return store declarations");
         assert!(
             all.len() > graph.declarations().len(),
-            "store declarations must be included"
+            "empty query returned only in-memory declarations: {}",
+            all.len()
+        );
+    }
+
+    #[test]
+    fn require_resolution_on_store_backed_graph() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::query::{require_paths, resolve_require_path};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lib = dir.path().join("lib");
+        let file = lib.join("foo").join("bar.rb");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, "class Bar; end\n").expect("write rb");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![file.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // the documents live only in the store now
+
+        let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        assert!(graph.documents().is_empty(), "memory layer is empty");
+
+        let uri_id = UriId::from(url::Url::from_file_path(&file).expect("url").as_str());
+
+        // In-memory-only lookups: go-to-definition on require and require/require_relative
+        // completion were both dead in disk mode.
+        assert_eq!(
+            resolve_require_path(&graph, "foo/bar", std::slice::from_ref(&lib)),
+            Some(uri_id)
+        );
+        let paths = require_paths(&graph, &[lib]);
+        assert!(
+            paths.contains(&"foo/bar".to_string()),
+            "require_paths found no store documents: {paths:?}"
         );
     }
 }

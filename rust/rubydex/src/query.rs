@@ -8,6 +8,7 @@ use url::Url;
 use crate::model::built_in::{BUILT_IN_URI_ID, OBJECT_ID};
 use crate::model::declaration::{Ancestor, Declaration, Namespace};
 use crate::model::definitions::{Definition, Parameter};
+use crate::model::document::require_path_for_uri;
 use crate::model::graph::Graph;
 use crate::model::identity_maps::IdentityHashSet;
 use crate::model::ids::{ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId, UriId};
@@ -138,7 +139,8 @@ pub fn resolve_require_path(graph: &Graph, require_path: &str, load_path: &[Path
             continue;
         };
         let uri_id = UriId::from(url.as_str());
-        if graph.documents().contains_key(&uri_id) {
+        // Layered lookup: in disk mode the document lives in the store, not the in-memory overlay.
+        if graph.document(uri_id).is_some() {
             return Some(uri_id);
         }
     }
@@ -157,21 +159,33 @@ pub fn resolve_require_path(graph: &Graph, require_path: &str, load_path: &[Path
 #[must_use]
 pub fn require_paths(graph: &Graph, load_paths: &[PathBuf]) -> Vec<String> {
     let num_threads = thread::available_parallelism().map_or(4, std::num::NonZero::get);
-    let documents = graph.documents().iter().collect::<Vec<_>>();
-    let chunk_size = documents.len().div_ceil(num_threads);
+
+    // A store-backed graph keeps its bulk documents on disk; pull their URIs so require
+    // completion covers them too. The URI is the document's identity, so the same file present in
+    // both layers deduplicates to one entry (the require path only depends on the URI).
+    let mut uris: Vec<String> = graph
+        .documents()
+        .values()
+        .map(|document| document.uri().to_string())
+        .collect();
+    uris.extend(graph.store_document_uris().into_iter().map(|(_, uri)| uri));
+    uris.sort();
+    uris.dedup();
+
+    let chunk_size = uris.len().div_ceil(num_threads);
 
     if chunk_size == 0 {
         return Vec::new();
     }
 
     let mut all_results = thread::scope(|scope| {
-        let handles: Vec<_> = documents
+        let handles: Vec<_> = uris
             .chunks(chunk_size)
             .map(|chunk| {
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .filter_map(|(_, document)| document.require_path(load_paths))
+                        .filter_map(|uri| require_path_for_uri(uri, load_paths))
                         .collect::<Vec<_>>()
                 })
             })
