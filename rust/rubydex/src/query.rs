@@ -484,12 +484,12 @@ fn expression_completion(
         return Err(format!("Expected name {nesting_name_id} to be resolved").into());
     };
 
-    let innermost_lexical_decl = graph
-        .declarations()
-        .get(name_ref.declaration_id())
-        .unwrap()
+    let lexical_node = graph
+        .declaration(*name_ref.declaration_id())
+        .ok_or_else(|| format!("Declaration for name {nesting_name_id} not found in graph"))?;
+    let innermost_lexical_decl = lexical_node
         .as_namespace()
-        .unwrap();
+        .ok_or_else(|| format!("Expected declaration for name {nesting_name_id} to be a namespace"))?;
 
     let mut candidates = Vec::new();
 
@@ -513,10 +513,10 @@ fn expression_completion(
     // Collect methods and instance variables, which are based on the inheritance chain of the `self` type (which may
     // not match the immediate lexical scope)
     if let Some(self_decl_id) = self_decl_id.map(|id| resolve_self_namespace(graph, id)).transpose()? {
-        let self_decl = graph
-            .declarations()
-            .get(&self_decl_id)
-            .unwrap()
+        let self_node = graph
+            .declaration(self_decl_id)
+            .ok_or_else(|| format!("self declaration {self_decl_id:?} not found in graph"))?;
+        let self_decl = self_node
             .as_namespace()
             .ok_or("Expected associated declaration to be a namespace")?;
 
@@ -578,15 +578,20 @@ fn collect_class_variables_from_lexical_scope(
     context: &mut CompletionContext,
     candidates: &mut Vec<CompletionCandidate>,
 ) {
-    let mut decl = graph
-        .declarations()
-        .get(name_ref.declaration_id())
-        .unwrap()
-        .as_namespace()
-        .unwrap();
+    // Walk the lexical chain by ID rather than by reference: on a store-backed graph these
+    // declarations may live only in the store, and each `DeclRef` fetched along the way is a
+    // temporary that cannot outlive its statement. Track the chain as IDs and fetch the final
+    // namespace exactly once.
+    let mut current_decl_id = *name_ref.declaration_id();
     let mut current_name_id = *name_ref.nesting();
 
-    while matches!(decl, Namespace::SingletonClass(_)) {
+    loop {
+        let Some(node) = graph.declaration(current_decl_id) else {
+            return;
+        };
+        if !matches!(node.as_namespace(), Some(Namespace::SingletonClass(_))) {
+            break;
+        }
         let Some(parent_name_id) = current_name_id else {
             // No non-singleton lexical scope (invalid Ruby). Skip cvar collection.
             return;
@@ -595,14 +600,16 @@ fn collect_class_variables_from_lexical_scope(
         let NameRef::Resolved(parent_ref) = &*parent_name_node else {
             return;
         };
-        decl = graph
-            .declarations()
-            .get(parent_ref.declaration_id())
-            .unwrap()
-            .as_namespace()
-            .unwrap();
+        current_decl_id = *parent_ref.declaration_id();
         current_name_id = *parent_ref.nesting();
     }
+
+    let Some(decl_node) = graph.declaration(current_decl_id) else {
+        return;
+    };
+    let Some(decl) = decl_node.as_namespace() else {
+        return;
+    };
 
     for ancestor in decl.ancestors() {
         if let Ancestor::Complete(ancestor_id) = ancestor {
