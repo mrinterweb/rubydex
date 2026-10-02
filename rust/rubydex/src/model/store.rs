@@ -614,4 +614,57 @@ mod tests {
             "expected `speak` from store-backed members, got {names:?}"
         );
     }
+
+    #[test]
+    fn expression_completion_on_store_backed_graph() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::query::{CompletionCandidate, CompletionContext, CompletionReceiver, completion_candidates};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("animal.rb");
+        std::fs::write(&rb_path, "class Animal\n  def speak; end\nend\n").expect("write rb");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+
+        // Grab the `Animal` class definition's NameId while the in-memory graph is alive; a NameId
+        // encodes its nesting scope, so it cannot be derived from the string alone.
+        let animal_name_id: NameId = graph
+            .definitions()
+            .values()
+            .find_map(|d| match d {
+                Definition::Class(c) => Some(*c.name_id()),
+                _ => None,
+            })
+            .expect("Animal class definition");
+
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph); // the answer must come from disk, not in-memory maps
+
+        // A fresh store-backed graph has empty in-memory maps, so expression completion (the
+        // lexical-scope path) can only work by reading through the layered accessors.
+        let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        assert!(graph.declarations().is_empty(), "memory layer is empty");
+
+        let receiver = CompletionReceiver::Expression {
+            self_decl_id: Some(DeclarationId::from("Animal")),
+            nesting_name_id: animal_name_id,
+        };
+        let candidates = completion_candidates(&graph, CompletionContext::new(receiver)).expect("completion");
+
+        let names: Vec<String> = candidates
+            .iter()
+            .filter_map(|c| match c {
+                CompletionCandidate::Declaration(id) => Some(graph.declaration(*id)?.name().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains("speak")),
+            "expected `speak` from store-backed expression completion, got {names:?}"
+        );
+    }
 }
