@@ -319,6 +319,7 @@ impl Graph {
     /// declarations so a live edit's deletion is not resurrected by search. Empty when no store is
     /// attached. Used by declaration search to cover store-backed declarations.
     #[cfg(feature = "redb-store")]
+    #[must_use]
     pub fn store_declaration_names(&self) -> Vec<(DeclarationId, String)> {
         let Some(store) = &self.store else {
             return Vec::new();
@@ -340,6 +341,7 @@ impl Graph {
     /// `(uri_id, URI)` pairs for all documents held by the disk store. Empty when no store is
     /// attached. Used by require-path resolution and completion to cover store-backed documents.
     #[cfg(feature = "redb-store")]
+    #[must_use]
     pub fn store_document_uris(&self) -> Vec<(UriId, String)> {
         let Some(store) = &self.store else {
             return Vec::new();
