@@ -1,4 +1,4 @@
-//! A small Cypher query engine that runs read-only queries directly against the in-memory
+//! A small Cypher query engine that runs read-only queries against the
 //! [`Graph`](crate::model::graph::Graph).
 //!
 //! Supported subset:

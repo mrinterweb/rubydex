@@ -333,6 +333,7 @@ impl Graph {
     }
 
     #[cfg(not(feature = "redb-store"))]
+    #[must_use]
     #[allow(clippy::unused_self)]
     pub fn store_declaration_names(&self) -> Vec<(DeclarationId, String)> {
         Vec::new()
@@ -355,8 +356,32 @@ impl Graph {
     }
 
     #[cfg(not(feature = "redb-store"))]
+    #[must_use]
     #[allow(clippy::unused_self)]
     pub fn store_document_uris(&self) -> Vec<(UriId, String)> {
+        Vec::new()
+    }
+
+    /// Definition ids held by the disk store, excluding tombstoned definitions so a live edit's
+    /// deletion is not resurrected by enumeration. Empty when no store is attached.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_definition_ids(&self) -> Vec<DefinitionId> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        store
+            .definition_ids()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| !self.is_tombstoned(id.get()))
+            .collect()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn store_definition_ids(&self) -> Vec<DefinitionId> {
         Vec::new()
     }
 
