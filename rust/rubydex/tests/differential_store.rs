@@ -50,6 +50,10 @@ fn probe_all(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, String)>
     probe_declarations(graph, out);
     probe_completion(graph, name_ids, out);
     probe_search(graph, out);
+    probe_aliases(graph, out);
+    probe_find_member(graph, out);
+    probe_require(graph, out);
+    probe_documents(graph, out);
 }
 
 /// All declaration ids a graph can see: in-memory map ∪ store-backed names.
@@ -209,6 +213,143 @@ fn probe_completion(graph: &Graph, name_ids: &[NameId], out: &mut Vec<(String, S
             Err(error) => format!("Err({error})"),
         };
         out.push((format!("complete:methodcall:{fqn}"), call_entry));
+    }
+}
+
+fn probe_aliases(graph: &Graph, out: &mut Vec<(String, String)>) {
+    use rubydex::query::follow_method_alias;
+
+    // Every definition of every declaration: alias definitions resolve to a target,
+    // non-alias definitions error deterministically. Both must match across graphs.
+    for raw in all_declaration_ids(graph) {
+        let id = DeclarationId::new(raw);
+        let Some(decl) = graph.declaration(id) else { continue };
+        for def_id in decl.definitions() {
+            let rendered = match follow_method_alias(graph, *def_id) {
+                Ok(target) => format!("Ok({})", declaration_fqn(graph, target)),
+                Err(error) => format!("Err({error:?})"),
+            };
+            out.push((format!("alias:{}:{}", decl.name(), def_id.get()), rendered));
+        }
+    }
+}
+
+fn probe_find_member(graph: &Graph, out: &mut Vec<(String, String)>) {
+    use rubydex::query::find_member_in_ancestors;
+    use rubydex::model::ids::StringId;
+
+    let cases: &[(&str, &str)] = &[
+        ("Child", "parent_method"), // inherited
+        ("Child", "nickname"),      // alias
+        ("Child", "state"),         // attr_accessor
+        ("Child", "solo"),          // singleton method on Child
+        ("Child", "zzz_missing"),   // expect Err(MemberNotFound)
+        ("Parent", "base_method"),  // included module
+        ("Util", "util_method"),    // def self.
+    ];
+    for (owner, member) in cases {
+        let result = find_member_in_ancestors(
+            graph,
+            DeclarationId::from(*owner),
+            StringId::from(*member),
+            false,
+        );
+        let rendered = match result {
+            Ok(target) => format!("Ok({})", declaration_fqn(graph, target)),
+            Err(error) => format!("Err({error:?})"),
+        };
+        out.push((format!("member:{owner}:{member}"), rendered));
+    }
+}
+
+fn probe_require(graph: &Graph, out: &mut Vec<(String, String)>) {
+    use rubydex::query::{require_paths, resolve_require_path};
+
+    let root = corpus_dir();
+    let root_slice = std::slice::from_ref(&root);
+    let paths = require_paths(graph, root_slice);
+    out.push((
+        "require:paths".into(),
+        paths
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(","),
+    ));
+    for path in ["base", "parent", "child", "util", "refs", "kid", "nope"] {
+        let resolved = resolve_require_path(graph, path, root_slice).map_or_else(
+            || "None".into(),
+            |uri_id| {
+                graph
+                    .document(uri_id)
+                    .map_or_else(|| "<missing document>".into(), |d| d.uri().to_string())
+            },
+        );
+        out.push((format!("require:resolve:{path}"), resolved));
+    }
+}
+
+fn probe_documents(graph: &Graph, out: &mut Vec<(String, String)>) {
+    use rubydex::model::ids::UriId;
+
+    let mut uris: BTreeSet<u64> = graph.documents().keys().map(rubydex::model::id::Id::get).collect();
+    for (id, _uri) in graph.store_document_uris() {
+        uris.insert(id.get());
+    }
+    for raw in uris {
+        let uri_id = UriId::new(raw);
+        let Some(doc) = graph.document(uri_id) else {
+            out.push((format!("doc:id:{raw}"), "<missing>".into()));
+            continue;
+        };
+        let uri = doc.uri().to_string();
+        let defs: Vec<String> = doc
+            .definitions()
+            .iter()
+            .filter_map(|def_id| {
+                let decl_id = graph.definition_id_to_declaration_id(*def_id)?;
+                Some(declaration_fqn(graph, decl_id))
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        // Render refs by raw id: ids are deterministic content hashes of the referenced
+        // name/offset, so equality of raw ids IS semantic equality.
+        let const_refs: Vec<String> = doc
+            .constant_references()
+            .iter()
+            .map(|ref_id| {
+                let r = graph
+                    .constant_reference(*ref_id)
+                    .expect("const ref present for document");
+                format!("{}@{}", r.name_id().get(), r.offset().start())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let method_refs: Vec<String> = doc
+            .method_references()
+            .iter()
+            .map(|ref_id| {
+                let r = graph
+                    .method_reference(*ref_id)
+                    .expect("method ref present for document");
+                let receiver = r.receiver().map_or(u64::MAX, |n| n.get());
+                format!("{}@{}|recv:{}", r.str().get(), r.offset().start(), receiver)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        out.push((
+            format!("doc:{uri}"),
+            format!(
+                "defs:{}|const_refs:{}|method_refs:{}",
+                defs.join(","),
+                const_refs.join(","),
+                method_refs.join(","),
+            ),
+        ));
     }
 }
 
