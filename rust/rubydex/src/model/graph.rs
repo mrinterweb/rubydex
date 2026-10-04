@@ -433,13 +433,16 @@ impl Graph {
     #[must_use]
     pub fn store_declaration_ids_matching(
         &self,
-        predicate: &dyn Fn(&DeclarationId, &str) -> bool,
+        predicate: &(dyn Fn(&DeclarationId, &str) -> bool + Sync),
     ) -> Vec<DeclarationId> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
         scan_store(store, &self.store_errors, |store| {
-            store.declaration_ids_matching(&|id, name| !self.is_tombstoned(id.get()) && predicate(id, name))
+            store
+                .declaration_ids_matching_parallel(&|id, name| {
+                    !self.is_tombstoned(id.get()) && predicate(id, name)
+                })
         })
     }
 
