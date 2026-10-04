@@ -1,5 +1,7 @@
 //! Disk-persisted, low-resident-memory backing store for the graph.
 //!
+//! Design docs and benchmarks: `docs/disk-persisted-index/`.
+//!
 //! The graph's node maps are keyed by `Id<T>` (a `NonZeroU64` content hash). That maps directly onto
 //! an embedded key-value store: `u64 -> serialized_node_bytes`. This module persists the full
 //! resolved graph to a redb database and serves reads back through the `Graph`'s layered accessors

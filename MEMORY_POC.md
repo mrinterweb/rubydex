@@ -1,5 +1,8 @@
 # Disk-persisted index: low-resident-memory proof of concept
 
+Design docs, the code review and the benchmarks for the disk-persisted index live in
+`docs/disk-persisted-index/`.
+
 rubydex holds its entire graph resident in RAM. For a large codebase that is
 ~800 MB–1.3 GB, which dominates the memory footprint of a language server that
 embeds it. This branch (`disk-persisted-index`) adds an **opt-in** on-disk

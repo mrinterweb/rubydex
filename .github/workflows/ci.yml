@@ -129,6 +129,12 @@ jobs:
       - name: Run Ruby tests
         run: bundle exec rake test
 
+      # The store builder spawns (rather than forks) since 31527f6, so the disk index is expected to
+      # work on Windows; run the disk tests there instead of assuming it cannot.
+      - name: Disk-index tests
+        if: runner.os == 'windows'
+        run: bundle exec ruby -Itest test/disk_index_live_edit_test.rb
+
       - name: Save Rust compile cache
         id: rust-compile-cache-save
         uses: actions/cache/save@v6
