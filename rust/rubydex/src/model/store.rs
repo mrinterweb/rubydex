@@ -5,10 +5,6 @@
 //! resolved graph to a redb database and serves reads back through the `Graph`'s layered accessors
 //! (`Graph::with_store` / `Graph::attach_store`), keeping the bulk index off the heap.
 
-// Spike-only: a (de)serialization failure here means the on-disk store is corrupt, which we treat as
-// unrecoverable for now. Stage 1 replaces these `.expect()`s with a proper `StoreError` type.
-#![allow(clippy::missing_panics_doc)]
-
 use std::path::Path;
 
 use redb::{Database, ReadableDatabase, TableDefinition};
@@ -42,6 +38,73 @@ const SEARCH_NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("search_n
 /// require completion can enumerate file paths without deserializing full document nodes.
 const DOCUMENT_URIS: TableDefinition<u64, &[u8]> = TableDefinition::new("document_uris");
 
+/// Failure modes of the on-disk store.
+///
+/// A corrupt store is recoverable: the caller counts the failure and falls back to the in-memory
+/// index. It must never panic — a panic inside `extern "C"` cannot unwind, so it aborts the host
+/// process instead of surfacing an error to ruby-lsp.
+#[derive(Debug)]
+pub enum StoreError {
+    /// The redb database could not be opened, or a transaction failed.
+    Open(redb::Error),
+    /// A node could not be encoded for writing. A programming error rather than a data condition:
+    /// every persisted node type is plain owned data.
+    Encode(postcard::Error),
+    /// A node's bytes could not be decoded as its node type: the store is corrupt or was written
+    /// by an incompatible layout.
+    Corrupt {
+        /// Logical table the node was read from.
+        table: &'static str,
+        /// Id of the node whose bytes failed to decode.
+        id: u64,
+        /// The underlying decode failure.
+        source: postcard::Error,
+    },
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Open(error) => write!(f, "store unavailable: {error}"),
+            StoreError::Encode(error) => write!(f, "failed to encode node: {error}"),
+            StoreError::Corrupt { table, id, source } => {
+                write!(f, "corrupt node in table `{table}` (id {id}): {source}")
+            }
+        }
+    }
+}
+
+// redb's umbrella `Error` is built from these per-operation error types; the write path surfaces
+// them directly, so funnel each into `StoreError::Open`.
+macro_rules! store_error_from_redb {
+    ($($error:ty),+ $(,)?) => {
+        $(impl From<$error> for StoreError {
+            fn from(error: $error) -> Self {
+                StoreError::Open(error.into())
+            }
+        })+
+    };
+}
+store_error_from_redb!(
+    redb::StorageError,
+    redb::TableError,
+    redb::DatabaseError,
+    redb::SavepointError,
+    redb::TransactionError,
+    redb::CommitError,
+    redb::SetDurabilityError,
+    redb::CompactionError,
+);
+
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StoreError::Open(error) => Some(error),
+            StoreError::Encode(source) | StoreError::Corrupt { source, .. } => Some(source),
+        }
+    }
+}
+
 /// A redb-backed node store.
 pub struct RedbStore {
     db: Database,
@@ -73,14 +136,14 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the database cannot be created or any redb transaction fails.
-    pub fn build(path: &Path, graph: &Graph) -> Result<Self, redb::Error> {
+    pub fn build(path: &Path, graph: &Graph) -> Result<Self, StoreError> {
         // `Database::create` opens an existing file rather than truncating it, which would merge
         // stale nodes from a previous build into the new store. Remove any existing file first so
         // the build always replaces.
         if let Err(err) = std::fs::remove_file(path)
             && err.kind() != std::io::ErrorKind::NotFound
         {
-            return Err(err.into());
+            return Err(StoreError::Open(redb::Error::Io(err)));
         }
         let db = Database::create(path)?;
         {
@@ -91,7 +154,7 @@ impl RedbStore {
                 ($table:expr, $map:expr) => {{
                     let mut table = write_txn.open_table($table)?;
                     for (id, value) in $map {
-                        let bytes = postcard::to_allocvec(value).expect("node should serialize");
+                        let bytes = postcard::to_allocvec(value).map_err(StoreError::Encode)?;
                         table.insert(id.get(), bytes.as_slice())?;
                     }
                 }};
@@ -143,8 +206,8 @@ impl RedbStore {
         table: TableDefinition<u64, &[u8]>,
         key: u64,
         value: &V,
-    ) -> Result<(), redb::Error> {
-        let bytes = postcard::to_allocvec(value).expect("node should serialize");
+    ) -> Result<(), StoreError> {
+        let bytes = postcard::to_allocvec(value).map_err(StoreError::Encode)?;
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(table)?;
@@ -158,7 +221,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the redb transaction fails.
-    pub(crate) fn delete_node(&self, table: TableDefinition<u64, &[u8]>, key: u64) -> Result<bool, redb::Error> {
+    pub(crate) fn delete_node(&self, table: TableDefinition<u64, &[u8]>, key: u64) -> Result<bool, StoreError> {
         let write_txn = self.db.begin_write()?;
         let existed = {
             let mut table = write_txn.open_table(table)?;
@@ -172,7 +235,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
-    pub fn put_string(&self, id: StringId, value: &StringRef) -> Result<(), redb::Error> {
+    pub fn put_string(&self, id: StringId, value: &StringRef) -> Result<(), StoreError> {
         self.put_node(STRINGS, id.get(), value)
     }
 
@@ -180,7 +243,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
-    pub fn put_declaration(&self, id: DeclarationId, value: &Declaration) -> Result<(), redb::Error> {
+    pub fn put_declaration(&self, id: DeclarationId, value: &Declaration) -> Result<(), StoreError> {
         self.put_node(DECLARATIONS, id.get(), value)
     }
 
@@ -188,7 +251,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
-    pub fn put_document(&self, id: UriId, value: &Document) -> Result<(), redb::Error> {
+    pub fn put_document(&self, id: UriId, value: &Document) -> Result<(), StoreError> {
         self.put_node(DOCUMENTS, id.get(), value)
     }
 
@@ -196,7 +259,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the redb transaction fails.
-    pub fn delete_declaration(&self, id: DeclarationId) -> Result<bool, redb::Error> {
+    pub fn delete_declaration(&self, id: DeclarationId) -> Result<bool, StoreError> {
         self.delete_node(DECLARATIONS, id.get())
     }
 
@@ -204,7 +267,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the redb transaction fails.
-    pub fn delete_document(&self, id: UriId) -> Result<bool, redb::Error> {
+    pub fn delete_document(&self, id: UriId) -> Result<bool, StoreError> {
         self.delete_node(DOCUMENTS, id.get())
     }
 
@@ -215,14 +278,19 @@ impl RedbStore {
     fn get_node<V: DeserializeOwned>(
         &self,
         table: TableDefinition<u64, &[u8]>,
+        name: &'static str,
         key: u64,
-    ) -> Result<Option<V>, redb::Error> {
+    ) -> Result<Option<V>, StoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(table)?;
         match table.get(key)? {
-            Some(guard) => Ok(Some(
-                postcard::from_bytes::<V>(guard.value()).expect("node should deserialize"),
-            )),
+            Some(guard) => postcard::from_bytes::<V>(guard.value())
+                .map(Some)
+                .map_err(|source| StoreError::Corrupt {
+                    table: name,
+                    id: key,
+                    source,
+                }),
             None => Ok(None),
         }
     }
@@ -231,16 +299,16 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_string(&self, id: StringId) -> Result<Option<StringRef>, redb::Error> {
-        self.get_node(STRINGS, id.get())
+    pub fn get_string(&self, id: StringId) -> Result<Option<StringRef>, StoreError> {
+        self.get_node(STRINGS, "strings", id.get())
     }
 
     /// Reads a single declaration node, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_declaration(&self, id: DeclarationId) -> Result<Option<Declaration>, redb::Error> {
-        self.get_node(DECLARATIONS, id.get())
+    pub fn get_declaration(&self, id: DeclarationId) -> Result<Option<Declaration>, StoreError> {
+        self.get_node(DECLARATIONS, "declarations", id.get())
     }
 
     /// Reads all `(declaration_id, FQN name)` pairs for name-based search.
@@ -322,48 +390,48 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_definition(&self, id: DefinitionId) -> Result<Option<Definition>, redb::Error> {
-        self.get_node(DEFINITIONS, id.get())
+    pub fn get_definition(&self, id: DefinitionId) -> Result<Option<Definition>, StoreError> {
+        self.get_node(DEFINITIONS, "definitions", id.get())
     }
 
     /// Reads a single name node, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_name(&self, id: NameId) -> Result<Option<NameRef>, redb::Error> {
-        self.get_node(NAMES, id.get())
+    pub fn get_name(&self, id: NameId) -> Result<Option<NameRef>, StoreError> {
+        self.get_node(NAMES, "names", id.get())
     }
 
     /// Reads a single constant reference node, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_constant_reference(&self, id: ConstantReferenceId) -> Result<Option<ConstantReference>, redb::Error> {
-        self.get_node(CONSTANT_REFERENCES, id.get())
+    pub fn get_constant_reference(&self, id: ConstantReferenceId) -> Result<Option<ConstantReference>, StoreError> {
+        self.get_node(CONSTANT_REFERENCES, "constant_references", id.get())
     }
 
     /// Reads a single method reference node, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_method_reference(&self, id: MethodReferenceId) -> Result<Option<MethodRef>, redb::Error> {
-        self.get_node(METHOD_REFERENCES, id.get())
+    pub fn get_method_reference(&self, id: MethodReferenceId) -> Result<Option<MethodRef>, StoreError> {
+        self.get_node(METHOD_REFERENCES, "method_references", id.get())
     }
 
     /// Reads a single document node, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_document(&self, id: UriId) -> Result<Option<Document>, redb::Error> {
-        self.get_node(DOCUMENTS, id.get())
+    pub fn get_document(&self, id: UriId) -> Result<Option<Document>, StoreError> {
+        self.get_node(DOCUMENTS, "documents", id.get())
     }
 
     /// Reads the dependents of a single name, if present.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction fails.
-    pub fn get_name_dependents(&self, id: NameId) -> Result<Option<Vec<NameDependent>>, redb::Error> {
-        self.get_node(NAME_DEPENDENTS, id.get())
+    pub fn get_name_dependents(&self, id: NameId) -> Result<Option<Vec<NameDependent>>, StoreError> {
+        self.get_node(NAME_DEPENDENTS, "name_dependents", id.get())
     }
 }
 
@@ -447,7 +515,10 @@ mod tests {
             let name_id = graph.add_name(sid, ParentScope::None, None);
             graph.untrack_name(name_id);
         }
-        assert!(graph.declaration(d).is_some(), "store-backed declaration must stay resolvable");
+        assert!(
+            graph.declaration(d).is_some(),
+            "store-backed declaration must stay resolvable"
+        );
     }
 
     #[test]
@@ -472,13 +543,58 @@ mod tests {
         graph.attach_store(RedbStore::open(&store_path).expect("open store"));
 
         let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
-        index_source(&mut graph, uri.into(), "class Foo\n  def baz; end\nend\n", &LanguageId::Ruby);
+        index_source(
+            &mut graph,
+            uri.into(),
+            "class Foo\n  def baz; end\nend\n",
+            &LanguageId::Ruby,
+        );
         Resolver::new(&mut graph).resolve();
 
-        let foo = graph.declaration(DeclarationId::from("Foo")).expect("Foo after live edit");
+        let foo = graph
+            .declaration(DeclarationId::from("Foo"))
+            .expect("Foo after live edit");
         let ns = foo.as_namespace().expect("namespace");
-        assert!(ns.member(&StringId::from("baz()")).is_some(), "edited member baz resolves");
-        assert!(ns.member(&StringId::from("bar()")).is_none(), "removed member bar is gone");
+        assert!(
+            ns.member(&StringId::from("baz()")).is_some(),
+            "edited member baz resolves"
+        );
+        assert!(
+            ns.member(&StringId::from("bar()")).is_none(),
+            "removed member bar is gone"
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: needs RUBYDEX_BENCH_CORPUS"]
+    fn bench_build_write_vs_drop() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::listing::collect_file_paths;
+        use crate::resolution::Resolver;
+
+        let corpus = std::env::var("RUBYDEX_BENCH_CORPUS").expect("set RUBYDEX_BENCH_CORPUS");
+        let corpus = std::path::PathBuf::from(corpus);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bench.redb");
+
+        let t0 = std::time::Instant::now();
+        let mut graph = Graph::new();
+        let (files, _) = collect_file_paths(vec![corpus.to_string_lossy().into_owned()], &graph.excluded_patterns());
+        let _ = index_files(&mut graph, files, IndexerBackend::RubyIndexer);
+        let indexed = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        Resolver::new(&mut graph).resolve();
+        let resolved = t1.elapsed();
+
+        let t2 = std::time::Instant::now();
+        let store = RedbStore::build(&path, &graph).expect("build store");
+        let written = t2.elapsed();
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let t3 = std::time::Instant::now();
+        drop(store);
+        let dropped = t3.elapsed();
+
+        println!("BENCH index={indexed:?} resolve={resolved:?} write={written:?} drop={dropped:?} size={size}");
     }
 
     #[test]
@@ -505,9 +621,13 @@ mod tests {
         assert_eq!(subset, expected);
 
         // Always-true returns every id; never-true returns none.
-        let everything = store.declaration_ids_matching(&|_id, _name| true).expect("streaming all");
+        let everything = store
+            .declaration_ids_matching(&|_id, _name| true)
+            .expect("streaming all");
         assert_eq!(everything.len(), all.len());
-        let nothing = store.declaration_ids_matching(&|_id, _name| false).expect("streaming none");
+        let nothing = store
+            .declaration_ids_matching(&|_id, _name| false)
+            .expect("streaming none");
         assert!(nothing.is_empty());
     }
 
@@ -690,7 +810,12 @@ mod tests {
         // Document (from the store), invalidate it, and apply the new one — not panic.
         let new_source = "class Foo\n  def baz; end\nend\n";
         let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
-        crate::indexing::index_source(&mut graph, uri.clone().into(), new_source, &crate::indexing::LanguageId::Ruby);
+        crate::indexing::index_source(
+            &mut graph,
+            uri.clone().into(),
+            new_source,
+            &crate::indexing::LanguageId::Ruby,
+        );
 
         // The new method definition (baz) must be visible in the overlay. Method definitions store
         // their name as a str_id (unresolved at this stage), so check via the string table.
@@ -733,7 +858,12 @@ mod tests {
         // Live edit: replace bar with baz, then resolve. The resolver must see the overlay
         // document and rewrite the store-backed declaration through the layered accessors.
         let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
-        index_source(&mut graph, uri.clone().into(), "class Foo\n  def baz; end\nend\n", &LanguageId::Ruby);
+        index_source(
+            &mut graph,
+            uri.clone().into(),
+            "class Foo\n  def baz; end\nend\n",
+            &LanguageId::Ruby,
+        );
         Resolver::new(&mut graph).resolve();
 
         let foo = graph.declaration(foo_id).expect("Foo after edit");
@@ -963,7 +1093,11 @@ mod tests {
         std::fs::write(&b_path, "class B; end\n").expect("write b");
 
         let mut graph = Graph::new();
-        let _ = index_files(&mut graph, vec![a_path.clone(), b_path.clone()], IndexerBackend::RubyIndexer);
+        let _ = index_files(
+            &mut graph,
+            vec![a_path.clone(), b_path.clone()],
+            IndexerBackend::RubyIndexer,
+        );
         Resolver::new(&mut graph).resolve();
 
         // Capture a.rb's node IDs while they are in memory.
@@ -974,9 +1108,7 @@ mod tests {
         let old_def_id = graph
             .definitions()
             .iter()
-            .find(|(_, def)| {
-                def.uri_id().get() == a_uri_id.get() && matches!(def, Definition::Method(_))
-            })
+            .find(|(_, def)| def.uri_id().get() == a_uri_id.get() && matches!(def, Definition::Method(_)))
             .map(|(id, _)| *id)
             .expect("a method definition in a.rb");
         let old_mref_id = graph
@@ -999,8 +1131,14 @@ mod tests {
         let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
 
         // Sanity: the pre-edit nodes are served by the store.
-        assert!(graph.definition(old_def_id).is_some(), "store should serve the pre-edit definition");
-        assert!(graph.method_reference(old_mref_id).is_some(), "store should serve the pre-edit method reference");
+        assert!(
+            graph.definition(old_def_id).is_some(),
+            "store should serve the pre-edit definition"
+        );
+        assert!(
+            graph.method_reference(old_mref_id).is_some(),
+            "store should serve the pre-edit method reference"
+        );
 
         // Edit a.rb away the method, so its old nodes are removed from the overlay.
         std::fs::write(&a_path, "class A\nend\n").expect("rewrite a");
