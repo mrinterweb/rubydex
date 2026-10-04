@@ -173,7 +173,7 @@ pub struct Graph {
     removed: IdentityHashSet<u64>,
 }
 #[cfg(not(feature = "redb-store"))]
-assert_mem_size!(Graph, 368);
+assert_mem_size!(Graph, 392);
 assert_send_sync!(Graph);
 
 /// A reference to a node that is either borrowed from the in-memory graph (`Mem`) or owned, having
@@ -628,6 +628,21 @@ impl Graph {
     #[must_use]
     pub fn workspace_path(&self) -> &Path {
         self.config.workspace_path()
+    }
+
+    /// Returns whether the workspace's `[disk_index]` section opted into the disk-backed index.
+    /// The Ruby side layers an environment override on top so CI and one-off runs can flip it
+    /// without editing the committed configuration.
+    #[must_use]
+    pub fn disk_index_enabled(&self) -> bool {
+        self.config.disk_index().enabled()
+    }
+
+    /// Returns where the store lives as configured: the literal `"tmp"`, the literal `"global"`,
+    /// an absolute directory, or empty when the workspace left it to the context-aware default.
+    #[must_use]
+    pub fn disk_index_location(&self) -> Box<str> {
+        self.config.disk_index().location()
     }
 
     /// Loads a config for the graph

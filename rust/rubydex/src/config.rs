@@ -179,6 +179,81 @@ impl LinterSettings {
     }
 }
 
+/// The disk index's settings, read from the `[disk_index]` section of the configuration file
+#[derive(Debug, Clone)]
+pub struct DiskIndexSettings {
+    /// Whether the disk-backed (low-resident-memory) index runs for this workspace. Defaults to
+    /// false: the in-memory path stays the unprescriptive default, and a workspace opts in
+    /// deliberately by committing the section.
+    enabled: bool,
+    /// Where the store lives: the literal `"tmp"` (the workspace's own `tmp/`, the Rails
+    /// convention), the literal `"global"` (the platform cache directory), or an absolute
+    /// directory. Empty means unconfigured, and the context-aware default decides (workspace
+    /// `tmp/` when one exists, the platform cache directory otherwise).
+    location: Box<str>,
+}
+
+impl Default for DiskIndexSettings {
+    /// The settings of a workspace that configures nothing: disabled, with the location left to
+    /// the context-aware default
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            location: Box::from(""),
+        }
+    }
+}
+
+impl DiskIndexSettings {
+    /// Parses the `[disk_index]` section
+    fn parse(mut table: Table) -> Result<Self, String> {
+        let enabled = match table.remove("enabled") {
+            None => false,
+            Some(value) => value
+                .try_into::<bool>()
+                .map_err(|error| format!("invalid `disk_index.enabled` setting: {error}"))?,
+        };
+
+        let location = match table.remove("location") {
+            None => Box::from(""),
+            Some(value) => value
+                .try_into::<Box<str>>()
+                .map_err(|error| format!("invalid `disk_index.location` setting: {error}"))?,
+        };
+
+        // A relative location is ambiguous: it would mean different things depending on the
+        // process's working directory, which is not what the workspace configured it for.
+        if !(location.is_empty()
+            || location.as_ref() == "tmp"
+            || location.as_ref() == "global"
+            || Path::new(location.as_ref()).is_absolute())
+        {
+            return Err(format!(
+                "invalid `disk_index.location` setting: must be `\"tmp\", `\"global\", or an absolute path, got `{location}`"
+            ));
+        }
+
+        if let Some(key) = table.keys().next() {
+            return Err(format!("unknown setting `disk_index.{key}`"));
+        }
+
+        Ok(DiskIndexSettings { enabled, location })
+    }
+
+    /// Whether the disk-backed index runs for this workspace
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Where the store lives as configured: `"tmp"`, `"global"`, an absolute directory, or empty
+    /// when the workspace left it to the context-aware default
+    #[must_use]
+    pub fn location(&self) -> Box<str> {
+        Box::from(self.location.as_ref())
+    }
+}
+
 /// The configuration of a workspace, parsed from its `rubydex.toml` and shared by all built-in tools. It carries both
 /// the settings that are global to every tool, such as the workspace being analyzed, and the typed settings of each
 /// tool's own section (e.g. `[graph]`). Every section is parsed eagerly, so that all validation happens at load time and
@@ -191,8 +266,9 @@ pub struct Config {
     workspace_path: Box<Path>,
     graph: GraphSettings,
     linter: LinterSettings,
+    disk_index: DiskIndexSettings,
 }
-assert_mem_size!(Config, 80);
+assert_mem_size!(Config, 104);
 
 impl Default for Config {
     /// The configuration of the current working directory, with the default settings of every section, which is what a
@@ -206,6 +282,7 @@ impl Default for Config {
                 .into_boxed_path(),
             graph: GraphSettings::default(),
             linter: LinterSettings::default(),
+            disk_index: DiskIndexSettings::default(),
         }
     }
 }
@@ -288,6 +365,13 @@ impl Config {
         &self.linter
     }
 
+    /// Returns the disk index's settings, which the Ruby side reads to decide both whether the
+    /// disk-backed index runs and where its store lives
+    #[must_use]
+    pub fn disk_index(&self) -> &DiskIndexSettings {
+        &self.disk_index
+    }
+
     /// Parses the content of the configuration file of the workspace rooted at `workspace_path` into the typed
     /// settings of each section
     fn parse(workspace_path: PathBuf, content: &str) -> Result<Self, String> {
@@ -319,6 +403,11 @@ impl Config {
             _ => LinterSettings::default(),
         };
 
+        let disk_index = match sections.remove("disk_index") {
+            Some(Value::Table(table)) => DiskIndexSettings::parse(table)?,
+            _ => DiskIndexSettings::default(),
+        };
+
         // Every section must be backed by a typed settings struct, so any leftover section is unknown.
         if let Some(key) = sections.keys().next() {
             return Err(format!("unknown section `{key}`"));
@@ -328,6 +417,7 @@ impl Config {
             workspace_path: Box::from(workspace_path),
             graph,
             linter,
+            disk_index,
         })
     }
 }
@@ -670,6 +760,54 @@ mod tests {
 
         assert!(
             error.contains("use `[linter]` instead of `[[linter]]`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn disk_index_accepts_its_section() {
+        let config = parse("[disk_index]\nenabled = true\nlocation = \"tmp\"\n").expect("a valid disk_index section");
+
+        assert!(config.disk_index.enabled);
+        assert_eq!(&*config.disk_index.location, "tmp");
+    }
+
+    #[test]
+    fn disk_index_defaults_to_disabled_and_unconfigured() {
+        let config = parse("").expect("an empty config is valid");
+
+        assert!(!config.disk_index.enabled);
+        assert!(config.disk_index.location.is_empty());
+    }
+
+    #[test]
+    fn disk_index_accepts_an_absolute_location() {
+        let config =
+            parse("[disk_index]\nlocation = \"/var/tmp/indexes\"\n").expect("an absolute location is a valid choice");
+
+        assert_eq!(&*config.disk_index.location, "/var/tmp/indexes");
+    }
+
+    #[test]
+    fn disk_index_rejects_a_relative_location() {
+        let error = parse("[disk_index]\nlocation = \"cache\"\n").expect_err("a relative location is ambiguous");
+
+        assert!(error.contains("disk_index.location"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn disk_index_rejects_a_non_boolean_enabled_setting() {
+        let error = parse("[disk_index]\nenabled = \"yes\"\n").expect_err("enabled must be a boolean");
+
+        assert!(error.contains("disk_index.enabled"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn disk_index_rejects_an_unknown_setting() {
+        let error = parse("[disk_index]\nmax_bytes = 1024\n").expect_err("unknown settings are typos");
+
+        assert!(
+            error.contains("unknown setting `disk_index.max_bytes`"),
             "unexpected error: {error}"
         );
     }
