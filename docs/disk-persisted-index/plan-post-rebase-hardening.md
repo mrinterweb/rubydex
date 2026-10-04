@@ -78,11 +78,11 @@ If `tmp/` is ignored (it is), skip the commit and carry the number into Task D4.
 Every RSS number in `docs/disk-persisted-index/memory-baseline.md` (disk 73 MB vs memory 692 MB) predates the rebase. The store at `/tmp/rdx-bench/stdlib.redb` was built by pre-rebase code and its schema may no longer match.
 
 **Files:**
-- Read: `docs/disk-persisted-index/memory-baseline.md`, `docs/disk-persisted-index/session-profile.rb`
+- Read: `docs/disk-persisted-index/memory-baseline.md`, `docs/disk-persisted-index/session_profile.rb`
 - Modify: `docs/disk-persisted-index/memory-baseline.md` (new "Post-rebase measurements" section)
 
 **Interfaces:**
-- Consumes: `cargo run --release --features redb-store -- --build-store PATH CORPUS --stats`; `docs/disk-persisted-index/session-profile.rb CORPUS`.
+- Consumes: `cargo run --release --features redb-store -- --build-store PATH CORPUS --stats`; `docs/disk-persisted-index/session_profile.rb CORPUS`.
 - Produces: refreshed build-path and session tables in `docs/disk-persisted-index/memory-baseline.md`.
 
 - [ ] **Step 1: Rebuild the stdlib store from scratch and capture the build path**
@@ -101,9 +101,9 @@ Record: file count, definition count, total wall time, the `Cleanup` stage share
 ```bash
 cd /home/sean/code/rubydex
 RUBYDEX_DISK_INDEX=1 RUBYDEX_CACHE_DIR=/tmp/rdx-bench/cache \
-  bundle exec ruby -Ilib docs/disk-persisted-index/session-profile.rb "$(ruby -e 'print RbConfig::CONFIG["rubylibdir"]')/.."
+  bundle exec ruby -Ilib docs/disk-persisted-index/session_profile.rb "$(ruby -e 'print RbConfig::CONFIG["rubylibdir"]')/.."
 RUBYDEX_DISK_INDEX=0 RUBYDEX_CACHE_DIR=/tmp/rdx-bench/cache \
-  bundle exec ruby -Ilib docs/disk-persisted-index/session-profile.rb "$(ruby -e 'print RbConfig::CONFIG["rubylibdir"]')/.."
+  bundle exec ruby -Ilib docs/disk-persisted-index/session_profile.rb "$(ruby -e 'print RbConfig::CONFIG["rubylibdir"]')/.."
 ```
 
 Expected shape (numbers may move, the ~10x gap should not): disk final RSS tens of MB, memory mode hundreds of MB.
@@ -732,7 +732,7 @@ Add a throwaway ignored benchmark next to the existing store tests that times, o
 
 - [ ] **Step 4: Re-measure and keep only a win**
 
-Run Step 1's three commands again plus the Ruby session profile (`docs/disk-persisted-index/session-profile.rb`, disk mode). If the win is under 20% wall time, revert the change and record the negative result in `docs/disk-persisted-index/memory-baseline.md`.
+Run Step 1's three commands again plus the Ruby session profile (`docs/disk-persisted-index/session_profile.rb`, disk mode). If the win is under 20% wall time, revert the change and record the negative result in `docs/disk-persisted-index/memory-baseline.md`.
 
 - [ ] **Step 5: Commit only if it won**
 
@@ -961,7 +961,7 @@ cp docs/disk-persisted-index/ship-plan.md docs/disk-persisted-index/ship-plan.md
 cp docs/disk-persisted-index/task-list.md docs/disk-persisted-index/task-list.md
 cp docs/disk-persisted-index/memory-baseline.md docs/disk-persisted-index/memory-baseline.md
 cp docs/disk-persisted-index/plan-differential-harness.md docs/disk-persisted-index/plan-differential-harness.md
-cp docs/disk-persisted-index/session-profile.rb docs/disk-persisted-index/session-profile.rb
+cp docs/disk-persisted-index/session_profile.rb docs/disk-persisted-index/session_profile.rb
 ```
 
 Replace every `tmp/...` path inside those files with the new `docs/disk-persisted-index/...` path.
@@ -974,14 +974,14 @@ Replace every `tmp/...` path inside those files with the new `docs/disk-persiste
 
 - [ ] **Step 3: Make the session profiler runnable from its new home**
 
-`docs/disk-persisted-index/session-profile.rb` hardcodes `/home/sean/...` paths and `/tmp/rdx-bench/stdlib.redb`. Parameterize it so a reviewer can run it:
+`docs/disk-persisted-index/session_profile.rb` hardcodes `/home/sean/...` paths and `/tmp/rdx-bench/stdlib.redb`. Parameterize it so a reviewer can run it:
 
 ```ruby
 # frozen_string_literal: true
 
 # Session profile: RSS + latency of a long-lived Ruby process using the graph API,
 # disk-store-backed vs in-memory. Usage:
-#   ruby -Ilib docs/disk-persisted-index/session-profile.rb <corpus> <store> [disk|memory]
+#   ruby -Ilib docs/disk-persisted-index/session_profile.rb <corpus> <store> [disk|memory]
 # <store> must be a store built from <corpus>:
 #   cargo run --manifest-path rust/Cargo.toml --release --features redb-store -- \
 #     --build-store <store> <corpus>

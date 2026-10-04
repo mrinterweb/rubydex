@@ -8,6 +8,9 @@ AllCops:
     - "src/**/*"
     - "target/**/*"
     - "tmp/**/*"
+    # Test fixtures are Ruby written to exercise the indexer, not shipped code; their style is
+    # irrelevant and sometimes deliberately unusual.
+    - "rust/rubydex/tests/fixtures/**/*"
 
 Style/GlobalVars:
   Exclude:

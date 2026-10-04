@@ -30,7 +30,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     graph = Rubydex::Graph.configure_for_workspace(@tmp)
     graph.index_workspace
 
-    assert_equal 0, graph.store_errors, "a freshly built store must report no read failures"
+    assert_equal(0, graph.store_errors, "a freshly built store must report no read failures")
   end
 
   # Writes a store without attaching it. redb holds an exclusive lock per file, so the graph that
@@ -53,18 +53,18 @@ class DiskIndexCorruptStoreTest < Minitest::Test
   def test_reported_errors_quarantine_the_store_and_fall_back
     files = 5.times.map { |i| ["klass#{i}.rb", "class Klass#{i}; end\n"] }.to_h
     graph, cache = write_store(files)
-    assert File.exist?(cache), "baseline: a store was written"
+    assert(File.exist?(cache), "baseline: a store was written")
 
     # Report the store as untrustworthy, as the Rust layer does after a failed read.
     graph.define_singleton_method(:store_errors) { 1 }
     graph.index_workspace
 
-    assert File.exist?("#{cache}.corrupt"), "the untrustworthy store must be quarantined"
-    refute File.exist?(cache), "the corrupt store must not stay on the active cache path"
-    refute File.exist?("#{cache}.hash"), "its freshness marker must go with it, so the next run rebuilds"
+    assert(File.exist?("#{cache}.corrupt"), "the untrustworthy store must be quarantined")
+    refute(File.exist?(cache), "the corrupt store must not stay on the active cache path")
+    refute(File.exist?("#{cache}.hash"), "its freshness marker must go with it, so the next run rebuilds")
 
     # The session still answers, from the in-memory index it fell back to.
-    refute_nil graph["Klass0"], "the session must keep working after quarantining the store"
+    refute_nil(graph["Klass0"], "the session must keep working after quarantining the store")
   end
 
   def test_a_healthy_store_is_not_quarantined
@@ -72,7 +72,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
 
     graph.index_workspace
 
-    assert File.exist?(cache), "a healthy store must stay on the cache path"
-    refute File.exist?("#{cache}.corrupt"), "a healthy store must not be quarantined"
+    assert(File.exist?(cache), "a healthy store must stay on the cache path")
+    refute(File.exist?("#{cache}.corrupt"), "a healthy store must not be quarantined")
   end
 end

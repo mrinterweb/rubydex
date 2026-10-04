@@ -470,7 +470,10 @@ pub fn scan(graph: &Graph, labels: &[String]) -> Vec<NodeRef> {
 fn scan_label(graph: &Graph, label: &str) -> Vec<NodeRef> {
     match label {
         "Document" => document_node_ids(graph).into_iter().map(NodeRef::Document).collect(),
-        "Definition" => definition_node_ids(graph).into_iter().map(NodeRef::Definition).collect(),
+        "Definition" => definition_node_ids(graph)
+            .into_iter()
+            .map(NodeRef::Definition)
+            .collect(),
         other => declaration_node_ids(graph)
             .into_iter()
             .filter(|id| {
@@ -511,9 +514,10 @@ pub fn node_label(graph: &Graph, node: NodeRef) -> String {
         NodeRef::Definition(id) => graph
             .definition(id)
             .map_or_else(|| "Definition".to_string(), |definition| definition.kind().to_string()),
-        NodeRef::Declaration(id) => graph
-            .declaration(id)
-            .map_or_else(|| "Declaration".to_string(), |declaration| declaration.kind().to_string()),
+        NodeRef::Declaration(id) => graph.declaration(id).map_or_else(
+            || "Declaration".to_string(),
+            |declaration| declaration.kind().to_string(),
+        ),
     }
 }
 
@@ -612,21 +616,21 @@ fn document_property(graph: &Graph, id: UriId, prop: &str) -> CypherValue {
 #[must_use]
 pub fn rel_source_nodes(graph: &Graph, rel: RelType) -> Vec<NodeRef> {
     match rel {
-        RelType::Defines | RelType::References => {
-            document_node_ids(graph).into_iter().map(NodeRef::Document).collect()
-        }
-        RelType::Declares | RelType::Contains => {
-            definition_node_ids(graph).into_iter().map(NodeRef::Definition).collect()
-        }
+        RelType::Defines | RelType::References => document_node_ids(graph).into_iter().map(NodeRef::Document).collect(),
+        RelType::Declares | RelType::Contains => definition_node_ids(graph)
+            .into_iter()
+            .map(NodeRef::Definition)
+            .collect(),
         RelType::HasParent
         | RelType::Includes
         | RelType::Prepends
         | RelType::Extends
         | RelType::Owns
         | RelType::HasAncestor
-        | RelType::HasDescendant => {
-            declaration_node_ids(graph).into_iter().map(NodeRef::Declaration).collect()
-        }
+        | RelType::HasDescendant => declaration_node_ids(graph)
+            .into_iter()
+            .map(NodeRef::Declaration)
+            .collect(),
     }
 }
 

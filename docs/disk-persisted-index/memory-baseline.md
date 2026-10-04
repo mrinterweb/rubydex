@@ -75,7 +75,7 @@ Not a leak. Allocator config left untouched.
 5. ~~Ruby-side LSP session profile~~ — DONE, below.
 6. Stage-5 search index (name-keyed table) would cut the full scan itself — ship-plan Task 3.4, only if measured latency on larger corpora demands it. Session profile below shows store-backed search at ~100 ms/op vs 0.05 ms/op in-memory on the stdlib corpus — this is the candidate that would close it.
 
-## Ruby-side session profile — DONE (`docs/disk-persisted-index/session-profile.rb`, release .so, stdlib corpus)
+## Ruby-side session profile — DONE (`docs/disk-persisted-index/session_profile.rb`, release .so, stdlib corpus)
 
 Long-lived `Graph` with `index_workspace`, then 200× search / 200× resolve_constant
 (hover) / 200× resolve_require_path / 20× full require_paths. Disk mode attaches the

@@ -37,8 +37,18 @@ fn repeated_edits_of_the_same_files_do_not_grow_the_overlay() {
     let uri_a = url::Url::from_file_path(&a).unwrap().to_string();
     let uri_b = url::Url::from_file_path(&b).unwrap().to_string();
     for round in 0..500 {
-        index_source(&mut graph, uri_a.clone().into(), &format!("class Alpha\n  def method_{round}; end\nend\n"), &LanguageId::Ruby);
-        index_source(&mut graph, uri_b.clone().into(), &format!("class Beta\n  def method_{round}; end\nend\n"), &LanguageId::Ruby);
+        index_source(
+            &mut graph,
+            uri_a.clone().into(),
+            &format!("class Alpha\n  def method_{round}; end\nend\n"),
+            &LanguageId::Ruby,
+        );
+        index_source(
+            &mut graph,
+            uri_b.clone().into(),
+            &format!("class Beta\n  def method_{round}; end\nend\n"),
+            &LanguageId::Ruby,
+        );
         Resolver::new(&mut graph).resolve();
     }
 

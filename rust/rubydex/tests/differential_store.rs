@@ -5,7 +5,7 @@
 #![cfg(feature = "redb-store")]
 
 use rubydex::{
-    indexing::{index_files, IndexerBackend},
+    indexing::{IndexerBackend, index_files},
     listing::collect_file_paths,
     model::{
         declaration::Ancestor,
@@ -25,10 +25,7 @@ fn corpus_dir() -> PathBuf {
 /// Indexes + resolves every Ruby file under `root` into a fresh in-memory graph.
 fn build_graph_from(root: &Path) -> Graph {
     let mut graph = Graph::new();
-    let (files, _errors) = collect_file_paths(
-        vec![root.to_string_lossy().into_owned()],
-        &graph.excluded_patterns(),
-    );
+    let (files, _errors) = collect_file_paths(vec![root.to_string_lossy().into_owned()], &graph.excluded_patterns());
     let _ = index_files(&mut graph, files, IndexerBackend::RubyIndexer);
     Resolver::new(&mut graph).resolve();
     graph
@@ -72,8 +69,9 @@ fn cap_sample<T: Ord>(set: BTreeSet<T>, sample: usize) -> Vec<T> {
 #[test]
 #[ignore = "set RUBYDEX_DIFF_CORPUS to a Ruby source tree to run"]
 fn differential_on_stdlib() {
-    let root = std::env::var("RUBYDEX_DIFF_CORPUS")
-        .expect("set RUBYDEX_DIFF_CORPUS to a Ruby source tree (e.g. $(ruby -e 'print RbConfig::CONFIG[\"rubylibdir\"]')/..)");
+    let root = std::env::var("RUBYDEX_DIFF_CORPUS").expect(
+        "set RUBYDEX_DIFF_CORPUS to a Ruby source tree (e.g. $(ruby -e 'print RbConfig::CONFIG[\"rubylibdir\"]')/..)",
+    );
     let root = PathBuf::from(root);
     let dir = tempfile::tempdir().expect("tempdir");
 
@@ -129,33 +127,32 @@ fn probe_declarations(graph: &Graph, sample: usize, out: &mut Vec<(String, Strin
         };
         let fqn = decl.name().to_string();
         let owner = declaration_fqn(graph, *decl.owner_id());
-        let (members, ancestors, descendants): (Vec<String>, Vec<String>, Vec<String>) =
-            match decl.as_namespace() {
-                Some(ns) => (
-                    ns.members()
-                        .values()
-                        .map(|m| declaration_fqn(graph, *m))
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                    ns.ancestors()
-                        .iter()
-                        .map(|a| match a {
-                            Ancestor::Complete(ancestor_id) => declaration_fqn(graph, *ancestor_id),
-                            Ancestor::Partial(name_id) => format!("partial:{}", name_id.get()),
-                        })
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                    ns.descendants()
-                        .iter()
-                        .map(|d| declaration_fqn(graph, *d))
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                ),
-                None => (Vec::new(), Vec::new(), Vec::new()),
-            };
+        let (members, ancestors, descendants): (Vec<String>, Vec<String>, Vec<String>) = match decl.as_namespace() {
+            Some(ns) => (
+                ns.members()
+                    .values()
+                    .map(|m| declaration_fqn(graph, *m))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                ns.ancestors()
+                    .iter()
+                    .map(|a| match a {
+                        Ancestor::Complete(ancestor_id) => declaration_fqn(graph, *ancestor_id),
+                        Ancestor::Partial(name_id) => format!("partial:{}", name_id.get()),
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                ns.descendants()
+                    .iter()
+                    .map(|d| declaration_fqn(graph, *d))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
         let singleton = decl
             .as_namespace()
             .and_then(|ns| ns.singleton_class())
@@ -197,9 +194,10 @@ fn candidate_names(graph: &Graph, candidates: &[rubydex::query::CompletionCandid
         .iter()
         .map(|c| match c {
             CompletionCandidate::Declaration(id) => declaration_fqn(graph, *id),
-            CompletionCandidate::KeywordArgument(str_id) => graph
-                .string(*str_id)
-                .map_or_else(|| format!("<missing string {}>", str_id.get()), |s| s.as_str().to_string()),
+            CompletionCandidate::KeywordArgument(str_id) => graph.string(*str_id).map_or_else(
+                || format!("<missing string {}>", str_id.get()),
+                |s| s.as_str().to_string(),
+            ),
             CompletionCandidate::Keyword(keyword) => format!("kw:{}", keyword.name()),
         })
         .collect::<BTreeSet<_>>()
@@ -209,7 +207,7 @@ fn candidate_names(graph: &Graph, candidates: &[rubydex::query::CompletionCandid
 }
 
 fn probe_completion(graph: &Graph, name_ids: &[NameId], sample: usize, out: &mut Vec<(String, String)>) {
-    use rubydex::query::{completion_candidates, CompletionContext, CompletionReceiver};
+    use rubydex::query::{CompletionContext, CompletionReceiver, completion_candidates};
 
     // Expression completion at every interned name (lexical scope = that name, self derived).
     // Name ids are taken from the in-memory graph: ids are deterministic content hashes,
@@ -232,9 +230,7 @@ fn probe_completion(graph: &Graph, name_ids: &[NameId], sample: usize, out: &mut
             .iter()
             .filter(|raw| {
                 let id = DeclarationId::new(**raw);
-                graph
-                    .declaration(id)
-                    .is_some_and(|d| d.as_namespace().is_some())
+                graph.declaration(id).is_some_and(|d| d.as_namespace().is_some())
             })
             .map(|raw| declaration_fqn(graph, DeclarationId::new(*raw)))
             .collect::<BTreeSet<_>>(),
@@ -283,8 +279,8 @@ fn probe_aliases(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) 
 }
 
 fn probe_find_member(graph: &Graph, out: &mut Vec<(String, String)>) {
-    use rubydex::query::find_member_in_ancestors;
     use rubydex::model::ids::StringId;
+    use rubydex::query::find_member_in_ancestors;
 
     let cases: &[(&str, &str)] = &[
         ("Child", "parent_method"), // inherited
@@ -296,12 +292,7 @@ fn probe_find_member(graph: &Graph, out: &mut Vec<(String, String)>) {
         ("Util", "util_method"),    // def self.
     ];
     for (owner, member) in cases {
-        let result = find_member_in_ancestors(
-            graph,
-            DeclarationId::from(*owner),
-            StringId::from(*member),
-            false,
-        );
+        let result = find_member_in_ancestors(graph, DeclarationId::from(*owner), StringId::from(*member), false);
         let rendered = match result {
             Ok(target) => format!("Ok({})", declaration_fqn(graph, target)),
             Err(error) => format!("Err({error:?})"),
@@ -402,7 +393,7 @@ fn probe_documents(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>
 }
 
 fn probe_cypher(graph: &Graph, out: &mut Vec<(String, String)>) {
-    use rubydex::query::cypher::{run_query, OutputFormat};
+    use rubydex::query::cypher::{OutputFormat, run_query};
 
     for q in [
         "MATCH (c:Class) RETURN c.name",
@@ -416,8 +407,7 @@ fn probe_cypher(graph: &Graph, out: &mut Vec<(String, String)>) {
     ] {
         // Table output, sorted lines: iteration order over graph maps can differ
         // between the memory and store graphs, so only sorted content is comparable.
-        let result = run_query(graph, q, OutputFormat::Table)
-            .unwrap_or_else(|error| format!("Err({error})"));
+        let result = run_query(graph, q, OutputFormat::Table).unwrap_or_else(|error| format!("Err({error})"));
         let lines: Vec<&str> = result.lines().collect();
         let body: Vec<&str> = if lines.last().is_some_and(|l| l.contains("row")) {
             lines[..lines.len() - 1].to_vec()
@@ -431,18 +421,14 @@ fn probe_cypher(graph: &Graph, out: &mut Vec<(String, String)>) {
 }
 
 fn probe_search(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) {
-    use rubydex::query::{declaration_search, MatchMode};
+    use rubydex::query::{MatchMode, declaration_search};
 
     // Every declaration must be findable by exact-FQN search (search is substring-based,
     // so the result set may include other names — the invariant is an identical result
     // set on both graphs).
     let fqns: Vec<String> = cap_sample(all_declaration_ids(graph), sample)
         .into_iter()
-        .filter_map(|raw| {
-            graph
-                .declaration(DeclarationId::new(raw))
-                .map(|d| d.name().to_string())
-        })
+        .filter_map(|raw| graph.declaration(DeclarationId::new(raw)).map(|d| d.name().to_string()))
         .collect();
     for fqn in &fqns {
         let found = declaration_search(graph, &[fqn.as_str()], &MatchMode::Exact);
@@ -455,7 +441,11 @@ fn probe_search(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) {
         out.push((format!("search:exact:{fqn}"), names.join(",")));
     }
 
-    for (label, mode, q) in [("exact", &MatchMode::Exact, "Ch"), ("fuzzy", &MatchMode::Fuzzy, "chd"), ("fuzzy", &MatchMode::Fuzzy, "base")] {
+    for (label, mode, q) in [
+        ("exact", &MatchMode::Exact, "Ch"),
+        ("fuzzy", &MatchMode::Fuzzy, "chd"),
+        ("fuzzy", &MatchMode::Fuzzy, "base"),
+    ] {
         let found = declaration_search(graph, &[q], mode);
         let names: Vec<String> = found
             .iter()
@@ -482,8 +472,7 @@ fn harness_detects_divergence() {
         let entry = entry.expect("dir entry");
         std::fs::copy(entry.path(), extended.join(entry.file_name())).expect("copy fixture");
     }
-    std::fs::write(extended.join("extra.rb"), "class Extra\n  def extra_method; end\nend\n")
-        .expect("write extra");
+    std::fs::write(extended.join("extra.rb"), "class Extra\n  def extra_method; end\nend\n").expect("write extra");
 
     let memory = build_graph_from(&corpus_dir());
     let store_graph = build_store_graph_from(&extended, dir.path());
