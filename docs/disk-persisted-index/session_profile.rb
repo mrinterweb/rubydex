@@ -42,9 +42,9 @@ boot = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
 puts "mode=#{mode} boot=#{boot.round(2)}s disk_index=#{g.send(:disk_index_enabled?)}"
 puts "after boot: rss=#{rss_kb / 1024}MB hwm=#{hwm_kb / 1024}MB"
 
-SEARCH_PREFIXES = %w[enum ma ra ac en ha st].freeze
-CONSTANTS = %w[Enumerable Hash String Ractor Fiber Kernel Module Object BasicObject Struct].freeze
-REQUIRES = %w[set json pathname ractor fiber tmpdir].freeze
+SEARCH_PREFIXES = ["enum", "ma", "ra", "ac", "en", "ha", "st"].freeze
+CONSTANTS = ["Enumerable", "Hash", "String", "Ractor", "Fiber", "Kernel", "Module", "Object", "BasicObject", "Struct"].freeze
+REQUIRES = ["set", "json", "pathname", "ractor", "fiber", "tmpdir"].freeze
 
 # warmup
 5.times do
@@ -62,8 +62,15 @@ def run_phase(label, n, &op)
     errors += 1
   end
   dt = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
-  printf "%-28s %6.2f ms/op  %5d results  %3d errors  rss=%dMB hwm=%dMB\n",
-         label, dt / n * 1000, results, errors, rss_kb / 1024, hwm_kb / 1024
+  printf(
+    "%-28s %6.2f ms/op  %5d results  %3d errors  rss=%dMB hwm=%dMB\n",
+    label,
+    dt / n * 1000,
+    results,
+    errors,
+    rss_kb / 1024,
+    hwm_kb / 1024,
+  )
 end
 
 run_phase("search (completion)", 200) do |i|

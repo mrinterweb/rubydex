@@ -32,8 +32,9 @@ fn corrupt_node(table_name: &str, id: u64, path: &std::path::Path) {
     let db = redb::Database::builder().open(path).expect("open for corruption");
     let write_txn = db.begin_write().expect("write txn");
     {
-        let mut table =
-            write_txn.open_table(redb::TableDefinition::<u64, &[u8]>::new(table_name)).expect("table");
+        let mut table = write_txn
+            .open_table(redb::TableDefinition::<u64, &[u8]>::new(table_name))
+            .expect("table");
         let wrong_shape = postcard::to_allocvec(&vec![1u8, 2, 3]).expect("encode");
         table.insert(id, wrong_shape.as_slice()).expect("overwrite");
     }
@@ -60,12 +61,17 @@ fn corrupt_node_returns_error_instead_of_aborting() {
 
 /// Overwrites `[from, end)` of the store with garbage, keeping everything before it intact.
 fn damage_range(path: &std::path::Path, from: u64) {
-    let mut file = std::fs::OpenOptions::new().write(true).open(path).expect("open for damage");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open for damage");
     let size = file.metadata().expect("metadata").len();
     file.seek(SeekFrom::Start(from)).expect("seek");
     let chunk = vec![0xA5u8; 64 * 1024];
     for offset in (from..size).step_by(chunk.len()) {
-        let length = usize::try_from(size - offset).expect("length fits usize").min(chunk.len());
+        let length = usize::try_from(size - offset)
+            .expect("length fits usize")
+            .min(chunk.len());
         file.write_all(&chunk[..length]).expect("write damage");
     }
     file.sync_all().expect("sync");
@@ -82,5 +88,8 @@ fn damaged_store_fails_to_open_instead_of_aborting() {
 
     // redb asserts inside its B-tree code on such a page; opening must report it, not abort.
     let result = RedbStore::open(&path);
-    assert!(result.is_err(), "a store damaged past its header must not open: {result:?}");
+    assert!(
+        result.is_err(),
+        "a store damaged past its header must not open: {result:?}"
+    );
 }

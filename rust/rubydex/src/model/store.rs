@@ -392,53 +392,60 @@ impl RedbStore {
         Ok(ids)
     }
 
-/// Runs [`Self::declaration_ids_matching`] across `available_parallelism()` key ranges, each on its
-/// own read transaction and thread, and merges the results.
-///
-/// Search walks every row of `SEARCH_NAMES` whatever the query is (`Exact` is a substring test,
-/// `Fuzzy` a subsequence score), so the floor is one full-table pass; splitting the keyspace is the
-/// only lever that shortens it without changing match semantics.
-///
-/// # Errors
-/// Returns an error if any redb read transaction or table iteration fails.
-///
-/// # Panics
-///
-/// Panics if one of the search threads panics
-pub fn declaration_ids_matching_parallel(
-    &self,
-    predicate: &(dyn Fn(&DeclarationId, &str) -> bool + Sync),
-) -> Result<Vec<DeclarationId>, redb::Error> {
-    let shards = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-    let shard_width = u64::MAX / shards as u64;
-    let results = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..shards)
-            .map(|shard| {
-                let start = shard as u64 * shard_width;
-                // The last shard takes the remainder, including u64::MAX itself.
-                let end = if shard == shards - 1 { u64::MAX } else { (shard as u64 + 1) * shard_width };
-                scope.spawn(move || {
-                    let read_txn = self.db.begin_read()?;
-                    let table = read_txn.open_table(SEARCH_NAMES)?;
-                    let ids = table
-                        .range(start..=end)?
-                        .filter_map(|entry| {
-                            let (id, name) = entry.ok()?;
-                            let id = DeclarationId::new(id.value());
-                            let name = String::from_utf8_lossy(name.value());
-                            predicate(&id, &name).then_some(id)
-                        })
-                        .collect::<Vec<_>>();
-                    Ok::<_, redb::Error>(ids)
+    /// Runs [`Self::declaration_ids_matching`] across `available_parallelism()` key ranges, each on its
+    /// own read transaction and thread, and merges the results.
+    ///
+    /// Search walks every row of `SEARCH_NAMES` whatever the query is (`Exact` is a substring test,
+    /// `Fuzzy` a subsequence score), so the floor is one full-table pass; splitting the keyspace is the
+    /// only lever that shortens it without changing match semantics.
+    ///
+    /// # Errors
+    /// Returns an error if any redb read transaction or table iteration fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if one of the search threads panics
+    pub fn declaration_ids_matching_parallel(
+        &self,
+        predicate: &(dyn Fn(&DeclarationId, &str) -> bool + Sync),
+    ) -> Result<Vec<DeclarationId>, redb::Error> {
+        let shards = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let shard_width = u64::MAX / shards as u64;
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..shards)
+                .map(|shard| {
+                    let start = shard as u64 * shard_width;
+                    // The last shard takes the remainder, including u64::MAX itself.
+                    let end = if shard == shards - 1 {
+                        u64::MAX
+                    } else {
+                        (shard as u64 + 1) * shard_width
+                    };
+                    scope.spawn(move || {
+                        let read_txn = self.db.begin_read()?;
+                        let table = read_txn.open_table(SEARCH_NAMES)?;
+                        let ids = table
+                            .range(start..=end)?
+                            .filter_map(|entry| {
+                                let (id, name) = entry.ok()?;
+                                let id = DeclarationId::new(id.value());
+                                let name = String::from_utf8_lossy(name.value());
+                                predicate(&id, &name).then_some(id)
+                            })
+                            .collect::<Vec<_>>();
+                        Ok::<_, redb::Error>(ids)
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        handles.into_iter().map(|handle| handle.join().expect("search shard panicked")).collect::<Result<Vec<_>, _>>()
-    });
-    let mut ids = results?.concat();
-    ids.sort_unstable();
-    Ok(ids)
-}
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("search shard panicked"))
+                .collect::<Result<Vec<_>, _>>()
+        });
+        let mut ids = results?.concat();
+        ids.sort_unstable();
+        Ok(ids)
+    }
 
     /// Reads all definition node ids for enumeration (keys only, no deserialization).
     ///
@@ -688,7 +695,13 @@ mod tests {
                     table.insert(id.get(), encoded.as_slice()).expect("insert");
                     count += 1;
                 }
-                println!("BENCH {} : {:?} ({} nodes, {} bytes)", $label, t.elapsed(), count, bytes);
+                println!(
+                    "BENCH {} : {:?} ({} nodes, {} bytes)",
+                    $label,
+                    t.elapsed(),
+                    count,
+                    bytes
+                );
             }};
         }
         timed_table!(DECLARATIONS, graph.declarations(), "declarations");

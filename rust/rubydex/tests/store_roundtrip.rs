@@ -29,7 +29,10 @@ fn corpus_dir() -> std::path::PathBuf {
 
 fn indexed_graph() -> Graph {
     let mut memory = Graph::new();
-    let (files, _) = collect_file_paths(vec![corpus_dir().to_string_lossy().into_owned()], &memory.excluded_patterns());
+    let (files, _) = collect_file_paths(
+        vec![corpus_dir().to_string_lossy().into_owned()],
+        &memory.excluded_patterns(),
+    );
     let _ = index_files(&mut memory, files, IndexerBackend::RubyIndexer);
     Resolver::new(&mut memory).resolve();
     memory
@@ -37,9 +40,10 @@ fn indexed_graph() -> Graph {
 
 /// Renders a node's identity for failure messages.
 fn describe(graph: &Graph, id: DeclarationId) -> String {
-    graph
-        .declaration(id)
-        .map_or_else(|| format!("<missing {id}>"), |declaration| declaration.name().to_string())
+    graph.declaration(id).map_or_else(
+        || format!("<missing {id}>"),
+        |declaration| declaration.name().to_string(),
+    )
 }
 
 /// Renders an ancestor chain by name, so complete ancestors compare across graphs and partial ones
@@ -71,10 +75,18 @@ fn check_declaration(memory: &Graph, store_backed: &Graph, id: DeclarationId, fa
     };
 
     if before.name() != after.name() {
-        failures.push(format!("declaration {label}: name differs ({} vs {})", before.name(), after.name()));
+        failures.push(format!(
+            "declaration {label}: name differs ({} vs {})",
+            before.name(),
+            after.name()
+        ));
     }
     if before.kind() != after.kind() {
-        failures.push(format!("declaration {label}: kind differs ({} vs {})", before.kind(), after.kind()));
+        failures.push(format!(
+            "declaration {label}: kind differs ({} vs {})",
+            before.kind(),
+            after.kind()
+        ));
     }
     if before.definitions() != after.definitions() {
         failures.push(format!("declaration {label}: definitions differ"));
@@ -95,7 +107,9 @@ fn check_declaration(memory: &Graph, store_backed: &Graph, id: DeclarationId, fa
                     .iter()
                     .map(|(string_id, member_id)| {
                         (
-                            graph.string(*string_id).map_or(String::new(), |string| string.as_str().to_string()),
+                            graph
+                                .string(*string_id)
+                                .map_or(String::new(), |string| string.as_str().to_string()),
                             member_id.get(),
                         )
                     })
@@ -107,7 +121,9 @@ fn check_declaration(memory: &Graph, store_backed: &Graph, id: DeclarationId, fa
                 failures.push(format!("declaration {label}: members differ"));
             }
 
-            let descendants = |namespace: &rubydex::model::declaration::Namespace| namespace.descendants().iter().map(Id::get).collect::<BTreeSet<_>>();
+            let descendants = |namespace: &rubydex::model::declaration::Namespace| {
+                namespace.descendants().iter().map(Id::get).collect::<BTreeSet<_>>()
+            };
             if descendants(expected) != descendants(actual) {
                 failures.push(format!("declaration {label}: descendants differ"));
             }
@@ -227,7 +243,9 @@ fn every_node_type_round_trips_through_the_store() {
         materialized.materialize_name_dependents(*id);
     }
     for id in &ids {
-        let Some(dependents) = memory.name_dependents().get(id) else { continue };
+        let Some(dependents) = memory.name_dependents().get(id) else {
+            continue;
+        };
         let Some(loaded) = materialized.name_dependents().get(id) else {
             failures.push(format!("name_dependents {} missing", id.get()));
             continue;
@@ -239,11 +257,7 @@ fn every_node_type_round_trips_through_the_store() {
         }
     }
 
-    assert!(
-        failures.is_empty(),
-        "round-trip mismatches:\n{}",
-        failures.join("\n")
-    );
+    assert!(failures.is_empty(), "round-trip mismatches:\n{}", failures.join("\n"));
 }
 
 #[test]

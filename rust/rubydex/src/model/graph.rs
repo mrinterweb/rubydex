@@ -439,10 +439,7 @@ impl Graph {
             return Vec::new();
         };
         scan_store(store, &self.store_errors, |store| {
-            store
-                .declaration_ids_matching_parallel(&|id, name| {
-                    !self.is_tombstoned(id.get()) && predicate(id, name)
-                })
+            store.declaration_ids_matching_parallel(&|id, name| !self.is_tombstoned(id.get()) && predicate(id, name))
         })
     }
 

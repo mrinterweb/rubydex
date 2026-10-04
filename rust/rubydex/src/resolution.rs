@@ -448,8 +448,9 @@ impl<'a> Resolver<'a> {
                                 };
                                 {
                                     debug_assert!(
-                                        matches!(self.graph.declaration(owner_id).as_deref(),
-                                        Some(Declaration::Namespace(Namespace::SingletonClass(_)))
+                                        matches!(
+                                            self.graph.declaration(owner_id).as_deref(),
+                                            Some(Declaration::Namespace(Namespace::SingletonClass(_)))
                                         ),
                                         "Instance variable in singleton method should be owned by a SingletonClass"
                                     );
@@ -506,7 +507,8 @@ impl<'a> Resolver<'a> {
                             };
                             {
                                 debug_assert!(
-                                    matches!(self.graph.declaration(owner_id).as_deref(),
+                                    matches!(
+                                        self.graph.declaration(owner_id).as_deref(),
                                         Some(Declaration::Namespace(Namespace::SingletonClass(_)))
                                     ),
                                     "Instance variable in class/module body should be owned by a SingletonClass"
@@ -534,7 +536,8 @@ impl<'a> Resolver<'a> {
                                 .expect("singleton class nesting should always be a namespace");
                             {
                                 debug_assert!(
-                                    matches!(self.graph.declaration(owner_id).as_deref(),
+                                    matches!(
+                                        self.graph.declaration(owner_id).as_deref(),
                                         Some(Declaration::Namespace(Namespace::SingletonClass(_)))
                                     ),
                                     "Instance variable in singleton class body should be owned by a SingletonClass"
@@ -612,8 +615,7 @@ impl<'a> Resolver<'a> {
                     let constant_name = self.graph.string(target).unwrap().as_str().to_string();
 
                     let owner_id = if let Some(receiver_name_id) = receiver {
-                        let NameRef::Resolved(resolved_receiver) = &*self.graph.name(receiver_name_id).unwrap()
-                        else {
+                        let NameRef::Resolved(resolved_receiver) = &*self.graph.name(receiver_name_id).unwrap() else {
                             continue;
                         };
                         let Some(namespace_id) = self.resolve_to_namespace(*resolved_receiver.declaration_id()) else {
@@ -714,9 +716,9 @@ impl<'a> Resolver<'a> {
             };
 
             let Some(declaration) = self.graph.declaration(namespace_id) else {
-                        continue;
-                    };
-                    let Declaration::Namespace(namespace) = &*declaration else {
+                continue;
+            };
+            let Declaration::Namespace(namespace) = &*declaration else {
                 continue;
             };
 
@@ -837,8 +839,9 @@ impl<'a> Resolver<'a> {
 
         // If the declaration is a constant alias, follow the alias chain to find the
         // target namespace. Returns None if the alias target is unresolved.
-        if matches!(self.graph.declaration(declaration_id).as_deref(),
-                                        Some(Declaration::ConstantAlias(_))
+        if matches!(
+            self.graph.declaration(declaration_id).as_deref(),
+            Some(Declaration::ConstantAlias(_))
         ) {
             self.resolve_to_namespace(declaration_id)
         } else {
@@ -1049,8 +1052,7 @@ impl<'a> Resolver<'a> {
                     .definitions()
                     .iter()
                     .flat_map(|definition_id| self.mixins_of(*definition_id))
-                    .filter(|mixin| matches!(mixin, Mixin::Extend(_)))
-                    ,
+                    .filter(|mixin| matches!(mixin, Mixin::Extend(_))),
             );
         }
 
@@ -1225,7 +1227,12 @@ impl<'a> Resolver<'a> {
         if !descendants.is_empty() {
             for ancestor in cached {
                 if let Ancestor::Complete(ancestor_id) = ancestor {
-                    let namespace = self.graph.declaration_mut(*ancestor_id).unwrap().as_namespace_mut().unwrap();
+                    let namespace = self
+                        .graph
+                        .declaration_mut(*ancestor_id)
+                        .unwrap()
+                        .as_namespace_mut()
+                        .unwrap();
 
                     for descendant in descendants {
                         namespace.add_descendant(*descendant);
@@ -1449,8 +1456,9 @@ impl<'a> Resolver<'a> {
         };
 
         // Check if the primary result is still an unresolved alias
-        if matches!(self.graph.declaration(primary_id).as_deref(),
-                                        Some(Declaration::ConstantAlias(_))
+        if matches!(
+            self.graph.declaration(primary_id).as_deref(),
+            Some(Declaration::ConstantAlias(_))
         ) {
             return Outcome::Retry {
                 partial_ancestors: false,
@@ -1495,11 +1503,12 @@ impl<'a> Resolver<'a> {
                 if matches!(&*target_decl, Declaration::ConstantAlias(_)) {
                     let resolved_ids = self.resolve_alias_chains(target_decl_id);
 
-                    if resolved_ids
-                        .iter()
-                        .any(|id| matches!(self.graph.declaration(*id).as_deref(),
-                                        Some(Declaration::ConstantAlias(_))))
-                    {
+                    if resolved_ids.iter().any(|id| {
+                        matches!(
+                            self.graph.declaration(*id).as_deref(),
+                            Some(Declaration::ConstantAlias(_))
+                        )
+                    }) {
                         return Outcome::Retry {
                             partial_ancestors: false,
                         };
@@ -1507,8 +1516,7 @@ impl<'a> Resolver<'a> {
 
                     let Some(&namespace_id) = resolved_ids
                         .iter()
-                        .find(|id| matches!(self.graph.declaration(**id).as_deref(),
-                                        Some(Declaration::Namespace(_))))
+                        .find(|id| matches!(self.graph.declaration(**id).as_deref(), Some(Declaration::Namespace(_))))
                     else {
                         return Outcome::Unresolved;
                     };
@@ -1710,8 +1718,9 @@ impl<'a> Resolver<'a> {
             // Modules don't inherit from Object, but Ruby gives them a special fallback to Object's ancestors.
             // For incomplete ancestor chains, we also try Object as a tentative resolution to avoid unnecessary retries.
             let is_module = nesting_decl_id.is_some_and(|id| {
-                matches!(self.graph.declaration(id).as_deref(),
-                                        Some(Declaration::Namespace(Namespace::Module(_) | Namespace::Todo(_)))
+                matches!(
+                    self.graph.declaration(id).as_deref(),
+                    Some(Declaration::Namespace(Namespace::Module(_) | Namespace::Todo(_)))
                 )
             });
             let chain_incomplete = matches!(
@@ -2091,10 +2100,10 @@ impl<'a> Resolver<'a> {
 
     fn mixins_of(&self, definition_id: DefinitionId) -> Vec<Mixin> {
         match &*self.graph.definition(definition_id).unwrap() {
-        Definition::Class(class) => class.mixins().to_vec(),
-        Definition::SingletonClass(class) => class.mixins().to_vec(),
-        Definition::Module(module) => module.mixins().to_vec(),
-        _ => vec![],
+            Definition::Class(class) => class.mixins().to_vec(),
+            Definition::SingletonClass(class) => class.mixins().to_vec(),
+            Definition::Module(module) => module.mixins().to_vec(),
+            _ => vec![],
         }
     }
 }

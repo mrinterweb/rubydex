@@ -37,7 +37,7 @@ Detailed plans: `docs/disk-persisted-index/plan-differential-harness.md` (curren
 ## Memory optimization (user priority — after 1.1)
 
 - [x] Scope: measure current RAM profile — `docs/disk-persisted-index/memory-baseline.md` (build child 1,539 MB / 6.3s; open path 5 MB baseline; search spike 70 MB → streaming fix → 54 MB peak / 12.9 MB live)
-- [x] Ruby-side session profile (`docs/disk-persisted-index/session-profile.rb`): disk 73 MB final vs memory 692 MB; hover 0.09 ms/op; search 100 ms/op (no name-keyed index yet)
+- [x] Ruby-side session profile (`docs/disk-persisted-index/session_profile.rb`): disk 73 MB final vs memory 692 MB; hover 0.09 ms/op; search 100 ms/op (no name-keyed index yet)
 - [x] Streaming search (commit `afc0465`) — measured win
 - [x] P1 FFI abort root-caused + fixed (commit `7a27716`) — refcount tombstones vs store nodes + FFI null guards; 2 regression tests, RED-verified
 - [ ] Next candidate: Stage-5 name-keyed search index (closes the 100 ms/op search gap) — ship-plan Task 3.4

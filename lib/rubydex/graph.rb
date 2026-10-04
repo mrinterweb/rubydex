@@ -19,6 +19,17 @@ module Rubydex
         graph.load_config(Config.load(workspace_path))
         graph
       end
+
+      # Layout version of the persisted store, owned by the Rust side: it is what makes an older
+      # store unreadable, not the gem version. Cached: it never changes within a process.
+      #
+      #: -> Integer
+      def store_format_version
+        @store_format_version ||= rdx_store_format_version
+      rescue NoMethodError
+        # Built without the redb-store feature: nothing is ever persisted, so any value works.
+        0
+      end
     end
 
     # Index all files and dependencies of the workspace that exists in `workspace_path`.
@@ -105,17 +116,6 @@ module Rubydex
     # workspace. The file signature catches source changes for workspaces without a Gemfile.lock too
     # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
     # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
-    #: -> String
-    # Layout version of the persisted store, owned by the Rust side: it is what makes an older
-    # store unreadable, not the gem version. Cached: it never changes within a process.
-    def self.store_format_version
-      @store_format_version ||= rdx_store_format_version
-    rescue NoMethodError
-      # Built without the redb-store feature: nothing is ever persisted, so any value works.
-      0
-    end
-
-
     def store_signature
       require "digest"
       # The layout version is part of the key so a store written by an incompatible layout is
