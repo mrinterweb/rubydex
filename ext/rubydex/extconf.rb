@@ -29,12 +29,12 @@ bindings_path = root_dir.join("rubydex-sys").join("rustbindings.h")
 
 cargo_args = ["--manifest-path #{root_dir.join("Cargo.toml")}"]
 cargo_args << "$(CARGO_PROFILE_FLAG)"
-# Disk-backed (low-resident-memory) index. Opt-in: set RUBYDEX_REDB_STORE=1 to compile the
-# `redb-store` feature in, so consumers who don't use it don't pay the `redb` build time and
-# staticlib size. `redb` is pure Rust and builds on every target when requested. Store building
-# needs Process#fork, unavailable on Windows, so index_workspace falls back to in-memory there;
-# attach_store/open_store can still read a prebuilt store on Windows.
-cargo_args << "--features rubydex-sys/redb-store" if ENV["RUBYDEX_REDB_STORE"]
+# Disk-backed (low-resident-memory) index. This fork exists for the disk index, so the feature is
+# compiled in by default; opt out with RUBYDEX_NO_REDB_STORE=1 (e.g. CI's no-feature job).
+# `redb` is pure Rust and builds on every target when requested. Store building spawns a child
+# process (Process.spawn, available everywhere); index_workspace falls back to in-memory if the
+# child cannot run.
+cargo_args << "--features rubydex-sys/redb-store" unless ENV["RUBYDEX_NO_REDB_STORE"]
 # Allocator invariant checks (double free, sized-deallocation mismatch). Debug jemalloc only; the
 # released build never enables it.
 cargo_args << "--features rubydex/jemalloc_debug" if ENV["RUBYDEX_JEMALLOC_DEBUG"]
