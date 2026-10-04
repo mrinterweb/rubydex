@@ -159,26 +159,23 @@ module Rubydex
       File.exist?(marker) && File.read(marker) == store_signature
     end
 
-    # Builds the store in a forked child (whose peak indexing memory is reclaimed on exit), then
-    # atomically publishes it. The parent never holds the full in-memory index.
+    # Builds the store in a short-lived child process (whose peak indexing memory is reclaimed
+    # when it exits), then atomically publishes it. The parent never holds the full in-memory index.
+    # Uses spawn rather than fork: the parent is a long-lived Ruby process with a warm jemalloc
+    # heap and live threads, and a forked child that then allocates heavily corrupts its allocator
+    # (SIGSEGV in `tcache_bin_flush` during `index_all`). A fresh process starts with a clean heap.
     #: (String) -> void
     def build_store_via_fork(cache)
-      raise NotImplementedError, "fork is unavailable on this platform" unless Process.respond_to?(:fork)
-
       require "fileutils"
+      require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))
       tmp = "#{cache}.#{Process.pid}.building"
       marker = "#{cache}.hash"
       marker_tmp = "#{marker}.#{Process.pid}.building"
+      builder = File.expand_path("store_builder.rb", __dir__)
 
       begin
-        pid = fork do
-          builder = Rubydex::Graph.new(workspace_path: workspace_path)
-          builder.index_all(builder.workspace_paths)
-          builder.resolve
-          builder.build_store(tmp)
-          exit!(0)
-        end
+        pid = Process.spawn(RbConfig.ruby, "-I#{File.expand_path("..", __dir__)}", builder, tmp, workspace_path)
         _, status = Process.wait2(pid)
         raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
 

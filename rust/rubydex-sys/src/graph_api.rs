@@ -575,12 +575,6 @@ pub unsafe extern "C" fn rdx_graph_delete_document(pointer: GraphPointer, uri: *
 #[unsafe(no_mangle)]
 pub extern "C" fn rdx_graph_resolve(pointer: GraphPointer) {
     with_mut_graph(pointer, |graph| {
-        // A store-backed graph is pre-resolved and static (POC mode): skip resolution so the
-        // unmigrated resolver never runs against disk-backed nodes.
-        #[cfg(feature = "redb-store")]
-        if graph.is_store_backed() {
-            return;
-        }
         let mut resolver = Resolver::new(graph);
         resolver.resolve();
     });
