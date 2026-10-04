@@ -6,7 +6,54 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  ffi-allocator-invariants:
+    # Debug jemalloc turns sized-deallocation mismatches and double frees into hard failures
+    # instead of the heap corruption glibc silently tolerates (see commit 8f9359b).
+    runs-on: ubuntu-latest
+    name: FFI allocator invariants (debug jemalloc)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: "recursive"
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      - name: Compile with debug jemalloc
+        run: RUBYDEX_JEMALLOC_DEBUG=1 bundle exec rake compile
+
+      - name: Ruby suite
+        run: bundle exec rake ruby_test
+
+  no-store-feature:
+    # Proves the default (no redb-store) build is behavior-identical: the disk layer must be
+    # entirely absent, not merely unused.
+    runs-on: ubuntu-latest
+    name: Default build without redb-store
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: "recursive"
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      - name: Compile without the feature
+        run: RUBYDEX_NO_REDB_STORE=1 bundle exec rake compile
+
+      - name: Rust tests
+        run: cargo test --manifest-path rust/Cargo.toml -p rubydex -p rubydex-sys
+
+      - name: Ruby suite
+        run: RUBYDEX_NO_REDB_STORE=1 bundle exec rake ruby_test
+
+
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

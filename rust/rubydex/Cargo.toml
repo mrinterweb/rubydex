@@ -28,6 +28,9 @@ jemalloc = ["dep:tikv-jemallocator"]
 # dynamically or else the process crashes. This has a small performance cost, which we don't need to pay when using the
 # Rust crate by itself, so we gate it with a feature
 jemalloc_dylib = ["jemalloc", "tikv-jemallocator/disable_initial_exec_tls"]
+# jemalloc built with --enable-debug: asserts on double free / sized-deallocation mismatch, which
+# glibc silently tolerates. Used by the FFI allocator-invariants CI job; never for released builds.
+jemalloc_debug = ["jemalloc_dylib", "tikv-jemallocator/debug"]
 test_utils = ["dep:tempfile"]
 # Disk-persisted, low-resident-memory index backed by an embedded redb store.
 # Opt-in: the default build keeps the all-in-memory graph unchanged.
