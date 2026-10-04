@@ -474,6 +474,32 @@ pub unsafe extern "C" fn rdx_graph_excluded_patterns(
     })
 }
 
+/// Returns whether the workspace's `[disk_index]` section enabled the disk-backed index, as
+/// configured by the file (the Ruby side layers the environment override on top).
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_disk_index_enabled(pointer: GraphPointer) -> u64 {
+    with_graph(pointer, |graph| u64::from(graph.disk_index_enabled()))
+}
+
+/// Returns where the store lives as configured: `"tmp"`, `"global"`, an absolute directory, or an
+/// empty string when the workspace left it to the context-aware default. Caller must free with
+/// `free_c_string`.
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_disk_index_location(pointer: GraphPointer) -> *const c_char {
+    with_graph(pointer, |graph| {
+        CString::new(graph.disk_index_location().as_ref())
+            .map_or(ptr::null(), |c_string| c_string.into_raw().cast_const())
+    })
+}
+
 /// Returns the workspace path as a C string. Caller must free with `free_c_string`.
 ///
 /// # Safety

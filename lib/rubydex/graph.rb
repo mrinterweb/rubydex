@@ -85,30 +85,86 @@ module Rubydex
 
     private
 
-    # Whether the disk-backed (low-resident-memory) index is enabled for this process. Opt-in via
-    # RUBYDEX_DISK_INDEX=1; the default keeps the in-memory path.
+    # Whether the disk-backed (low-resident-memory) index is enabled for this process. The env
+    # var wins when set — so CI and one-off runs can flip it without editing the committed
+    # configuration — and otherwise the workspace's `[disk_index] enabled` decides.
     #: -> bool
     def disk_index_enabled?
-      ENV["RUBYDEX_DISK_INDEX"] == "1" || ENV["RUBYDEX_DISK_INDEX"] == "true"
+      env = ENV["RUBYDEX_DISK_INDEX"]
+      return env == "1" || env == "true" if env
+
+      disk_index_enabled
     end
 
-    # Path of the on-disk store for this workspace, namespaced by workspace path. Honors
-    # XDG_CACHE_HOME (and a RUBYDEX_CACHE_DIR override) instead of hardcoding ~/.cache, and falls
-    # back to ~/.cache only when neither is set and a home directory exists.
+    # Path of the on-disk store for this workspace. Location precedence:
+    # RUBYDEX_CACHE_DIR (ops override, so CI can point anywhere without touching the repo) >
+    # the workspace's committed `[disk_index] location` ("tmp", "global", or an absolute dir) >
+    # the workspace's own tmp/ when one exists (the Rails convention; and the right home for a
+    # worktree workflow, where each checkout is a different workspace and the store belongs to
+    # the one you are in) > the platform cache directory. Stores outside the workspace are named
+    # `<workspace-name>-<hash8>` so `du` on the cache root reads as the projects they belong to.
     #: -> String
     def store_cache_path
-      require "digest"
-      key = Digest::SHA1.hexdigest(File.expand_path(workspace_path))
-      File.join(cache_root, "rubydex", key, "index.redb")
+      File.join(store_cache_dir, "index.redb")
     end
 
-    # Root directory for on-disk stores. RUBYDEX_CACHE_DIR > XDG_CACHE_HOME > ~/.cache.
+    # Directory holding this workspace's store.
     #: -> String
-    def cache_root
-      return ENV["RUBYDEX_CACHE_DIR"] if ENV["RUBYDEX_CACHE_DIR"] && !ENV["RUBYDEX_CACHE_DIR"].empty?
+    def store_cache_dir
+      return File.join(ENV["RUBYDEX_CACHE_DIR"], "rubydex", global_store_key) if ENV["RUBYDEX_CACHE_DIR"] && !ENV["RUBYDEX_CACHE_DIR"].empty?
+
+      case disk_index_location
+      when "tmp" then workspace_store_dir
+      when "global" then platform_store_dir
+      when "" then Dir.exist?(File.join(workspace_path, "tmp")) ? workspace_store_dir : platform_store_dir
+      else disk_index_location
+      end
+    end
+
+    # The workspace's own `tmp/`, which Rails generates and gitignores. rubydex never indexes it
+    # (`tmp` is a built-in exclusion), so a store there cannot feed back into the index.
+    #: -> String
+    def workspace_store_dir
+      File.join(workspace_path, "tmp", "rubydex")
+    end
+
+    # Name for a store kept outside the workspace: the workspace name leads so `du -sh` on the
+    # cache root is readable, the path hash keeps distinct workspaces (and worktrees) apart.
+    #: -> String
+    def global_store_key
+      require "digest"
+      "#{File.basename(workspace_path)}-#{Digest::SHA1.hexdigest(File.expand_path(workspace_path))[0, 8]}"
+    end
+
+    #: -> String
+    def platform_store_dir
+      File.join(platform_cache_root, "rubydex", global_store_key)
+    end
+
+    # Root for stores of workspaces that don't keep one in their own tmp/: XDG on Linux,
+    # ~/Library/Caches on macOS, %USERPROFILE%/.cache elsewhere (Windows' %LOCALAPPDATA% is a
+    # registry value, not something the process env reliably carries).
+    #: -> String
+    def platform_cache_root
       return ENV["XDG_CACHE_HOME"] if ENV["XDG_CACHE_HOME"] && !ENV["XDG_CACHE_HOME"].empty?
+      return File.join(Dir.home, "Library", "Caches") if RUBY_PLATFORM.include?("darwin")
 
       File.join(Dir.home, ".cache")
+    end
+
+    # A store inside the workspace would otherwise show up in `git status`, and a `git add -A`
+    # would commit a gigabyte of it. Rails' tmp/ is already gitignored, so the entry is only
+    # written when nothing ignores the store dir yet; it goes to `.git/info/exclude`, which is
+    # untracked, rather than editing the project's `.gitignore`.
+    #: (String dir) -> void
+    def ensure_store_ignored(dir)
+      exclude = File.join(workspace_path, ".git", "info", "exclude")
+      return unless File.exist?(exclude)
+
+      entry = "#{dir.delete_prefix("#{File.expand_path(workspace_path)}/")}/"
+      return if system("git", "-C", workspace_path, "check-ignore", "-q", entry)
+
+      File.write(exclude, File.read(exclude) + "\n" + entry)
     end
 
     # Signature of everything that can change the index for this workspace: the Gemfile.lock hash
@@ -198,6 +254,7 @@ module Rubydex
       require "fileutils"
       require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))
+      ensure_store_ignored(File.dirname(cache))
       tmp = "#{cache}.#{Process.pid}.building"
       marker = "#{cache}.hash"
       marker_tmp = "#{marker}.#{Process.pid}.building"

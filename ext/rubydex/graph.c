@@ -1010,6 +1010,38 @@ static VALUE rdxr_graph_store_errors(VALUE self) {
     return ULL2NUM(rdx_graph_store_errors(graph));
 }
 
+/*
+ * call-seq:
+ *   disk_index_enabled -> true or false
+ *
+ * Whether the workspace's committed `[disk_index]` section enabled the disk-backed index.
+ */
+static VALUE rdxr_graph_disk_index_enabled(VALUE self) {
+    void *graph;
+    TypedData_Get_Struct(self, void *, &graph_type, graph);
+
+    return rdx_graph_disk_index_enabled(graph) ? Qtrue : Qfalse;
+}
+
+/*
+ * call-seq:
+ *   disk_index_location -> String
+ *
+ * Where the store lives as configured: "tmp", "global", an absolute directory, or "" when the
+ * workspace left it to the context-aware default.
+ */
+static VALUE rdxr_graph_disk_index_location(VALUE self) {
+    void *graph;
+    TypedData_Get_Struct(self, void *, &graph_type, graph);
+
+    const char *result = rdx_graph_disk_index_location(graph);
+    if (result == NULL) {
+        rb_raise(rb_eRuntimeError, "Converting disk index location to Ruby string failed");
+    }
+
+    return rdxi_owned_c_string_to_ruby(result);
+}
+
 // Rubydex::Graph.store_format_version: () -> Integer. Part of the store-freshness signature; see
 // STORE_FORMAT_VERSION in rust/rubydex/src/model/store.rs.
 static VALUE rdxr_graph_store_format_version(VALUE _self) {
@@ -1036,6 +1068,8 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "delete_document", rdxr_graph_delete_document, 1);
     rb_define_method(cGraph, "resolve", rdxr_graph_resolve, 0);
     rb_define_method(cGraph, "store_errors", rdxr_graph_store_errors, 0);
+    rb_define_method(cGraph, "disk_index_enabled", rdxr_graph_disk_index_enabled, 0);
+    rb_define_method(cGraph, "disk_index_location", rdxr_graph_disk_index_location, 0);
     rb_define_singleton_method(cGraph, "rdx_store_format_version", rdxr_graph_store_format_version, 0);
     rb_define_method(cGraph, "resolve_constant", rdxr_graph_resolve_constant, 2);
     rb_define_method(cGraph, "declarations", rdxr_graph_declarations, 0);
