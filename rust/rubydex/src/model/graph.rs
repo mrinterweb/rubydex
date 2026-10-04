@@ -1059,7 +1059,7 @@ impl Graph {
                             }
                             Visibility::ModuleFunction => Some(Visibility::Private),
                             other => Some(other),
-                        }
+                        },
                         Definition::Method(method) => Some(*method.visibility()),
                         Definition::AttrAccessor(attr) => Some(*attr.visibility()),
                         Definition::AttrReader(attr) => Some(*attr.visibility()),

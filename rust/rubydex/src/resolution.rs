@@ -991,7 +991,7 @@ impl<'a> Resolver<'a> {
     #[must_use]
     fn linearize_ancestors(&mut self, declaration_id: DeclarationId) -> Ancestors {
         {
-            let declaration = self.graph.declarations_mut().get_mut(&declaration_id).unwrap();
+            let declaration = self.graph.declaration_mut(declaration_id).unwrap();
 
             // Add this declaration to the descendants so that we capture transitive descendant relationships
             self.context.descendants.insert(declaration_id);
@@ -1277,14 +1277,14 @@ impl<'a> Resolver<'a> {
         // depending on whether the name has a parent scope
         match outcome {
             Outcome::Resolved(owner_id) => {
-                let mut fully_qualified_name = self.graph.strings().get(&str_id).unwrap().to_string();
+                let mut fully_qualified_name = self.graph.string(str_id).unwrap().to_string();
 
                 // If the owner is a promotable constant and something is being defined inside it, promote it to an
                 // unknown namespace. A later explicit class or module definition selects the concrete kind.
                 {
-                    let owner = self.graph.declarations().get(&owner_id).unwrap();
+                    let owner = self.graph.declaration(owner_id).unwrap();
                     let is_promotable_constant =
-                        matches!(owner, Declaration::Constant(_)) && self.graph.all_definitions_promotable(owner);
+                        matches!(&*owner, Declaration::Constant(_)) && self.graph.all_definitions_promotable(&owner);
 
                     if is_promotable_constant {
                         self.graph.promote_constant_to_namespace(owner_id, |name, owner_id| {
@@ -1294,7 +1294,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
 
-                let owner = self.graph.declarations().get(&owner_id).unwrap();
+                let owner = self.graph.declaration(owner_id).unwrap();
                 let owner_is_namespace = owner.as_namespace().is_some();
 
                 // Skip creating singletons when the target is a not a namespace or not promotable. For example:
