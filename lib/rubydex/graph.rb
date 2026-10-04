@@ -34,7 +34,8 @@ module Rubydex
 
     # Index all files and dependencies of the workspace that exists in `workspace_path`.
     #
-    # Disk-backed orchestration (opt-in via RUBYDEX_DISK_INDEX=1): build (or reuse) a redb store of
+    # Disk-backed orchestration (runtime opt-in via RUBYDEX_DISK_INDEX=1; the store feature is
+    # compiled in by default — see ext/rubydex/extconf.rb): build (or reuse) a redb store of
     # the whole resolved graph in a FORKED child so its peak indexing memory is reclaimed when the
     # child exits, then attach the store to this graph. The long-lived server therefore holds the
     # bulk index off-heap and serves reads from disk. Falls back to the in-memory path if the store
@@ -85,8 +86,7 @@ module Rubydex
     private
 
     # Whether the disk-backed (low-resident-memory) index is enabled for this process. Opt-in via
-    # RUBYDEX_DISK_INDEX=1; the default keeps the in-memory path so live edits keep working (the
-    # store-backed path now supports live edits via the overlay).
+    # RUBYDEX_DISK_INDEX=1; the default keeps the in-memory path.
     #: -> bool
     def disk_index_enabled?
       ENV["RUBYDEX_DISK_INDEX"] == "1" || ENV["RUBYDEX_DISK_INDEX"] == "true"
