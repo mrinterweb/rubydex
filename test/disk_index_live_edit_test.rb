@@ -20,16 +20,15 @@ class DiskIndexLiveEditTest < Minitest::Test
   end
 
   def test_index_source_applies_to_store_backed_graph
-    # `index_workspace` builds the store via `build_store_via_fork`, which requires
-    # `Process#fork` (unavailable on Windows). Without it, `index_workspace` silently falls back
-    # to the in-memory path, which is covered by other tests — there's nothing store-backed to
-    # verify here. Mirrors the same check `build_store_via_fork` itself makes.
-    skip("fork unavailable; index_workspace can't build a store on this platform") unless Process.respond_to?(:fork)
+    # `index_workspace` builds the store in a short-lived child process, which requires spawning a
+    # Ruby process with rubydex loadable. Without it, `index_workspace` silently falls back to the
+    # in-memory path (covered by other tests) — there's nothing store-backed to verify here.
+    skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
 
     rb = File.join(@tmp, "foo.rb")
     File.write(rb, "class Foo\n  def bar; end\nend\n")
 
-    graph = Rubydex::Graph.new(workspace_path: @tmp)
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
     graph.index_workspace # builds + attaches the store
 
     # The store-backed graph can still read declarations from disk.
@@ -49,24 +48,18 @@ class DiskIndexLiveEditTest < Minitest::Test
   end
 
   def test_failed_store_build_cleans_up_temp_files
-    skip("fork unavailable; build_store_via_fork can't run on this platform") unless Process.respond_to?(:fork)
-
     ws = File.join(@tmp, "ws")
     FileUtils.mkdir_p(ws)
     File.write(File.join(ws, "a.rb"), "class A; end\n")
 
-    graph = Rubydex::Graph.new(workspace_path: ws)
+    graph = Rubydex::Graph.configure_for_workspace(ws)
     cache_dir = File.join(@tmp, "cache", "key")
     cache = File.join(cache_dir, "index.redb")
-    original_build_store = nil
 
-    # `build_store` is a C method; `define_method` replaces its table entry, so capture the
-    # original and rebind it afterwards (remove_method would delete the C method for good).
-    original_build_store = Rubydex::Graph.instance_method(:build_store)
-    Rubydex::Graph.send(:define_method, :build_store) do |path|
-      File.binwrite(path, "partial")
-      exit!(1) # simulate a child that dies after writing a partial store
-    end
+    # The builder runs in a fresh process, so the failure has to be simulated at the process
+    # boundary: `false` exits non-zero without writing anything, like a builder that dies.
+    original_spawn = Process.method(:spawn)
+    Process.define_singleton_method(:spawn) { |*| original_spawn.call("false") }
 
     assert_raises(RuntimeError) { graph.send(:build_store_via_fork, cache) }
     assert_empty(
@@ -74,6 +67,6 @@ class DiskIndexLiveEditTest < Minitest::Test
       "temp files leaked after a failed store build",
     )
   ensure
-    Rubydex::Graph.send(:define_method, :build_store, original_build_store) if original_build_store
+    Process.define_singleton_method(:spawn, original_spawn) if original_spawn
   end
 end

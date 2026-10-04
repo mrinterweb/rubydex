@@ -451,6 +451,37 @@ mod tests {
     }
 
     #[test]
+    fn attach_store_then_live_edit_then_resolve_does_not_crash() {
+        use crate::indexing::{IndexerBackend, LanguageId, index_files, index_source};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb_path = dir.path().join("foo.rb");
+        std::fs::write(&rb_path, "class Foo\n  def bar; end\nend\n").expect("write");
+
+        let mut graph = Graph::new();
+        let _ = index_files(&mut graph, vec![rb_path.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut graph).resolve();
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph);
+
+        // Mirrors the FFI attach path: a fresh graph (built-ins in memory) whose maps are
+        // cleared and backed by the store, then a live edit + resolve (what Graph#resolve does).
+        let mut graph = Graph::new();
+        graph.attach_store(RedbStore::open(&store_path).expect("open store"));
+
+        let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
+        index_source(&mut graph, uri.into(), "class Foo\n  def baz; end\nend\n", &LanguageId::Ruby);
+        Resolver::new(&mut graph).resolve();
+
+        let foo = graph.declaration(DeclarationId::from("Foo")).expect("Foo after live edit");
+        let ns = foo.as_namespace().expect("namespace");
+        assert!(ns.member(&StringId::from("baz()")).is_some(), "edited member baz resolves");
+        assert!(ns.member(&StringId::from("bar()")).is_none(), "removed member bar is gone");
+    }
+
+    #[test]
     fn declaration_ids_matching_filters_during_scan() {
         let graph = Graph::new();
         let dir = tempfile::tempdir().expect("tempdir");
