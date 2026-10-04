@@ -664,24 +664,61 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("bench.redb");
 
-        let t0 = std::time::Instant::now();
         let mut graph = Graph::new();
         let (files, _) = collect_file_paths(vec![corpus.to_string_lossy().into_owned()], &graph.excluded_patterns());
         let _ = index_files(&mut graph, files, IndexerBackend::RubyIndexer);
-        let indexed = t0.elapsed();
-        let t1 = std::time::Instant::now();
         Resolver::new(&mut graph).resolve();
-        let resolved = t1.elapsed();
 
+        let db = Database::create(&path).expect("create");
+
+        // Time each table separately: open, insert, and the final commit, so the 4.5s Cleanup is
+        // attributable table by table.
+        let write_txn = db.begin_write().expect("begin");
+        macro_rules! timed_table {
+            ($table:expr, $map:expr, $label:literal) => {{
+                let t = std::time::Instant::now();
+                let mut table = write_txn.open_table($table).expect("open table");
+                let mut bytes = 0u64;
+                let mut count = 0u64;
+                for (id, value) in $map {
+                    let encoded = postcard::to_allocvec(value).expect("serialize");
+                    bytes += encoded.len() as u64;
+                    table.insert(id.get(), encoded.as_slice()).expect("insert");
+                    count += 1;
+                }
+                println!("BENCH {} : {:?} ({} nodes, {} bytes)", $label, t.elapsed(), count, bytes);
+            }};
+        }
+        timed_table!(DECLARATIONS, graph.declarations(), "declarations");
+        timed_table!(DEFINITIONS, graph.definitions(), "definitions");
+        timed_table!(STRINGS, graph.strings(), "strings");
+        timed_table!(NAMES, graph.names(), "names");
+        timed_table!(CONSTANT_REFERENCES, graph.constant_references(), "constant_references");
+        timed_table!(METHOD_REFERENCES, graph.method_references(), "method_references");
+        timed_table!(DOCUMENTS, graph.documents(), "documents");
+        timed_table!(NAME_DEPENDENTS, graph.name_dependents(), "name_dependents");
+        {
+            let t = std::time::Instant::now();
+            for (id, declaration) in graph.declarations() {
+                let mut table = write_txn.open_table(SEARCH_NAMES).expect("open search names");
+                table.insert(id.get(), declaration.name().as_bytes()).expect("insert");
+            }
+            println!("BENCH search_names : {:?}", t.elapsed());
+        }
+        {
+            let t = std::time::Instant::now();
+            for (id, document) in graph.documents() {
+                let mut table = write_txn.open_table(DOCUMENT_URIS).expect("open document uris");
+                table.insert(id.get(), document.uri().as_bytes()).expect("insert");
+            }
+            println!("BENCH document_uris : {:?}", t.elapsed());
+        }
+        let t_commit = std::time::Instant::now();
+        write_txn.commit().expect("commit");
+        println!("BENCH commit : {:?}", t_commit.elapsed());
         let t2 = std::time::Instant::now();
-        let store = RedbStore::build(&path, &graph).expect("build store");
-        let written = t2.elapsed();
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let t3 = std::time::Instant::now();
-        drop(store);
-        let dropped = t3.elapsed();
-
-        println!("BENCH index={indexed:?} resolve={resolved:?} write={written:?} drop={dropped:?} size={size}");
+        drop(db);
+        println!("BENCH drop={}s", t2.elapsed().as_secs_f64());
     }
 
     #[test]
