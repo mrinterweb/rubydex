@@ -146,6 +146,17 @@ pub unsafe extern "C" fn rdx_graph_attach_store(pointer: GraphPointer, path: *co
     })
 }
 
+/// Layout version of the on-disk store. Ruby mixes this into the freshness signature so a store
+/// written by an incompatible layout is rebuilt instead of misread.
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub extern "C" fn rdx_store_format_version() -> u32 {
+    rubydex::model::store::STORE_FORMAT_VERSION
+}
+
 /// Returns the number of store reads that failed since the graph was created or last attached a
 /// store. Zero means the disk index answered everything; non-zero means it is corrupt or was
 /// written by an incompatible layout, and the Ruby layer should fall back to the in-memory index.

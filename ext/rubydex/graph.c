@@ -1010,6 +1010,12 @@ static VALUE rdxr_graph_store_errors(VALUE self) {
     return ULL2NUM(rdx_graph_store_errors(graph));
 }
 
+// Rubydex::Graph.store_format_version: () -> Integer. Part of the store-freshness signature; see
+// STORE_FORMAT_VERSION in rust/rubydex/src/model/store.rs.
+static VALUE rdxr_graph_store_format_version(VALUE _self) {
+    return UINT2NUM(rdx_store_format_version());
+}
+
 void rdxi_initialize_graph(VALUE moduleRubydex) {
     mRubydex = moduleRubydex;
     cGraph = rb_define_class_under(mRubydex, "Graph", rb_cObject);
@@ -1030,6 +1036,7 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "delete_document", rdxr_graph_delete_document, 1);
     rb_define_method(cGraph, "resolve", rdxr_graph_resolve, 0);
     rb_define_method(cGraph, "store_errors", rdxr_graph_store_errors, 0);
+    rb_define_singleton_method(cGraph, "rdx_store_format_version", rdxr_graph_store_format_version, 0);
     rb_define_method(cGraph, "resolve_constant", rdxr_graph_resolve_constant, 2);
     rb_define_method(cGraph, "declarations", rdxr_graph_declarations, 0);
     rb_define_method(cGraph, "documents", rdxr_graph_documents, 0);
