@@ -22,6 +22,27 @@ use crate::model::visibility::Visibility;
 use crate::{assert_mem_size, assert_send_sync};
 use crate::{query, stats};
 
+/// Reads a node from the store, recording a failure instead of dropping it. A corrupt node must be
+/// visible to the caller: silently answering "absent" would hand back wrong results, and panicking
+/// would abort the host process (a panic inside `extern "C"` cannot unwind).
+#[cfg(feature = "redb-store")]
+fn read_store<T>(
+    store: &crate::model::store::RedbStore,
+    errors: &std::sync::atomic::AtomicUsize,
+    read: impl FnOnce(&crate::model::store::RedbStore) -> Result<Option<T>, crate::model::store::StoreError>,
+) -> Option<T> {
+    match read(store) {
+        Ok(node) => node,
+        Err(error) => {
+            errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // A one-line stderr note: the Ruby layer reads the counter and falls back to the
+            // in-memory index, so this only has to explain what the counter is reacting to.
+            eprintln!("rubydex: disk index read failed ({error}); the store is not trustworthy");
+            None
+        }
+    }
+}
+
 /// An entity whose validity depends on a particular `NameId`.
 /// Used as the value type in the `name_dependents` reverse index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +119,11 @@ pub struct Graph {
     #[cfg(feature = "redb-store")]
     store: Option<crate::model::store::RedbStore>,
 
+    /// Number of store reads that failed (corrupt node or unavailable database). Non-zero means the
+    /// disk index cannot be trusted and the caller should fall back to the in-memory index.
+    #[cfg(feature = "redb-store")]
+    store_errors: std::sync::atomic::AtomicUsize,
+
     /// Raw IDs of nodes removed from the in-memory overlay while a store is attached. Blocks the
     /// layered accessors and materialize paths from resurrecting the store's stale copy of a
     /// deleted node. Shared across node types and keyed by the ID's raw value: a cross-type u64
@@ -156,6 +182,8 @@ impl Graph {
             #[cfg(feature = "redb-store")]
             store: None,
             #[cfg(feature = "redb-store")]
+            store_errors: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(feature = "redb-store")]
             removed: IdentityHashSet::default(),
         };
 
@@ -191,6 +219,8 @@ impl Graph {
         self.name_dependents = IdentityHashMap::default();
         self.pending_work = Vec::new();
         self.removed = IdentityHashSet::default();
+        #[cfg(feature = "redb-store")]
+        self.store_errors.store(0, std::sync::atomic::Ordering::Relaxed);
         self.store = Some(store);
     }
 
@@ -224,7 +254,7 @@ impl Graph {
             return;
         }
         if let Some(store) = &self.store
-            && let Ok(Some(declaration)) = store.get_declaration(id)
+            && let Some(declaration) = read_store(store, &self.store_errors, |store| store.get_declaration(id))
         {
             self.declarations.insert(id, declaration);
         }
@@ -237,7 +267,7 @@ impl Graph {
             return;
         }
         if let Some(store) = &self.store
-            && let Ok(Some(definition)) = store.get_definition(id)
+            && let Some(definition) = read_store(store, &self.store_errors, |store| store.get_definition(id))
         {
             self.definitions.insert(id, definition);
         }
@@ -250,7 +280,7 @@ impl Graph {
             return;
         }
         if let Some(store) = &self.store
-            && let Ok(Some(document)) = store.get_document(id)
+            && let Some(document) = read_store(store, &self.store_errors, |store| store.get_document(id))
         {
             self.documents.insert(id, document);
         }
@@ -263,7 +293,7 @@ impl Graph {
             return;
         }
         if let Some(store) = &self.store
-            && let Ok(Some(name)) = store.get_name(id)
+            && let Some(name) = read_store(store, &self.store_errors, |store| store.get_name(id))
         {
             self.names.insert(id, name);
         }
@@ -276,7 +306,7 @@ impl Graph {
             return;
         }
         if let Some(store) = &self.store
-            && let Ok(Some(dependents)) = store.get_name_dependents(id)
+            && let Some(dependents) = read_store(store, &self.store_errors, |store| store.get_name_dependents(id))
         {
             self.name_dependents.insert(id, dependents);
         }
@@ -292,7 +322,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(declaration)) = store.get_declaration(id)
+            && let Some(declaration) = read_store(store, &self.store_errors, |store| store.get_declaration(id))
         {
             return Some(NodeRef::Stored(Box::new(declaration)));
         }
@@ -308,7 +338,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(definition)) = store.get_definition(id)
+            && let Some(definition) = read_store(store, &self.store_errors, |store| store.get_definition(id))
         {
             return Some(NodeRef::Stored(Box::new(definition)));
         }
@@ -324,9 +354,14 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        store
+        let names = store
             .search_names()
-            .unwrap_or_default()
+            .map_err(|error| {
+                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
+            })
+            .unwrap_or_default();
+        names
             .into_iter()
             .filter(|(id, _)| !self.is_tombstoned(id.get()))
             .collect()
@@ -353,6 +388,10 @@ impl Graph {
         };
         store
             .declaration_ids_matching(&|id, name| !self.is_tombstoned(id.get()) && predicate(id, name))
+            .map_err(|error| {
+                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
+            })
             .unwrap_or_default()
     }
 
@@ -374,10 +413,14 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        store
+        let uris = store
             .document_uris()
-            .unwrap_or_default()
-            .into_iter()
+            .map_err(|error| {
+                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
+            })
+            .unwrap_or_default();
+        uris.into_iter()
             .filter(|(id, _)| !self.is_tombstoned(id.get()))
             .collect()
     }
@@ -397,12 +440,14 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        store
+        let ids = store
             .definition_ids()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|id| !self.is_tombstoned(id.get()))
-            .collect()
+            .map_err(|error| {
+                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
+            })
+            .unwrap_or_default();
+        ids.into_iter().filter(|id| !self.is_tombstoned(id.get())).collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
@@ -421,7 +466,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(name)) = store.get_name(id)
+            && let Some(name) = read_store(store, &self.store_errors, |store| store.get_name(id))
         {
             return Some(NodeRef::Stored(Box::new(name)));
         }
@@ -437,7 +482,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(reference)) = store.get_constant_reference(id)
+            && let Some(reference) = read_store(store, &self.store_errors, |store| store.get_constant_reference(id))
         {
             return Some(NodeRef::Stored(Box::new(reference)));
         }
@@ -453,7 +498,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(reference)) = store.get_method_reference(id)
+            && let Some(reference) = read_store(store, &self.store_errors, |store| store.get_method_reference(id))
         {
             return Some(NodeRef::Stored(Box::new(reference)));
         }
@@ -469,7 +514,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(document)) = store.get_document(id)
+            && let Some(document) = read_store(store, &self.store_errors, |store| store.get_document(id))
         {
             return Some(NodeRef::Stored(Box::new(document)));
         }
@@ -485,7 +530,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(string)) = store.get_string(id)
+            && let Some(string) = read_store(store, &self.store_errors, |store| store.get_string(id))
         {
             return Some(NodeRef::Stored(Box::new(string)));
         }
@@ -500,7 +545,7 @@ impl Graph {
         if !self.declarations.contains_key(&id)
             && !self.is_tombstoned(id.get())
             && let Some(store) = &self.store
-            && let Ok(Some(declaration)) = store.get_declaration(id)
+            && let Some(declaration) = read_store(store, &self.store_errors, |store| store.get_declaration(id))
         {
             self.declarations.insert(id, declaration);
         }
