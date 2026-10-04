@@ -61,7 +61,13 @@ pub struct DiagnosticArray {
 }
 
 impl DiagnosticArray {
-    fn from_vec(mut entries: Vec<DiagnosticEntry>) -> *mut DiagnosticArray {
+    fn from_vec(entries: Vec<DiagnosticEntry>) -> *mut DiagnosticArray {
+        // Shrink to the exact length first: `rdx_diagnostics_free` rebuilds a `Box<[DiagnosticEntry]>`
+        // from (items, len), and that Box frees `len * size_of::<DiagnosticEntry>()` bytes. Leaking a
+        // Vec keeps its geometric capacity, so a `filter_map().collect()` (which cannot use the
+        // TrustedLen exact-size specialization) leaves spare capacity and the free size no longer
+        // matches the allocation — jemalloc aborts on that, glibc silently tolerates it.
+        let mut entries = entries.into_boxed_slice();
         let len = entries.len();
         let ptr = entries.as_mut_ptr();
         mem::forget(entries);
