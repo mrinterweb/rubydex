@@ -35,6 +35,9 @@ cargo_args << "$(CARGO_PROFILE_FLAG)"
 # needs Process#fork, unavailable on Windows, so index_workspace falls back to in-memory there;
 # attach_store/open_store can still read a prebuilt store on Windows.
 cargo_args << "--features rubydex-sys/redb-store" if ENV["RUBYDEX_REDB_STORE"]
+# Allocator invariant checks (double free, sized-deallocation mismatch). Debug jemalloc only; the
+# released build never enables it.
+cargo_args << "--features rubydex/jemalloc_debug" if ENV["RUBYDEX_JEMALLOC_DEBUG"]
 
 if Gem.win_platform?
   cargo_args << "--target x86_64-pc-windows-gnu"
