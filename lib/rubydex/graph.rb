@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "fileutils"
+
 module Rubydex
   # The global graph representing all declarations and their relationships for the workspace
   #
@@ -38,6 +40,8 @@ module Rubydex
       cache = store_cache_path
       build_store_via_fork(cache) unless File.exist?(cache) && store_fresh?(cache)
       attach_store(cache)
+      return index_all(workspace_paths) if quarantine_untrustworthy_store(cache)
+
       []
     rescue StandardError, NotImplementedError => e
       # NotImplementedError (from `fork`) is < ScriptError, not < StandardError, so list it
@@ -157,6 +161,20 @@ module Rubydex
     def store_fresh?(cache)
       marker = "#{cache}.hash"
       File.exist?(marker) && File.read(marker) == store_signature
+    end
+
+    # Moves an untrustworthy store out of the cache path; returns true when it did. A store that
+    # failed to decode (corrupt, or written by an incompatible layout) must not keep answering
+    # queries with holes. Quarantining drops the freshness marker with it, so the next run rebuilds
+    # instead of re-reading the same bad file.
+    #: (String cache) -> bool
+    def quarantine_untrustworthy_store(cache)
+      return false unless respond_to?(:store_errors) && store_errors.positive?
+
+      warn("rubydex: disk-backed index returned errors; quarantining the store and indexing in memory")
+      FileUtils.mv(cache, "#{cache}.corrupt", force: true)
+      FileUtils.rm_f("#{cache}.hash")
+      true
     end
 
     # Builds the store in a short-lived child process (whose peak indexing memory is reclaimed

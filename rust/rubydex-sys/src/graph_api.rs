@@ -146,6 +146,28 @@ pub unsafe extern "C" fn rdx_graph_attach_store(pointer: GraphPointer, path: *co
     })
 }
 
+/// Returns the number of store reads that failed since the graph was created or last attached a
+/// store. Zero means the disk index answered everything; non-zero means it is corrupt or was
+/// written by an incompatible layout, and the Ruby layer should fall back to the in-memory index.
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_store_errors(pointer: GraphPointer) -> u64 {
+    with_graph(pointer, |graph| {
+        #[cfg(feature = "redb-store")]
+        {
+            graph.store_error_count() as u64
+        }
+        #[cfg(not(feature = "redb-store"))]
+        {
+            let _ = graph;
+            0
+        }
+    })
+}
+
 /// Searches the graph using exact substring matching, returning every declaration whose name matches any of the
 /// queries.
 ///

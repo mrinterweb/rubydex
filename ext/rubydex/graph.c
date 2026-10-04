@@ -1001,6 +1001,15 @@ static VALUE rdxr_graph_open_store(VALUE klass, VALUE path) {
     return TypedData_Wrap_Struct(klass, &graph_type, graph);
 }
 
+// Graph#store_errors: () -> Integer. Non-zero means the disk index is not trustworthy and the
+// session should fall back to indexing in memory.
+static VALUE rdxr_graph_store_errors(VALUE self) {
+    void *graph;
+    TypedData_Get_Struct(self, void *, &graph_type, graph);
+
+    return ULL2NUM(rdx_graph_store_errors(graph));
+}
+
 void rdxi_initialize_graph(VALUE moduleRubydex) {
     mRubydex = moduleRubydex;
     cGraph = rb_define_class_under(mRubydex, "Graph", rb_cObject);
@@ -1020,6 +1029,7 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "document", rdxr_graph_document, 1);
     rb_define_method(cGraph, "delete_document", rdxr_graph_delete_document, 1);
     rb_define_method(cGraph, "resolve", rdxr_graph_resolve, 0);
+    rb_define_method(cGraph, "store_errors", rdxr_graph_store_errors, 0);
     rb_define_method(cGraph, "resolve_constant", rdxr_graph_resolve_constant, 2);
     rb_define_method(cGraph, "declarations", rdxr_graph_declarations, 0);
     rb_define_method(cGraph, "documents", rdxr_graph_documents, 0);

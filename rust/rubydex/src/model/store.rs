@@ -122,13 +122,24 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the database cannot be opened.
-    pub fn open(path: &Path) -> Result<Self, redb::Error> {
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
         // Cap redb's in-heap page cache so a long-lived server stays lean; the OS still caches the
         // file, so a cache miss is a RAM hit (not disk) and costs ~0.15 ms. 8 MiB is the measured
         // sweet spot (~26 MB less RSS than 32 MiB, negligible latency).
-        Ok(Self {
-            db: Database::builder().set_cache_size(8 * 1024 * 1024).open(path)?,
-        })
+        //
+        // Opening reads redb's internal allocator state, and its B-tree code asserts (`unreachable!`)
+        // on a damaged page rather than returning an error. That panic must not escape: this runs
+        // under `extern "C"` at the Ruby boundary, where an unwind turns into a process abort.
+        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Database::builder().set_cache_size(8 * 1024 * 1024).open(path)
+        }));
+        match opened {
+            Ok(Ok(db)) => Ok(Self { db }),
+            Ok(Err(error)) => Err(StoreError::Open(error.into())),
+            Err(_) => Err(StoreError::Open(redb::Error::Io(std::io::Error::other(
+                "redb panicked while opening the store; the file is damaged or not a rubydex store",
+            )))),
+        }
     }
 
     /// Builds an on-disk store at `path` from a fully-indexed, resolved graph, writing every node

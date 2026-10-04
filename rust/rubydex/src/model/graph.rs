@@ -22,23 +22,64 @@ use crate::model::visibility::Visibility;
 use crate::{assert_mem_size, assert_send_sync};
 use crate::{query, stats};
 
-/// Reads a node from the store, recording a failure instead of dropping it. A corrupt node must be
-/// visible to the caller: silently answering "absent" would hand back wrong results, and panicking
-/// would abort the host process (a panic inside `extern "C"` cannot unwind).
+/// Records a failed store read: bumps the counter and explains itself once, on stderr.
+#[cfg(feature = "redb-store")]
+fn record_store_error(errors: &std::sync::atomic::AtomicUsize, error: impl std::fmt::Display) {
+    errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // A one-line stderr note: the Ruby layer reads the counter and falls back to the in-memory
+    // index, so this only has to explain what the counter is reacting to.
+    eprintln!("rubydex: disk index read failed ({error}); the store is not trustworthy");
+}
+
+/// Reads a node from the store, turning any failure into `None` plus a recorded error.
+///
+/// Two failure modes have to be absorbed, because a panic inside `extern "C"` aborts the host
+/// process instead of surfacing an error to ruby-lsp:
+/// 1. a decode failure, returned as [`StoreError::Corrupt`];
+/// 2. a panic from inside redb itself — its B-tree code asserts on damaged pages rather than
+///    returning an error, so a corrupted database aborts the process unless it is caught here.
 #[cfg(feature = "redb-store")]
 fn read_store<T>(
     store: &crate::model::store::RedbStore,
     errors: &std::sync::atomic::AtomicUsize,
     read: impl FnOnce(&crate::model::store::RedbStore) -> Result<Option<T>, crate::model::store::StoreError>,
 ) -> Option<T> {
-    match read(store) {
-        Ok(node) => node,
-        Err(error) => {
-            errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // A one-line stderr note: the Ruby layer reads the counter and falls back to the
-            // in-memory index, so this only has to explain what the counter is reacting to.
-            eprintln!("rubydex: disk index read failed ({error}); the store is not trustworthy");
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(store))) {
+        Ok(Ok(node)) => node,
+        Ok(Err(error)) => {
+            record_store_error(errors, error);
             None
+        }
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map_or("panicked inside the store", |message| *message);
+            record_store_error(errors, format_args!("corrupt store ({message})"));
+            None
+        }
+    }
+}
+
+/// Runs a whole-table store scan under the same guarantees as [`read_store`]: a redb failure or
+/// panic yields an empty result and a recorded error, never a silent empty answer.
+#[cfg(feature = "redb-store")]
+fn scan_store<T>(
+    store: &crate::model::store::RedbStore,
+    errors: &std::sync::atomic::AtomicUsize,
+    scan: impl FnOnce(&crate::model::store::RedbStore) -> Result<Vec<T>, redb::Error>,
+) -> Vec<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan(store))) {
+        Ok(Ok(items)) => items,
+        Ok(Err(error)) => {
+            record_store_error(errors, error);
+            Vec::new()
+        }
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map_or("panicked inside the store", |message| *message);
+            record_store_error(errors, format_args!("corrupt store ({message})"));
+            Vec::new()
         }
     }
 }
@@ -314,6 +355,17 @@ impl Graph {
 
     /// Looks up a declaration by ID, checking the in-memory graph first, then the disk-backed store.
     /// Returns a `DeclRef` that derefs to `&Declaration` regardless of which layer it came from.
+    /// Number of store reads that failed since the graph was created or last attached a store.
+    /// Non-zero means the disk index is corrupt or was written by an incompatible layout; callers
+    /// should fall back to the in-memory index.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_error_count(&self) -> usize {
+        self.store_errors.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Looks up a declaration by ID, checking the in-memory graph first, then the disk-backed store.
+    /// Returns a `DeclRef` that derefs to `&Declaration` regardless of which layer it came from.
     #[must_use]
     pub fn declaration(&self, id: DeclarationId) -> Option<DeclRef<'_>> {
         if let Some(declaration) = self.declarations.get(&id) {
@@ -386,13 +438,9 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        store
-            .declaration_ids_matching(&|id, name| !self.is_tombstoned(id.get()) && predicate(id, name))
-            .map_err(|error| {
-                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
-            })
-            .unwrap_or_default()
+        scan_store(store, &self.store_errors, |store| {
+            store.declaration_ids_matching(&|id, name| !self.is_tombstoned(id.get()) && predicate(id, name))
+        })
     }
 
     #[cfg(not(feature = "redb-store"))]
