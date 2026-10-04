@@ -53,3 +53,25 @@ Detailed plans: `docs/disk-persisted-index/plan-differential-harness.md` (curren
 - 2026-10-01: transient SIGSEGV in rake ruby_test after manual double-extconf (build state); 4 consecutive green runs since.
 - Session-profile crash (P1): `rdx_graph_resolve_constant` aborted the process on store-backed graphs. Root cause: hash-derived raw u64 id spaces overlap (StringId==DeclarationId for same name) + refcount cleanup tombstoning store-held ids. Fixed in `7a27716` (tombstone guard + FFI null guards).
 - FFI/C/Ruby signatures stable; fix bugs in Rust core or FFI internals, not the C ABI.
+
+## Post-rebase hardening plan — executed (all signed, pushed)
+
+Plan: `docs/disk-persisted-index/plan-post-rebase-hardening.md`. Executed inline 2026-10.
+
+- [x] A1 stdlib differential after rebase: 327.9s release, 0 divergence
+- [x] A2 memory re-measured: disk 60 MB final, search 105 ms/op, hover 0.22 ms; no regression
+- [x] A3 Cleanup attributed: redb write 4.49s; drop 10 ms
+- [x] B1 StoreError + error counting (`375d1ec`)
+- [x] B2 corrupt-store fallback + catch_unwind on open/read/scan (`6f856c8`)
+- [x] B3 STORE_FORMAT_VERSION freshness key (`c991d60`)
+- [x] B4 full round-trip harness, field-fidelity (`5c9267a`)
+- [x] C1 parallel search scan: floor 34 -> 3.5-11 ms/op measured (`541d76a`)
+- [x] C2 build write attributed, accepted (`711980f`)
+- [x] C3 overlay bounded after 500 edit rounds — no LRU needed (`d0d3493`)
+- [x] D1 debug-jemalloc CI job + D2 no-feature CI job (`3e7c917`)
+- [x] D3 Windows disk-index tests in CI + D4 docs tracked (`22fe86d`)
+- [x] E lint wave green; all commits SSH-signed and pushed (`efaf107`)
+
+Remaining (deferred): live-edit fuzzer/soak (Phase 2), write-back design,
+Windows disk-index CI result once the job runs on a runner, n-gram index only
+if measured need.
