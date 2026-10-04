@@ -69,4 +69,43 @@ class DiskIndexLiveEditTest < Minitest::Test
   ensure
     Process.define_singleton_method(:spawn, original_spawn) if original_spawn
   end
+  def test_store_signature_tracks_layout_version_not_gem_version
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
+    baseline = graph.send(:store_signature)
+
+    # The gem version is not part of the signature, so changing it must not change the signature.
+    with_stubbed_const(Rubydex, :VERSION, "9.9.9") do
+      assert_equal baseline, graph.send(:store_signature),
+        "the gem version must not invalidate a store whose layout is unchanged"
+    end
+
+    # The layout version is a method backed by the FFI constant (STORE_FORMAT_VERSION in
+    # rust/rubydex/src/model/store.rs); stubbing the method stubs the constant.
+    with_stubbed_method(Rubydex::Graph.singleton_class, :store_format_version, 999_999) do
+      refute_equal baseline, graph.send(:store_signature),
+        "a store-layout change must invalidate the store"
+    end
+  end
+
+  def with_stubbed_const(owner, name, value)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, value)
+    yield
+  ensure
+    owner.send(:remove_const, name)
+    owner.const_set(name, original)
+  end
+
+  def with_stubbed_method(owner, name, value)
+    # Alias-restore, not define+remove: the original may be a C method, and remove_method after a
+    # Ruby redefinition deletes it for the rest of the process (order-dependent suite breakage).
+    original = "#{name}_original_for_stub"
+    owner.alias_method(original, name)
+    owner.define_method(name) { value }
+    yield
+  ensure
+    owner.alias_method(name, original)
+    owner.remove_method(original)
+  end
 end

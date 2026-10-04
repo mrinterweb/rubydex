@@ -105,6 +105,12 @@ impl std::error::Error for StoreError {
     }
 }
 
+/// Layout version of the persisted store. Bump this when a node's serialized shape, a table's key
+/// scheme, or the set of tables changes — anything that makes an older store unreadable or
+/// semantically stale. The gem version deliberately does NOT participate: a release that does not
+/// touch the layout would otherwise force every user to re-index.
+pub const STORE_FORMAT_VERSION: u32 = 1;
+
 /// A redb-backed node store.
 pub struct RedbStore {
     db: Database,

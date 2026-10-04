@@ -106,11 +106,22 @@ module Rubydex
     # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
     # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
     #: -> String
+    # Layout version of the persisted store, owned by the Rust side: it is what makes an older
+    # store unreadable, not the gem version. Cached: it never changes within a process.
+    def self.store_format_version
+      @store_format_version ||= rdx_store_format_version
+    rescue NoMethodError
+      # Built without the redb-store feature: nothing is ever persisted, so any value works.
+      0
+    end
+
+
     def store_signature
       require "digest"
-      # The gem version is part of the key so store schema changes (e.g. new tables) invalidate
-      # existing stores instead of silently degrading against an old layout.
-      Digest::SHA1.hexdigest(Rubydex::VERSION + lockfile_hash + workspace_source_signature)
+      # The layout version is part of the key so a store written by an incompatible layout is
+      # invalidated instead of silently degrading against it. The gem version deliberately does not
+      # participate: a release that leaves the layout untouched must not force a full re-index.
+      Digest::SHA1.hexdigest(self.class.store_format_version.to_s + lockfile_hash + workspace_source_signature)
     end
 
     # SHA of the workspace Gemfile.lock, used to invalidate the store when dependencies change.
