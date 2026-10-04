@@ -25,7 +25,6 @@ fn corpus_dir() -> PathBuf {
 /// Indexes + resolves every Ruby file under `root` into a fresh in-memory graph.
 fn build_graph_from(root: &Path) -> Graph {
     let mut graph = Graph::new();
-    graph.set_workspace_path(root.to_path_buf());
     let (files, _errors) = collect_file_paths(
         vec![root.to_string_lossy().into_owned()],
         &graph.excluded_patterns(),

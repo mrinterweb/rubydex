@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn untracking_overlay_names_does_not_tombstone_store_nodes() {
-        use crate::model::name::{Name, ParentScope};
+        use crate::model::name::ParentScope;
 
         // StringId, NameId and DeclarationId all derive from name hashes, so their raw u64
         // spaces overlap: StringId::from("Object") == DeclarationId::from("Object"). In a
@@ -434,7 +434,7 @@ mod tests {
 
         // One FFI resolve_constant cycle: intern the string, register the name, untrack it.
         let sid = graph.intern_string("Object".to_string());
-        let name_id = graph.add_name(Name::new(sid, ParentScope::None, None));
+        let name_id = graph.add_name(sid, ParentScope::None, None);
         graph.untrack_name(name_id);
 
         assert!(
@@ -444,7 +444,7 @@ mod tests {
         // Repeat: the transient name is recreated on every query and must stay harmless.
         for _ in 0..3 {
             let sid = graph.intern_string("Object".to_string());
-            let name_id = graph.add_name(Name::new(sid, ParentScope::None, None));
+            let name_id = graph.add_name(sid, ParentScope::None, None);
             graph.untrack_name(name_id);
         }
         assert!(graph.declaration(d).is_some(), "store-backed declaration must stay resolvable");
@@ -511,9 +511,10 @@ mod tests {
 
         // Build a class declaration with a member (exercises the nested enum + macro struct +
         // IdentityHashMap<StringId, DeclarationId> serialization, which is the real risk).
-        let mut class = ClassDeclaration::new("Foo".to_string(), DeclarationId::from("Object"));
-        class.add_member(StringId::from("bar"), DeclarationId::from("Foo::bar"));
-        let decl = Declaration::Namespace(Namespace::Class(Box::new(class)));
+        let class = ClassDeclaration::new("Foo".to_string(), DeclarationId::from("Object"));
+        let mut namespace = Namespace::Class(Box::new(class));
+        namespace.add_member(StringId::from("bar"), DeclarationId::from("Foo::bar"));
+        let decl = Declaration::Namespace(namespace);
 
         let id = DeclarationId::from("Foo");
         let before = postcard::to_allocvec(&decl).expect("serialize");
@@ -555,9 +556,10 @@ mod tests {
             .expect("put Bar");
 
         // Update Foo in place (add a member) and delete Bar.
-        let mut foo = class("Foo");
-        foo.add_member(StringId::from("baz"), DeclarationId::from("Foo::baz"));
-        let foo_updated = Declaration::Namespace(Namespace::Class(Box::new(foo)));
+        let foo = class("Foo");
+        let mut namespace = Namespace::Class(Box::new(foo));
+        namespace.add_member(StringId::from("baz"), DeclarationId::from("Foo::baz"));
+        let foo_updated = Declaration::Namespace(namespace);
         store.put_declaration(foo_id, &foo_updated).expect("update Foo");
         assert!(store.delete_declaration(bar_id).expect("delete Bar"), "Bar existed");
 
@@ -657,7 +659,7 @@ mod tests {
         // Document (from the store), invalidate it, and apply the new one — not panic.
         let new_source = "class Foo\n  def baz; end\nend\n";
         let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
-        crate::indexing::index_source(&mut graph, &uri, new_source, &crate::indexing::LanguageId::Ruby);
+        crate::indexing::index_source(&mut graph, uri.clone().into(), new_source, &crate::indexing::LanguageId::Ruby);
 
         // The new method definition (baz) must be visible in the overlay. Method definitions store
         // their name as a str_id (unresolved at this stage), so check via the string table.
@@ -700,7 +702,7 @@ mod tests {
         // Live edit: replace bar with baz, then resolve. The resolver must see the overlay
         // document and rewrite the store-backed declaration through the layered accessors.
         let uri = url::Url::from_file_path(&rb_path).unwrap().to_string();
-        index_source(&mut graph, &uri, "class Foo\n  def baz; end\nend\n", &LanguageId::Ruby);
+        index_source(&mut graph, uri.clone().into(), "class Foo\n  def baz; end\nend\n", &LanguageId::Ruby);
         Resolver::new(&mut graph).resolve();
 
         let foo = graph.declaration(foo_id).expect("Foo after edit");
@@ -971,7 +973,7 @@ mod tests {
 
         // Edit a.rb away the method, so its old nodes are removed from the overlay.
         std::fs::write(&a_path, "class A\nend\n").expect("rewrite a");
-        let mut indexer = RubyIndexer::new(a_uri, "class A\nend\n");
+        let mut indexer = RubyIndexer::new(a_uri.into(), "class A\nend\n");
         indexer.index();
         graph.consume_document_changes(indexer.local_graph());
         Resolver::new(&mut graph).resolve();

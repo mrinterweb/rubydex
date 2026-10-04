@@ -104,7 +104,7 @@ pub unsafe extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPoint
     #[cfg(feature = "redb-store")]
     {
         match rubydex::model::store::RedbStore::open(std::path::Path::new(&path)) {
-            Ok(store) => Box::into_raw(Box::new(Graph::with_store(store))) as GraphPointer,
+            Ok(store) => Box::into_raw(Box::new(RwLock::new(Graph::with_store(store)))) as GraphPointer,
             Err(_) => ptr::null_mut(),
         }
     }
@@ -1353,9 +1353,9 @@ mod tests {
         RedbStore::build(&store_path, &graph).expect("build store");
         drop(graph); // the nodes live only in the store now
 
-        let graph_ptr = Box::into_raw(Box::new(Graph::with_store(
+        let graph_ptr = Box::into_raw(Box::new(RwLock::new(Graph::with_store(
             RedbStore::open(&store_path).expect("open store"),
-        ))) as GraphPointer;
+        )))) as GraphPointer;
 
         unsafe {
             // In-memory-only lookups: these returned NULL for store-backed nodes, which killed
@@ -1391,7 +1391,7 @@ mod tests {
             drop(Box::from_raw(doc.cast_mut()));
         };
 
-        drop(unsafe { Box::from_raw(graph_ptr.cast::<Graph>()) });
+        drop(unsafe { Box::from_raw(graph_ptr.cast::<RwLock<Graph>>()) });
     }
 
     #[test]
