@@ -485,6 +485,16 @@ pub unsafe extern "C" fn rdx_graph_disk_index_enabled(pointer: GraphPointer) -> 
     with_graph(pointer, |graph| u64::from(graph.disk_index_enabled()))
 }
 
+/// Returns whether the workspace opted into the machine-wide background manager.
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_disk_index_manager(pointer: GraphPointer) -> u64 {
+    with_graph(pointer, |graph| u64::from(graph.disk_index_manager()))
+}
+
 /// Returns where the store lives as configured: `"tmp"`, `"global"`, an absolute directory, or an
 /// empty string when the workspace left it to the context-aware default. Caller must free with
 /// `free_c_string`.

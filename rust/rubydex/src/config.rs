@@ -191,6 +191,11 @@ pub struct DiskIndexSettings {
     /// directory. Empty means unconfigured, and the context-aware default decides (workspace
     /// `tmp/` when one exists, the platform cache directory otherwise).
     location: Box<str>,
+    /// Whether a workspace asks for the machine-wide background manager, which keeps the store
+    /// fresh between sessions without a session paying for it. Defaults to false: the manager
+    /// is opt-in, and sessions stay correct without it (they fall back to the git fast path and
+    /// the stat walk).
+    manager: bool,
 }
 
 impl Default for DiskIndexSettings {
@@ -200,6 +205,7 @@ impl Default for DiskIndexSettings {
         Self {
             enabled: false,
             location: Box::from(""),
+            manager: false,
         }
     }
 }
@@ -221,6 +227,13 @@ impl DiskIndexSettings {
                 .map_err(|error| format!("invalid `disk_index.location` setting: {error}"))?,
         };
 
+        let manager = match table.remove("manager") {
+            None => false,
+            Some(value) => value
+                .try_into::<bool>()
+                .map_err(|error| format!("invalid `disk_index.manager` setting: {error}"))?,
+        };
+
         // A relative location is ambiguous: it would mean different things depending on the
         // process's working directory, which is not what the workspace configured it for.
         if !(location.is_empty()
@@ -237,7 +250,11 @@ impl DiskIndexSettings {
             return Err(format!("unknown setting `disk_index.{key}`"));
         }
 
-        Ok(DiskIndexSettings { enabled, location })
+        Ok(DiskIndexSettings {
+            enabled,
+            location,
+            manager,
+        })
     }
 
     /// Whether the disk-backed index runs for this workspace
@@ -251,6 +268,12 @@ impl DiskIndexSettings {
     #[must_use]
     pub fn location(&self) -> Box<str> {
         Box::from(self.location.as_ref())
+    }
+
+    /// Whether the workspace opts into the machine-wide background manager
+    #[must_use]
+    pub fn manager(&self) -> bool {
+        self.manager
     }
 }
 
@@ -778,6 +801,27 @@ mod tests {
 
         assert!(!config.disk_index.enabled);
         assert!(config.disk_index.location.is_empty());
+        assert!(
+            !config.disk_index.manager,
+            "the background manager stays off until asked for"
+        );
+    }
+
+    #[test]
+    fn disk_index_accepts_the_manager_setting() {
+        let config = parse("[disk_index]\nenabled = true\nmanager = true\n").expect("manager is a boolean opt-in");
+
+        assert!(
+            config.disk_index.manager,
+            "the workspace opts into the background manager"
+        );
+    }
+
+    #[test]
+    fn disk_index_rejects_a_non_boolean_manager_setting() {
+        let error = parse("[disk_index]\nmanager = \"yes\"\n").expect_err("manager must be a boolean");
+
+        assert!(error.contains("disk_index.manager"), "unexpected error: {error}");
     }
 
     #[test]

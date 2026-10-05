@@ -18,7 +18,7 @@ fn batch_contains(source: &mut NotifySource, file: &Path) -> bool {
 fn adapter_reports_a_created_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(vec![root.clone()], Duration::from_millis(50));
+    let mut source = NotifySource::new(std::slice::from_ref(&root), Duration::from_millis(50));
     let file = root.join("a.rb");
     std::fs::write(&file, "class A; end").expect("write");
     assert!(
@@ -31,7 +31,7 @@ fn adapter_reports_a_created_file() {
 fn adapter_reports_a_modified_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(vec![root.clone()], Duration::from_millis(50));
+    let mut source = NotifySource::new(std::slice::from_ref(&root), Duration::from_millis(50));
     let file = root.join("a.rb");
     std::fs::write(&file, "class A; end").expect("write");
     assert!(
@@ -49,7 +49,7 @@ fn adapter_reports_a_modified_file() {
 fn adapter_reports_a_deleted_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(vec![root.clone()], Duration::from_millis(50));
+    let mut source = NotifySource::new(std::slice::from_ref(&root), Duration::from_millis(50));
     let file = root.join("a.rb");
     std::fs::write(&file, "class A; end").expect("write");
     assert!(
@@ -67,7 +67,7 @@ fn adapter_reports_a_deleted_file() {
 fn adapter_coalesces_a_burst_into_one_batch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(vec![root.clone()], Duration::from_millis(200));
+    let mut source = NotifySource::new(std::slice::from_ref(&root), Duration::from_millis(200));
     let files = vec![root.join("a.rb"), root.join("b.rb"), root.join("c.rb")];
     for file in &files {
         std::fs::write(file, "class A; end").expect("write");

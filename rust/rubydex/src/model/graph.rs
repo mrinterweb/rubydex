@@ -723,6 +723,13 @@ impl Graph {
         self.config.disk_index().location()
     }
 
+    /// Returns whether the workspace's `[disk_index]` section opted into the machine-wide
+    /// background manager. The Ruby side layers an environment override on top.
+    #[must_use]
+    pub fn disk_index_manager(&self) -> bool {
+        self.config.disk_index().manager()
+    }
+
     /// Loads a config for the graph
     pub fn load_config(&mut self, config: &Config) {
         self.config = config.clone();

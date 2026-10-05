@@ -55,6 +55,15 @@ end
 # Enhance the clean task to also clean Rust artifacts
 Rake::Task[:clean].enhance([:clean_rust])
 
+desc "Build the background index manager next to the extension"
+task :index_manager do
+  binary = Gem.win_platform? ? "rubydex-index-manager.exe" : "rubydex-index-manager"
+  sh "cargo build --release -p rubydex-index-manager", chdir: "rust"
+  cp "rust/target/release/#{binary}", "lib/rubydex/#{binary}"
+end
+
+Rake::Task[:compile].enhance([:index_manager])
+
 desc "Generate the Ruby classes for the graph's built-in rules"
 task :generate_rules do
   sh "cargo run --quiet --bin generate_ruby_rules", chdir: "rust"

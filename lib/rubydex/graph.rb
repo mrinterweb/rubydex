@@ -2,6 +2,7 @@
 
 require "English"
 require "fileutils"
+require "rubydex/index_manager"
 
 module Rubydex
   # The global graph representing all declarations and their relationships for the workspace
@@ -59,6 +60,7 @@ module Rubydex
       return index_all(workspace_paths) if quarantine_untrustworthy_store(cache)
 
       @attached_signature = store_signature
+      register_session(cache) if index_manager_enabled?
 
       []
     rescue StandardError, NotImplementedError => e
@@ -147,6 +149,23 @@ module Rubydex
       false
     end
 
+    # Makes this session visible to the machine-wide manager and starts the manager when none is
+    # live. The registry handle stays referenced for the process lifetime, which is what keeps the
+    # session's lock held and the session listed. Sessions stay correct without the manager: this
+    # is an optimization, never a dependency.
+    #: (String cache) -> nil
+    def register_session(cache)
+      registry = File.join(platform_cache_root, "rubydex", "manager", "sessions")
+      @session_handle = Rubydex::IndexManager.register(
+        workspace: workspace_path,
+        store: cache,
+        builder: Rubydex::IndexManager.builder_argv(workspace_path, cache),
+        docs: workspace_paths.size,
+        registry: registry,
+      )
+      Rubydex::IndexManager.launch_if_absent(registry)
+    end
+
     # Create-exclusive rebuild lock: `Dir.mkdir` raises `Errno::EEXIST` atomically, so N
     # stale sessions (two editors plus an agent server on one directory) pay one rebuild. A lock
     # left by a crashed builder expires on mtime instead of wedging the directory forever.
@@ -196,6 +215,17 @@ module Rubydex
       return env == "1" || env == "true" if env
 
       disk_index_enabled
+    end
+
+    # Whether this workspace wants the machine-wide background manager that keeps its store fresh
+    # between sessions. The env var wins so CI and one-off runs can flip it without editing the
+    # committed configuration.
+    #: -> bool
+    def index_manager_enabled?
+      env = ENV["RUBYDEX_INDEX_MANAGER"]
+      return env == "1" || env == "true" if env
+
+      disk_index_manager
     end
 
     # Path of the on-disk store for this workspace. Location precedence:
