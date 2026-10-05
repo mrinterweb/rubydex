@@ -11,7 +11,7 @@ module Rubydex
   module MCPServer
     SERVER_INSTRUCTIONS = <<~TEXT
       Tools query a static index of workspace code, available bundle dependencies, and available Ruby core and standard-library RBS definitions.
-      The index is built at server startup and does not track file changes; restart the server to refresh it.
+      The index is built at server startup; out-of-band changes (a branch switch, a terminal edit) are picked up at the next tool call, when the freshness marker shows the store is stale.
     TEXT
 
     class Server
@@ -191,6 +191,12 @@ module Rubydex
 
         graph = graph_or_error
         return Tool::Response.new([{ type: "text", text: JSON.generate(graph) }]).to_h if graph.is_a?(Error)
+
+        # A branch switch is a filesystem event no session owns, so the freshness marker is what
+        # notices. Reopening is per-session (redb pins a snapshot at open), so every live session
+        # in the directory converges at its own next tool call; only the first to claim the
+        # rebuild lock pays the rebuild, the rest pay the ~71 ms reopen.
+        graph.resolve if graph.refresh_if_stale
 
         response = tool.new(graph).call(**arguments.transform_keys(&:to_sym))
         response.to_h
