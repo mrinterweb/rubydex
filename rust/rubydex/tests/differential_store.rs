@@ -511,3 +511,130 @@ fn differential_memory_vs_store() {
         assert_eq!(m.1, s.1, "divergence in case {}", m.0);
     }
 }
+
+/// Copies the fixture corpus into `dir/ws` so edits can be applied in place. URIs embed absolute
+/// paths, so the store build and the fresh reference build must see the same paths.
+fn copy_corpus(dir: &Path) -> PathBuf {
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).expect("mkdir ws");
+    for entry in std::fs::read_dir(corpus_dir()).expect("read corpus") {
+        let entry = entry.expect("dir entry");
+        std::fs::copy(entry.path(), ws.join(entry.file_name())).expect("copy fixture");
+    }
+    ws
+}
+
+/// Edit differential: build a store from the corpus, apply `edits` to the store-backed graph through
+/// the live-edit API (exactly what a surgical refresh does), resolve, and require every probe to match
+/// a fresh in-memory build of the edited corpus. `Some(src)` writes/replaces a file, `None` deletes it.
+fn edit_case(edits: &[(&str, Option<&str>)]) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ws = copy_corpus(dir.path());
+    let mut store_graph = build_store_graph_from(&ws, dir.path());
+
+    for (file, content) in edits {
+        let path = ws.join(file);
+        let uri = url::Url::from_file_path(&path).expect("file uri").to_string();
+        if let Some(source) = content {
+            std::fs::write(&path, source).expect("write edit");
+            rubydex::indexing::index_source(
+                &mut store_graph,
+                uri.into(),
+                source,
+                &rubydex::indexing::LanguageId::Ruby,
+            );
+        } else {
+            std::fs::remove_file(&path).expect("delete file");
+            store_graph.delete_document(&uri);
+        }
+    }
+    Resolver::new(&mut store_graph).resolve();
+
+    let memory = build_graph_from(&ws);
+    let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
+    let mut mem_probe = Vec::new();
+    probe_all(&memory, &name_ids, 0, &mut mem_probe);
+    let mut store_probe = Vec::new();
+    probe_all(&store_graph, &name_ids, 0, &mut store_probe);
+    normalize(&mut mem_probe);
+    normalize(&mut store_probe);
+
+    let diverged: Vec<String> = mem_probe
+        .iter()
+        .zip(store_probe.iter())
+        .filter(|(m, s)| m != s)
+        .map(|(m, s)| format!("{}\n  memory: {}\n  store:  {}", m.0, m.1, s.1))
+        .collect();
+    assert!(
+        mem_probe.len() == store_probe.len() && diverged.is_empty(),
+        "edit differential: {} vs {} probes, {} diverged:\n{}",
+        mem_probe.len(),
+        store_probe.len(),
+        diverged.len(),
+        diverged.iter().take(8).cloned().collect::<Vec<_>>().join("\n")
+    );
+}
+
+const PARENT_WITH_UTIL: &str = "require \"base\"\n\nclass Parent\n  include Util\n\n  attr_accessor :state\n\n  def parent_method\n    state\n  end\nend\n";
+const CHILD_NO_SUPERCLASS: &str = "class Child\n  def child_method; end\n\n  def self.solo\n    \"solo\"\n  end\nend\n";
+
+#[test]
+fn edit_add_file() {
+    edit_case(&[("extra.rb", Some("class Extra < Child\n  def extra_method; end\nend\n"))]);
+}
+
+#[test]
+fn edit_modify_method_body() {
+    edit_case(&[(
+        "util.rb",
+        Some("module Util\n  UTIL_CONST = 7\n\n  def self.other_method\n    UTIL_CONST\n  end\nend\n"),
+    )]);
+}
+
+#[test]
+#[ignore = "red until Phase 1 Task 1.3 (store-node mutation routing)"]
+fn edit_delete_leaf_file() {
+    edit_case(&[("kid.rb", None)]);
+}
+
+#[test]
+#[ignore = "red until Phase 1 Task 1.3 (store-node mutation routing)"]
+fn edit_delete_superclass_file() {
+    edit_case(&[("parent.rb", None)]);
+}
+
+#[test]
+#[ignore = "red until Phase 1 Task 1.3 (store-node mutation routing)"]
+fn edit_change_mixin() {
+    edit_case(&[("parent.rb", Some(PARENT_WITH_UTIL))]);
+}
+
+#[test]
+#[ignore = "red until Phase 1 Task 1.3 (store-node mutation routing)"]
+fn edit_drop_superclass() {
+    edit_case(&[("child.rb", Some(CHILD_NO_SUPERCLASS))]);
+}
+
+#[test]
+#[ignore = "red until Phase 1 Task 1.3 (store-node mutation routing)"]
+fn edit_rename_module() {
+    edit_case(&[("base.rb", Some("module Base2\n  BASE_CONST = \"base\"\nend\n"))]);
+}
+
+#[test]
+#[ignore = "red until Phase 1 Task 1.3 (store-node mutation routing)"]
+fn edit_delete_then_restore() {
+    let original = std::fs::read_to_string(corpus_dir().join("parent.rb")).expect("read parent.rb");
+    edit_case(&[("parent.rb", None), ("parent.rb", Some(original.as_str()))]);
+}
+
+#[test]
+#[ignore = "red until Phase 1 Task 1.3 (store-node mutation routing)"]
+fn edit_multi_file_branch_switch() {
+    edit_case(&[
+        ("kid.rb", None),
+        ("parent.rb", Some(PARENT_WITH_UTIL)),
+        ("child.rb", Some(CHILD_NO_SUPERCLASS)),
+        ("extra.rb", Some("class Extra < Parent; end\n")),
+    ]);
+}
