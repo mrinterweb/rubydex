@@ -32,9 +32,8 @@ module Rubydex
       @handles.clear
     end
 
-    # Poll interval the manager uses to re-scan the registry; it exits within two
-    # polls once no session is alive.
-    POLL_INTERVAL_MS = 500
+    # A burst of file-system events inside this window collapses into one indexer.
+    DEBOUNCE_MS = 200
 
     class << self
       #: (String workspace) -> String
@@ -44,13 +43,13 @@ module Rubydex
 
       # Registers a session and returns the locked handle, which the caller must keep
       # referenced for the whole session (the lock is per file descriptor).
-      #: (String workspace, String store, Array<String> builder, String registry) -> File
-      def register(workspace:, store:, builder:, registry: registry_dir(workspace))
+      #: (String workspace, String store, Array<String> builder, Integer docs, String registry) -> File
+      def register(workspace:, store:, builder:, docs:, registry: registry_dir(workspace))
         FileUtils.mkdir_p(registry)
         path = File.join(registry, "#{Process.pid}-#{SecureRandom.hex(4)}.json")
         handle = File.new(path, "w")
         handle.flock(File::LOCK_EX)
-        handle.write(JSON.generate({ workspace:, store:, builder: }))
+        handle.write(JSON.generate({ workspace:, store:, builder:, docs: }))
         handle.flush
         @handles[path] = handle
         handle

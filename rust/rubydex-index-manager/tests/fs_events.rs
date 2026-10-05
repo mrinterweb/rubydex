@@ -3,12 +3,10 @@
 //! recursively, report creation/modification/removal, and coalesce a burst of
 //! events into one batch.
 
-#![cfg(feature = "fs_events")]
-
 use std::path::Path;
 use std::time::Duration;
 
-use rubydex::fs_events::{FsEventSource, NotifySource};
+use rubydex_index_manager::fs_events::{FsEventSource, NotifySource};
 
 /// Drain one batch (waiting up to three seconds) and report whether `file` is in it.
 fn batch_contains(source: &mut NotifySource, file: &Path) -> bool {
