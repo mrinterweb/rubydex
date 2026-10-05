@@ -10,8 +10,8 @@ use crate::model::{
     },
     definitions::{Definition, Mixin, Receiver},
     graph::{Graph, Unit},
-    identity_maps::{IdentityHashBuilder, IdentityHashMap, IdentityHashSet},
-    ids::{ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId, UriId},
+    identity_maps::IdentityHashSet,
+    ids::{ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId},
     name::{Name, NameRef, ParentScope},
     visibility::Visibility,
 };
@@ -1148,9 +1148,8 @@ impl<'a> Resolver<'a> {
         for mixin in mixins {
             let constant_reference = self
                 .graph
-                .constant_references()
-                .get(mixin.constant_reference_id())
-                .unwrap();
+                .constant_reference(*mixin.constant_reference_id())
+                .expect("mixin constant reference is a queued unit");
 
             match mixin {
                 Mixin::Prepend(_) => {
@@ -1878,26 +1877,13 @@ impl<'a> Resolver<'a> {
         let mut singleton_methods = Vec::new();
         let mut const_refs = Vec::new();
         let mut ancestors = vec![*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID];
-        let names = self.graph.names();
         // Every name captured its depth during indexing (see `Name::compute_depth`), so ordering the units below is a
-        // direct lookup rather than a recursive walk of the nesting chain.
-        let depth_of = |name_id: &NameId| names.get(name_id).unwrap().depth();
+        // direct lookup rather than a recursive walk of the nesting chain. The layered lookup also covers names
+        // that live only in the disk store: a surgical refresh re-queues units for store-backed nodes.
+        let depth_of = |name_id: &NameId| self.graph.name(*name_id).expect("name for queued unit").depth();
 
-        // Precompute the lexicographic rank of every document URI. Definitions and references are sorted by
-        // (name depth, URI, offset) below; storing a precomputed integer rank instead of comparing URI strings on
-        // every comparison makes sorting substantially cheaper on large graphs.
-        let mut uris: Vec<(&str, UriId)> = self
-            .graph
-            .documents()
-            .iter()
-            .map(|(uri_id, document)| (document.uri(), *uri_id))
-            .collect();
-        uris.sort_unstable();
-        let mut uri_ranks: IdentityHashMap<UriId, u32> =
-            IdentityHashMap::with_capacity_and_hasher(uris.len(), IdentityHashBuilder);
-        for (rank, (_, uri_id)) in uris.into_iter().enumerate() {
-            uri_ranks.insert(uri_id, u32::try_from(rank).expect("more documents than u32::MAX"));
-        }
+        // Lexicographic rank of every document URI, overlay and store — see `Graph::uri_ranks`.
+        let uri_ranks = self.graph.uri_ranks();
 
         // Dedup: when multiple files are indexed before resolution runs, pending_work accumulates
         // and the same definition/reference ID can be enqueued more than once.
@@ -1968,8 +1954,9 @@ impl<'a> Resolver<'a> {
                     if !seen_ancestors.insert(id) {
                         continue;
                     }
-                    // Declaration may have been removed by invalidation — skip stale items
-                    if self.graph.declarations().contains_key(&id) {
+                    // Declaration may have been removed by invalidation — skip stale items. Layered: a
+                    // store-backed declaration is still a live unit.
+                    if self.graph.declaration(id).is_some() {
                         ancestors.push(id);
                     }
                 }

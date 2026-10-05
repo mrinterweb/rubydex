@@ -10,7 +10,7 @@ use crate::model::declaration::{Ancestor, Declaration, Namespace};
 use crate::model::definitions::{Definition, MethodVisibilityDefinition, Receiver};
 use crate::model::document::Document;
 use crate::model::encoding::Encoding;
-use crate::model::identity_maps::{IdentityHashMap, IdentityHashSet};
+use crate::model::identity_maps::{IdentityHashBuilder, IdentityHashMap, IdentityHashSet};
 use crate::model::ids::{
     ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId,
     declaration_id_from_lookup_name,
@@ -165,16 +165,32 @@ pub struct Graph {
     #[cfg(feature = "redb-store")]
     store_errors: std::sync::atomic::AtomicUsize,
 
-    /// Raw IDs of nodes removed from the in-memory overlay while a store is attached. Blocks the
+    /// Tombstones for nodes removed from the in-memory overlay while a store is attached. Blocks the
     /// layered accessors and materialize paths from resurrecting the store's stale copy of a
-    /// deleted node. Shared across node types and keyed by the ID's raw value: a cross-type u64
-    /// collision would at worst make one store lookup miss, which is practically impossible (xxh64).
+    /// deleted node. Keyed by node KIND as well as raw id: ids hash their name, so a `StringId`
+    /// and a `DeclarationId` for the same name share a raw u64, and a raw-id-only tombstone would
+    /// silently hide an unrelated store node of another kind.
     #[cfg(feature = "redb-store")]
-    removed: IdentityHashSet<u64>,
+    removed: HashSet<(TombstoneKind, u64)>,
 }
 #[cfg(not(feature = "redb-store"))]
 assert_mem_size!(Graph, 392);
 assert_send_sync!(Graph);
+
+/// Which kind of node a tombstone belongs to. IDs hash their name, so ids of different kinds for
+/// the same name collide (e.g. `StringId("Base") == DeclarationId("Base")`); a tombstone keyed by
+/// raw id alone would hide an unrelated store node and make a layered lookup return nothing.
+#[cfg(feature = "redb-store")]
+#[derive(Debug, Eq, PartialEq, Hash)]
+enum TombstoneKind {
+    Declaration,
+    Definition,
+    Document,
+    Name,
+    String,
+    ConstantReference,
+    MethodReference,
+}
 
 /// A reference to a node that is either borrowed from the in-memory graph (`Mem`) or owned, having
 /// been deserialized from the disk-backed store (`Stored`). Derefs to `&T` so most call sites read
@@ -225,7 +241,7 @@ impl Graph {
             #[cfg(feature = "redb-store")]
             store_errors: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "redb-store")]
-            removed: IdentityHashSet::default(),
+            removed: HashSet::new(),
         };
 
         add_built_in_data(&mut graph);
@@ -259,7 +275,7 @@ impl Graph {
         self.method_references = IdentityHashMap::default();
         self.name_dependents = IdentityHashMap::default();
         self.pending_work = Vec::new();
-        self.removed = IdentityHashSet::default();
+        self.removed = HashSet::new();
         #[cfg(feature = "redb-store")]
         self.store_errors.store(0, std::sync::atomic::Ordering::Relaxed);
         self.store = Some(store);
@@ -275,15 +291,15 @@ impl Graph {
     /// Marks a node's raw ID as removed, so the layered accessors and materialize paths stop
     /// serving the store's stale copy of it.
     #[cfg(feature = "redb-store")]
-    fn tombstone(&mut self, id: u64) {
-        self.removed.insert(id);
+    fn tombstone(&mut self, kind: TombstoneKind, id: u64) {
+        self.removed.insert((kind, id));
     }
 
     /// Whether a node's raw ID was tombstoned by a live edit while a store is attached.
     #[cfg(feature = "redb-store")]
     #[must_use]
-    fn is_tombstoned(&self, id: u64) -> bool {
-        self.removed.contains(&id)
+    fn is_tombstoned(&self, kind: TombstoneKind, id: u64) -> bool {
+        self.removed.contains(&(kind, id))
     }
 
     /// Pulls a declaration from the store into the in-memory overlay, if it's not already there.
@@ -291,7 +307,7 @@ impl Graph {
     /// in memory or the graph isn't store-backed.
     #[cfg(feature = "redb-store")]
     pub fn materialize_declaration(&mut self, id: DeclarationId) {
-        if self.declarations.contains_key(&id) || self.is_tombstoned(id.get()) {
+        if self.declarations.contains_key(&id) || self.is_tombstoned(TombstoneKind::Declaration, id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -304,7 +320,7 @@ impl Graph {
     /// Pulls a definition from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_definition(&mut self, id: DefinitionId) {
-        if self.definitions.contains_key(&id) || self.is_tombstoned(id.get()) {
+        if self.definitions.contains_key(&id) || self.is_tombstoned(TombstoneKind::Definition, id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -317,7 +333,7 @@ impl Graph {
     /// Pulls a document from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_document(&mut self, id: UriId) {
-        if self.documents.contains_key(&id) || self.is_tombstoned(id.get()) {
+        if self.documents.contains_key(&id) || self.is_tombstoned(TombstoneKind::Document, id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -330,7 +346,7 @@ impl Graph {
     /// Pulls a name from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_name(&mut self, id: NameId) {
-        if self.names.contains_key(&id) || self.is_tombstoned(id.get()) {
+        if self.names.contains_key(&id) || self.is_tombstoned(TombstoneKind::Name, id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -343,7 +359,7 @@ impl Graph {
     /// Pulls name dependents from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_name_dependents(&mut self, id: NameId) {
-        if self.name_dependents.contains_key(&id) || self.is_tombstoned(id.get()) {
+        if self.name_dependents.contains_key(&id) || self.is_tombstoned(TombstoneKind::Name, id.get()) {
             return;
         }
         if let Some(store) = &self.store
@@ -372,7 +388,7 @@ impl Graph {
             return Some(NodeRef::Mem(declaration));
         }
         #[cfg(feature = "redb-store")]
-        if !self.is_tombstoned(id.get())
+        if !self.is_tombstoned(TombstoneKind::Declaration, id.get())
             && let Some(store) = &self.store
             && let Some(declaration) = read_store(store, &self.store_errors, |store| store.get_declaration(id))
         {
@@ -388,7 +404,7 @@ impl Graph {
             return Some(NodeRef::Mem(definition));
         }
         #[cfg(feature = "redb-store")]
-        if !self.is_tombstoned(id.get())
+        if !self.is_tombstoned(TombstoneKind::Definition, id.get())
             && let Some(store) = &self.store
             && let Some(definition) = read_store(store, &self.store_errors, |store| store.get_definition(id))
         {
@@ -415,7 +431,7 @@ impl Graph {
             .unwrap_or_default();
         names
             .into_iter()
-            .filter(|(id, _)| !self.is_tombstoned(id.get()))
+            .filter(|(id, _)| !self.is_tombstoned(TombstoneKind::Declaration, id.get()))
             .collect()
     }
 
@@ -439,7 +455,9 @@ impl Graph {
             return Vec::new();
         };
         scan_store(store, &self.store_errors, |store| {
-            store.declaration_ids_matching_parallel(&|id, name| !self.is_tombstoned(id.get()) && predicate(id, name))
+            store.declaration_ids_matching_parallel(&|id, name| {
+                !self.is_tombstoned(TombstoneKind::Declaration, id.get()) && predicate(id, name)
+            })
         })
     }
 
@@ -469,7 +487,7 @@ impl Graph {
             })
             .unwrap_or_default();
         uris.into_iter()
-            .filter(|(id, _)| !self.is_tombstoned(id.get()))
+            .filter(|(id, _)| !self.is_tombstoned(TombstoneKind::Document, id.get()))
             .collect()
     }
 
@@ -478,6 +496,37 @@ impl Graph {
     #[allow(clippy::unused_self)]
     pub fn store_document_uris(&self) -> Vec<(UriId, String)> {
         Vec::new()
+    }
+
+    /// Lexicographic rank of every document URI, covering the in-memory overlay AND the disk store:
+    /// invalidation re-queues units whose definitions belong to store-backed documents, and a rank
+    /// lookup for those must not miss. Overlay entries shadow store entries. Definitions and
+    /// constant references sort by (name depth, URI rank, offset).
+    ///
+    /// # Panics
+    ///
+    /// If there are more documents than `u32::MAX`.
+    #[must_use]
+    pub fn uri_ranks(&self) -> IdentityHashMap<UriId, u32> {
+        let mut uris: Vec<(String, UriId)> = self
+            .documents()
+            .iter()
+            .map(|(uri_id, document)| (document.uri().to_string(), *uri_id))
+            .collect();
+        let overlay: IdentityHashSet<UriId> = uris.iter().map(|(_, uri_id)| *uri_id).collect();
+        uris.extend(
+            self.store_document_uris()
+                .into_iter()
+                .filter(|(uri_id, _)| !overlay.contains(uri_id))
+                .map(|(uri_id, uri)| (uri, uri_id)),
+        );
+        uris.sort_unstable();
+        let mut ranks: IdentityHashMap<UriId, u32> =
+            IdentityHashMap::with_capacity_and_hasher(uris.len(), IdentityHashBuilder);
+        for (rank, (_, uri_id)) in uris.into_iter().enumerate() {
+            ranks.insert(uri_id, u32::try_from(rank).expect("more documents than u32::MAX"));
+        }
+        ranks
     }
 
     /// Definition ids held by the disk store, excluding tombstoned definitions so a live edit's
@@ -495,7 +544,9 @@ impl Graph {
                 eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
             })
             .unwrap_or_default();
-        ids.into_iter().filter(|id| !self.is_tombstoned(id.get())).collect()
+        ids.into_iter()
+            .filter(|id| !self.is_tombstoned(TombstoneKind::Definition, id.get()))
+            .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
@@ -512,7 +563,7 @@ impl Graph {
             return Some(NodeRef::Mem(name));
         }
         #[cfg(feature = "redb-store")]
-        if !self.is_tombstoned(id.get())
+        if !self.is_tombstoned(TombstoneKind::Name, id.get())
             && let Some(store) = &self.store
             && let Some(name) = read_store(store, &self.store_errors, |store| store.get_name(id))
         {
@@ -528,7 +579,7 @@ impl Graph {
             return Some(NodeRef::Mem(reference));
         }
         #[cfg(feature = "redb-store")]
-        if !self.is_tombstoned(id.get())
+        if !self.is_tombstoned(TombstoneKind::ConstantReference, id.get())
             && let Some(store) = &self.store
             && let Some(reference) = read_store(store, &self.store_errors, |store| store.get_constant_reference(id))
         {
@@ -544,7 +595,7 @@ impl Graph {
             return Some(NodeRef::Mem(reference));
         }
         #[cfg(feature = "redb-store")]
-        if !self.is_tombstoned(id.get())
+        if !self.is_tombstoned(TombstoneKind::MethodReference, id.get())
             && let Some(store) = &self.store
             && let Some(reference) = read_store(store, &self.store_errors, |store| store.get_method_reference(id))
         {
@@ -560,7 +611,7 @@ impl Graph {
             return Some(NodeRef::Mem(document));
         }
         #[cfg(feature = "redb-store")]
-        if !self.is_tombstoned(id.get())
+        if !self.is_tombstoned(TombstoneKind::Document, id.get())
             && let Some(store) = &self.store
             && let Some(document) = read_store(store, &self.store_errors, |store| store.get_document(id))
         {
@@ -576,7 +627,7 @@ impl Graph {
             return Some(NodeRef::Mem(string));
         }
         #[cfg(feature = "redb-store")]
-        if !self.is_tombstoned(id.get())
+        if !self.is_tombstoned(TombstoneKind::String, id.get())
             && let Some(store) = &self.store
             && let Some(string) = read_store(store, &self.store_errors, |store| store.get_string(id))
         {
@@ -591,7 +642,7 @@ impl Graph {
     pub fn declaration_mut(&mut self, id: DeclarationId) -> Option<&mut Declaration> {
         #[cfg(feature = "redb-store")]
         if !self.declarations.contains_key(&id)
-            && !self.is_tombstoned(id.get())
+            && !self.is_tombstoned(TombstoneKind::Declaration, id.get())
             && let Some(store) = &self.store
             && let Some(declaration) = read_store(store, &self.store_errors, |store| store.get_declaration(id))
         {
@@ -1271,7 +1322,7 @@ impl Graph {
         if self.names.remove(&name_id).is_some() {
             #[cfg(feature = "redb-store")]
             if self.store.is_none() {
-                self.tombstone(name_id.get());
+                self.tombstone(TombstoneKind::Name, name_id.get());
             }
         }
     }
@@ -1310,7 +1361,7 @@ impl Graph {
             if self.strings.remove(&string_id).is_some() {
                 #[cfg(feature = "redb-store")]
                 if self.store.is_none() {
-                    self.tombstone(string_id.get());
+                    self.tombstone(TombstoneKind::String, string_id.get());
                 }
             }
         }
@@ -1452,7 +1503,7 @@ impl Graph {
         let document = self.documents.remove(&uri_id)?;
         // Tombstone so the store's copy of the deleted document is never resurrected.
         #[cfg(feature = "redb-store")]
-        self.tombstone(uri_id.get());
+        self.tombstone(TombstoneKind::Document, uri_id.get());
         self.invalidate(Some(&document), None);
         self.remove_document_data(&document);
         Some(uri_id)
@@ -1626,7 +1677,7 @@ impl Graph {
             // The reference ID belongs to this document alone (its content embeds the document),
             // so the store's copy is stale whether or not the overlay held it.
             #[cfg(feature = "redb-store")]
-            self.tombstone(ref_id.get());
+            self.tombstone(TombstoneKind::MethodReference, ref_id.get());
         }
 
         for ref_id in document.constant_references() {
@@ -1647,7 +1698,7 @@ impl Graph {
                 self.untrack_name(*constant_ref.name_id());
             }
             #[cfg(feature = "redb-store")]
-            self.tombstone(ref_id.get());
+            self.tombstone(TombstoneKind::ConstantReference, ref_id.get());
         }
 
         // Detach removed definitions from their declarations.
@@ -1685,7 +1736,7 @@ impl Graph {
             self.untrack_definition_strings(&definition);
             // Definition IDs embed the document and offsets, so the store's copy is stale.
             #[cfg(feature = "redb-store")]
-            self.tombstone(def_id.get());
+            self.tombstone(TombstoneKind::Definition, def_id.get());
         }
     }
 
@@ -1832,7 +1883,7 @@ impl Graph {
             // Tombstone so the store's stale copy of this declaration is never resurrected by the
             // layered accessors.
             #[cfg(feature = "redb-store")]
-            self.tombstone(decl_id.get());
+            self.tombstone(TombstoneKind::Declaration, decl_id.get());
         } else {
             // Update: the declaration still has definitions so it stays in the graph,
             // but its ancestor chain may have changed (e.g. a mixin was added/removed).
