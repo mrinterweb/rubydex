@@ -281,3 +281,22 @@ fn built_ins_round_trip_through_the_store() {
         failures.join("\n")
     );
 }
+
+#[test]
+fn two_sessions_can_share_one_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_path = dir.path().join("shared.redb");
+
+    let built_ins = Graph::new();
+    RedbStore::build(&store_path, &built_ins).expect("build store");
+    let id = built_ins.declarations().keys().next().expect("a built-in declaration");
+
+    // Two sessions on one worktree (two editor windows) must both read the store. redb's read-write
+    // open takes an exclusive lock and fails `DatabaseAlreadyOpen` for a second process, which made
+    // the second session fall back to the in-memory index.
+    let first = RedbStore::open(&store_path).expect("first reader");
+    let second = RedbStore::open(&store_path).expect("second reader opens while the first holds it");
+
+    assert!(first.get_declaration(*id).expect("read").is_some());
+    assert!(second.get_declaration(*id).expect("read").is_some());
+}
