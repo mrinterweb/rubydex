@@ -9,8 +9,6 @@ pub mod config;
 pub mod diagnostic;
 pub mod dot;
 pub mod errors;
-#[cfg(feature = "fs_events")]
-pub mod fs_events;
 pub mod indexing;
 pub mod integrity;
 pub mod job_queue;
