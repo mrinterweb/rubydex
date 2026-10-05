@@ -15,7 +15,7 @@ use rubydex::{
     },
     resolution::Resolver,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 fn corpus_dir() -> PathBuf {
@@ -524,17 +524,21 @@ fn copy_corpus(dir: &Path) -> PathBuf {
     ws
 }
 
-/// Edit differential: build a store from the corpus, apply `edits` to the store-backed graph through
-/// the live-edit API (exactly what a surgical refresh does), resolve, and require every probe to match
-/// a fresh in-memory build of the edited corpus. `Some(src)` writes/replaces a file, `None` deletes it.
+/// Edit differential: apply the same edits incrementally to an in-memory graph AND to a store-backed
+/// graph, then require identical probes. The contract is store-backed incremental == in-memory
+/// incremental (what a session's overlay must reproduce); incremental != fresh-rebuild is a property
+/// of the engine's own invalidation, already true of the in-memory path, and not this layer's job.
+/// `Some(src)` writes/replaces a file, `None` deletes it.
 fn edit_case(edits: &[(&str, Option<&str>)]) {
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = copy_corpus(dir.path());
+    let mut memory = build_graph_from(&ws);
     let mut store_graph = build_store_graph_from(&ws, dir.path());
 
     for (file, content) in edits {
         let path = ws.join(file);
         let uri = url::Url::from_file_path(&path).expect("file uri").to_string();
+        let uri_memory = uri.clone();
         if let Some(source) = content {
             std::fs::write(&path, source).expect("write edit");
             rubydex::indexing::index_source(
@@ -543,14 +547,21 @@ fn edit_case(edits: &[(&str, Option<&str>)]) {
                 source,
                 &rubydex::indexing::LanguageId::Ruby,
             );
+            rubydex::indexing::index_source(
+                &mut memory,
+                uri_memory.into(),
+                source,
+                &rubydex::indexing::LanguageId::Ruby,
+            );
         } else {
             std::fs::remove_file(&path).expect("delete file");
             store_graph.delete_document(&uri);
+            memory.delete_document(&uri_memory);
         }
     }
     Resolver::new(&mut store_graph).resolve();
+    Resolver::new(&mut memory).resolve();
 
-    let memory = build_graph_from(&ws);
     let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
     let mut mem_probe = Vec::new();
     probe_all(&memory, &name_ids, 0, &mut mem_probe);
@@ -559,19 +570,41 @@ fn edit_case(edits: &[(&str, Option<&str>)]) {
     normalize(&mut mem_probe);
     normalize(&mut store_probe);
 
+    // Key-based comparison: a length mismatch must show up as missing/extra keys, not as a shifted zip.
+    let mem_keys: HashSet<String> = mem_probe.iter().map(|(key, _)| key.clone()).collect();
+    let store_keys: HashSet<String> = store_probe.iter().map(|(key, _)| key.clone()).collect();
+    let missing: Vec<String> = mem_keys
+        .iter()
+        .filter(|key| !store_keys.contains(key.as_str()))
+        .cloned()
+        .collect();
+    let extra: Vec<String> = store_keys
+        .iter()
+        .filter(|key| !mem_keys.contains(key.as_str()))
+        .cloned()
+        .collect();
     let diverged: Vec<String> = mem_probe
         .iter()
-        .zip(store_probe.iter())
-        .filter(|(m, s)| m != s)
-        .map(|(m, s)| format!("{}\n  memory: {}\n  store:  {}", m.0, m.1, s.1))
+        .filter_map(|(key, value)| {
+            store_probe
+                .iter()
+                .find(|(other, _)| other == key)
+                .filter(|(_, other_value)| other_value != value)
+                .map(|(_, other_value)| format!("{key}\n  memory: {value}\n  store:  {other_value}"))
+        })
         .collect();
+    let mut report: Vec<String> = diverged.iter().take(6).cloned().collect();
+    report.extend(missing.iter().take(6).map(|key| format!("MISSING {key}")));
+    report.extend(extra.iter().take(6).map(|key| format!("EXTRA {key}")));
     assert!(
         mem_probe.len() == store_probe.len() && diverged.is_empty(),
-        "edit differential: {} vs {} probes, {} diverged:\n{}",
+        "edit differential: {} vs {} probes, {} diverged, {} missing, {} extra:\n{}",
         mem_probe.len(),
         store_probe.len(),
         diverged.len(),
-        diverged.iter().take(8).cloned().collect::<Vec<_>>().join("\n")
+        missing.len(),
+        extra.len(),
+        report.join("\n"),
     );
 }
 
