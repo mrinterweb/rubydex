@@ -47,27 +47,33 @@ pub struct NotifySource {
 
 impl NotifySource {
     /// Subscribe to `paths` (watched recursively). Only creation, modification and
-    /// removal events are collected; access events are ignored.
-    ///
-    /// # Panics
-    /// Panics when a path cannot be watched.
+    /// removal events are collected; access events are ignored. A path that cannot be
+    /// watched (a workspace that went away) is reported and skipped, never fatal: the
+    /// manager keeps serving the other sessions.
     #[must_use]
-    pub fn new(paths: Vec<PathBuf>, debounce: Duration) -> NotifySource {
+    pub fn new(paths: &[PathBuf], debounce: Duration) -> NotifySource {
         let pending = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
         let last_event = Arc::new(Mutex::new(Instant::now()));
         let config = Config::default()
             .with_event_kinds(EventKindMask::CREATE | EventKindMask::ALL_MODIFY | EventKindMask::REMOVE);
 
         let watchers = paths
-            .into_iter()
-            .map(|path| {
+            .iter()
+            .filter_map(|path| {
                 let collector = EventCollector {
                     pending: Arc::clone(&pending),
                     last_event: Arc::clone(&last_event),
                 };
-                let mut watcher = RecommendedWatcher::new(collector, config).unwrap();
-                watcher.watch(&path, notify::RecursiveMode::Recursive).unwrap();
-                watcher
+                let shown = path.display();
+                let Ok(mut watcher) = RecommendedWatcher::new(collector, config) else {
+                    eprintln!("rubydex-index-manager: cannot watch {shown}");
+                    return None;
+                };
+                if let Err(error) = watcher.watch(path, notify::RecursiveMode::Recursive) {
+                    eprintln!("rubydex-index-manager: cannot watch {shown}: {error:?}");
+                    return None;
+                }
+                Some(watcher)
             })
             .collect();
 
@@ -83,7 +89,7 @@ impl NotifySource {
 /// The backend the manager uses today. Swapping the event crate means changing this
 /// one function; the manager itself never names a backend.
 #[must_use]
-pub fn default_source(paths: Vec<PathBuf>, debounce: Duration) -> Box<dyn FsEventSource> {
+pub fn default_source(paths: &[PathBuf], debounce: Duration) -> Box<dyn FsEventSource> {
     Box::from(NotifySource::new(paths, debounce))
 }
 

@@ -82,6 +82,19 @@ fn main() {
     }
 
     if args.run {
+        // Only one manager per machine: it holds an exclusive lock on `manager.lock` for its whole
+        // lifetime, so a manager that finds the lock taken knows another one is running. The OS
+        // releases the lock when the process dies, which is also how sessions are pruned.
+        let Some(parent) = args.registry.parent() else {
+            exit(1);
+        };
+        let Ok(handle) = std::fs::File::create(parent.join("manager.lock")) else {
+            exit(1);
+        };
+        if handle.try_lock().is_err() {
+            exit(0);
+        }
+
         let debounce = Duration::from_millis(args.debounce_ms.into());
         let mut watches: Vec<Watch> = Vec::<Watch>::new();
 
@@ -102,7 +115,7 @@ fn main() {
                     store: group.0.clone(),
                     workspaces: group.1.clone(),
                     builder: rubydex_index_manager::builder::Builder::new(group.2.clone()),
-                    source: rubydex_index_manager::fs_events::default_source(group.1, debounce),
+                    source: rubydex_index_manager::fs_events::default_source(group.1.as_ref(), debounce),
                     manifest: group.3,
                 });
             }

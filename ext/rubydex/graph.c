@@ -1025,6 +1025,20 @@ static VALUE rdxr_graph_disk_index_enabled(VALUE self) {
 
 /*
  * call-seq:
+ *   disk_index_manager -> true or false
+ *
+ * Whether the workspace's committed `[disk_index]` section opted into the machine-wide
+ * background manager.
+ */
+static VALUE rdxr_graph_disk_index_manager(VALUE self) {
+    void *graph;
+    TypedData_Get_Struct(self, void *, &graph_type, graph);
+
+    return rdx_graph_disk_index_manager(graph) ? Qtrue : Qfalse;
+}
+
+/*
+ * call-seq:
  *   disk_index_location -> String
  *
  * Where the store lives as configured: "tmp", "global", an absolute directory, or "" when the
@@ -1070,6 +1084,7 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "store_errors", rdxr_graph_store_errors, 0);
     rb_define_method(cGraph, "disk_index_enabled", rdxr_graph_disk_index_enabled, 0);
     rb_define_method(cGraph, "disk_index_location", rdxr_graph_disk_index_location, 0);
+    rb_define_method(cGraph, "disk_index_manager", rdxr_graph_disk_index_manager, 0);
     rb_define_singleton_method(cGraph, "rdx_store_format_version", rdxr_graph_store_format_version, 0);
     rb_define_method(cGraph, "resolve_constant", rdxr_graph_resolve_constant, 2);
     rb_define_method(cGraph, "declarations", rdxr_graph_declarations, 0);
