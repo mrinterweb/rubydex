@@ -369,6 +369,33 @@ impl Graph {
         }
     }
 
+    /// Pulls a string from the store into the in-memory overlay. See [`materialize_declaration`].
+    #[cfg(feature = "redb-store")]
+    pub fn materialize_string(&mut self, id: StringId) {
+        if self.strings.contains_key(&id) || self.is_tombstoned(TombstoneKind::String, id.get()) {
+            return;
+        }
+        if let Some(store) = &self.store
+            && let Some(string) = read_store(store, &self.store_errors, |store| store.get_string(id))
+        {
+            self.strings.insert(id, string);
+        }
+    }
+
+    /// Pulls a constant reference from the store into the in-memory overlay. See [`materialize_declaration`].
+    #[cfg(feature = "redb-store")]
+    pub fn materialize_constant_reference(&mut self, id: ConstantReferenceId) {
+        if self.constant_references.contains_key(&id) || self.is_tombstoned(TombstoneKind::ConstantReference, id.get())
+        {
+            return;
+        }
+        if let Some(store) = &self.store
+            && let Some(reference) = read_store(store, &self.store_errors, |store| store.get_constant_reference(id))
+        {
+            self.constant_references.insert(id, reference);
+        }
+    }
+
     /// Looks up a declaration by ID, checking the in-memory graph first, then the disk-backed store.
     /// Returns a `DeclRef` that derefs to `&Declaration` regardless of which layer it came from.
     /// Number of store reads that failed since the graph was created or last attached a store.
@@ -1052,6 +1079,10 @@ impl Graph {
     /// `Graph#resolve_constant` Ruby API because every string must be interned in the graph to properly resolve.
     pub fn intern_string(&mut self, string: String) -> StringId {
         let string_id = StringId::from(&string);
+        // The string may live only in the store; materialize so its ref count is incremented
+        // against the resident copy instead of being re-inserted as a fresh internment.
+        #[cfg(feature = "redb-store")]
+        self.materialize_string(string_id);
         match self.strings.entry(string_id) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().increment_ref_count(1);
@@ -1069,6 +1100,11 @@ impl Graph {
     pub fn add_name(&mut self, str: StringId, parent_scope: ParentScope, nesting: Option<NameId>) -> NameId {
         let name = Name::new(&self.names, str, parent_scope, nesting);
         let name_id = name.id();
+
+        // The name may live only in the store; materialize so the resident copy (with its resolved
+        // state and ref count) is updated rather than shadowed.
+        #[cfg(feature = "redb-store")]
+        self.materialize_name(name_id);
 
         match self.names.entry(name_id) {
             Entry::Occupied(mut entry) => {
@@ -1268,6 +1304,8 @@ impl Graph {
     /// Converts a `Resolved` `NameRef` back to `Unresolved`, preserving the original `Name` data.
     /// Returns the `DeclarationId` it was previously resolved to, if any.
     fn unresolve_name(&mut self, name_id: NameId) -> Option<DeclarationId> {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name(name_id);
         let name_ref = self.names.get(&name_id)?;
 
         match name_ref {
@@ -1284,10 +1322,14 @@ impl Graph {
     /// Unresolves a constant reference: removes it from the target declaration's reference set
     /// and unresolves its underlying name.
     fn unresolve_reference(&mut self, reference_id: ConstantReferenceId) -> Option<DeclarationId> {
+        #[cfg(feature = "redb-store")]
+        self.materialize_constant_reference(reference_id);
         let constant_ref = self.constant_references.get(&reference_id)?;
         let name_id = *constant_ref.name_id();
 
         if let Some(old_decl_id) = self.unresolve_name(name_id) {
+            #[cfg(feature = "redb-store")]
+            self.materialize_declaration(old_decl_id);
             self.declarations
                 .get_mut(&old_decl_id)
                 .expect("Tried to unresolve reference for declaration that doesn't exist in the graph")
@@ -1301,6 +1343,8 @@ impl Graph {
 
     /// Removes a name from the graph and cleans up its name-to-name edges from parent names.
     fn remove_name(&mut self, name_id: NameId) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name(name_id);
         if let Some(name_ref) = self.names.get(&name_id) {
             let parent_scope = name_ref.parent_scope().as_ref().copied();
             let nesting = name_ref.nesting().as_ref().copied();
@@ -1330,6 +1374,8 @@ impl Graph {
     /// Removes a specific dependent from the `name_dependents` entry for `name_id`,
     /// cleaning up the entry if no dependents remain.
     fn remove_name_dependent(&mut self, name_id: NameId, dependent: NameDependent) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name_dependents(name_id);
         if let Some(deps) = self.name_dependents.get_mut(&name_id) {
             deps.retain(|d| *d != dependent);
             if deps.is_empty() {
@@ -1342,6 +1388,8 @@ impl Graph {
     ///
     /// This does not recursively untrack `parent_scope` or `nesting` names.
     pub fn untrack_name(&mut self, name_id: NameId) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name(name_id);
         if let Some(name_ref) = self.names.get_mut(&name_id) {
             let string_id = *name_ref.str();
             if !name_ref.decrement_ref_count() {
@@ -1352,6 +1400,8 @@ impl Graph {
     }
 
     fn untrack_string(&mut self, string_id: StringId) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_string(string_id);
         if let Some(string_ref) = self.strings.get_mut(&string_id)
             && !string_ref.decrement_ref_count()
         {
@@ -1398,6 +1448,8 @@ impl Graph {
     ///
     /// This recursively untracks `parent_scope` and `nesting` names.
     pub fn untrack_name_recursive(&mut self, name_id: NameId) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name(name_id);
         let Some(name_ref) = self.names.get(&name_id) else {
             return;
         };
@@ -1459,6 +1511,10 @@ impl Graph {
     ///
     /// This function will panic when trying to record a resolve name for a name ID that does not exist
     pub fn record_resolved_name(&mut self, name_id: NameId, declaration_id: DeclarationId) {
+        // The name may live only in the store (a workspace reference resolving to a gem constant);
+        // materialize so the resolved state is recorded on the resident copy.
+        #[cfg(feature = "redb-store")]
+        self.materialize_name(name_id);
         match self.names.entry(name_id) {
             Entry::Occupied(entry) => match entry.get() {
                 NameRef::Unresolved(_) => {
@@ -1520,6 +1576,8 @@ impl Graph {
         }
 
         for (string_id, string_ref) in strings {
+            #[cfg(feature = "redb-store")]
+            self.materialize_string(string_id);
             match self.strings.entry(string_id) {
                 Entry::Occupied(mut entry) => {
                     debug_assert!(*string_ref == **entry.get(), "StringId collision in global graph");
@@ -1532,6 +1590,8 @@ impl Graph {
         }
 
         for (name_id, name_ref) in names {
+            #[cfg(feature = "redb-store")]
+            self.materialize_name(name_id);
             match self.names.entry(name_id) {
                 Entry::Occupied(mut entry) => {
                     debug_assert!(*entry.get() == name_ref, "NameId collision in global graph");
@@ -1566,6 +1626,8 @@ impl Graph {
         }
 
         for (name_id, deps) in name_dependents {
+            #[cfg(feature = "redb-store")]
+            self.materialize_name_dependents(name_id);
             let global_deps = self.name_dependents.entry(name_id).or_default();
             for dep in deps {
                 if !global_deps.contains(&dep) {
@@ -1639,10 +1701,12 @@ impl Graph {
         // Declarations touched by the new local graph
         if let Some(lg) = new_local_graph {
             for def in lg.definitions().values() {
-                if let Some(name_id) = def.name_id()
-                    && let Some(NameRef::Resolved(resolved)) = self.names.get(name_id)
-                {
-                    items.push(InvalidationItem::Declaration(*resolved.declaration_id()));
+                if let Some(name_id) = def.name_id() {
+                    #[cfg(feature = "redb-store")]
+                    self.materialize_name(*name_id);
+                    if let Some(NameRef::Resolved(resolved)) = self.names.get(name_id) {
+                        items.push(InvalidationItem::Declaration(*resolved.declaration_id()));
+                    }
                 }
             }
 
@@ -1653,6 +1717,8 @@ impl Graph {
             for const_ref in lg.constant_references().values() {
                 // The name may not exist in the global graph yet — it's in the local graph
                 // which hasn't been extended yet. Only act on names already known globally.
+                #[cfg(feature = "redb-store")]
+                self.materialize_name(*const_ref.name_id());
                 if let Some(name_ref) = self.names.get(const_ref.name_id())
                     && let Some(nesting_id) = name_ref.nesting()
                     && let Some(NameRef::Resolved(resolved)) = self.names.get(nesting_id)
@@ -1834,6 +1900,8 @@ impl Graph {
                 self.unresolve_name(name_id);
                 self.queue_structural_cascade(name_id, queue);
 
+                #[cfg(feature = "redb-store")]
+                self.materialize_name_dependents(name_id);
                 if let Some(deps) = self.name_dependents.get(&name_id) {
                     for dep in deps {
                         if let NameDependent::Reference(ref_id) = dep {
@@ -1843,41 +1911,8 @@ impl Graph {
                 }
             }
 
-            // Clean up owner membership and queue remaining definitions for re-resolution
-            if let Some(decl) = self.declarations.get(&decl_id) {
-                let def_ids: Vec<DefinitionId> = decl.definitions().to_vec();
-                let unqualified_str_id = StringId::from(&decl.unqualified_name());
-                let owner_id = *decl.owner_id();
-                let is_singleton_class = matches!(decl, Declaration::Namespace(Namespace::SingletonClass(_)));
-                let ancestors_to_detach: Vec<Ancestor> = decl
-                    .as_namespace()
-                    .map(|ns| ns.ancestors().iter().copied().collect())
-                    .unwrap_or_default();
-
-                for def_id in def_ids {
-                    self.push_work(Unit::Definition(def_id));
-                }
-
-                if let Some(owner) = self.declarations.get_mut(&owner_id)
-                    && let Some(ns) = owner.as_namespace_mut()
-                {
-                    if is_singleton_class {
-                        ns.clear_singleton_class_id();
-                    } else {
-                        ns.remove_member(&unqualified_str_id);
-                    }
-                }
-
-                // Detach from each complete ancestor's descendant set so we don't leave a stale id in descendants
-                for ancestor in ancestors_to_detach {
-                    if let Ancestor::Complete(ancestor_id) = ancestor
-                        && let Some(anc_decl) = self.declarations.get_mut(&ancestor_id)
-                        && let Some(ns) = anc_decl.as_namespace_mut()
-                    {
-                        ns.remove_descendant(decl_id);
-                    }
-                }
-            }
+            // Clean up owner membership and queue remaining definitions for re-resolution.
+            self.detach_declaration_membership(decl_id);
 
             self.declarations.remove(&decl_id);
             // Tombstone so the store's stale copy of this declaration is never resurrected by the
@@ -1896,22 +1931,25 @@ impl Graph {
                 return;
             };
 
-            // Remove self from each ancestor's descendant set
-            for ancestor in &namespace.clone_ancestors() {
+            // Read the ancestor and descendant sets out first: the loop below mutates other
+            // declarations (materializing store copies), so the borrow of `namespace` must end.
+            let ancestors_to_detach = namespace.clone_ancestors();
+            let descendant_ids: Vec<DeclarationId> = namespace.descendants().iter().copied().collect();
+
+            for ancestor in &ancestors_to_detach {
                 if let Ancestor::Complete(ancestor_id) = ancestor
-                    && let Some(anc_decl) = self.declarations.get_mut(ancestor_id)
+                    && let Some(anc_decl) = self.declaration_mut(*ancestor_id)
                     && let Some(ns) = anc_decl.as_namespace_mut()
                 {
                     ns.remove_descendant(decl_id);
                 }
             }
 
+            for descendant_id in descendant_ids {
+                queue.push(InvalidationItem::Declaration(descendant_id));
+            }
+
             let namespace = self.declarations.get_mut(&decl_id).unwrap().as_namespace_mut().unwrap();
-
-            namespace.for_each_descendant(|descendant_id| {
-                queue.push(InvalidationItem::Declaration(*descendant_id));
-            });
-
             namespace.clear_ancestors();
             namespace.clear_descendants();
 
@@ -1923,9 +1961,54 @@ impl Graph {
         }
     }
 
+    /// Detaches a declaration that is about to be removed from its owner's member set and from
+    /// every complete ancestor's descendant set, and re-queues its definitions for re-resolution.
+    /// The owner and ancestor copies may live only in the store, so they are mutated through
+    /// `declaration_mut`, which materializes each one; the declaration's own data is read out
+    /// first so that borrow ends before the mutations.
+    fn detach_declaration_membership(&mut self, decl_id: DeclarationId) {
+        let Some(decl) = self.declarations.get(&decl_id) else {
+            return;
+        };
+        let def_ids: Vec<DefinitionId> = decl.definitions().to_vec();
+        let unqualified_str_id = StringId::from(&decl.unqualified_name());
+        let owner_id = *decl.owner_id();
+        let is_singleton_class = matches!(decl, Declaration::Namespace(Namespace::SingletonClass(_)));
+        let ancestors_to_detach: Vec<Ancestor> = decl
+            .as_namespace()
+            .map(|ns| ns.ancestors().iter().copied().collect())
+            .unwrap_or_default();
+
+        for def_id in def_ids {
+            self.push_work(Unit::Definition(def_id));
+        }
+
+        if let Some(owner) = self.declaration_mut(owner_id)
+            && let Some(ns) = owner.as_namespace_mut()
+        {
+            if is_singleton_class {
+                ns.clear_singleton_class_id();
+            } else {
+                ns.remove_member(&unqualified_str_id);
+            }
+        }
+
+        // Detach from each complete ancestor's descendant set so we don't leave a stale id in descendants
+        for ancestor in ancestors_to_detach {
+            if let Ancestor::Complete(ancestor_id) = ancestor
+                && let Some(anc_decl) = self.declaration_mut(ancestor_id)
+                && let Some(ns) = anc_decl.as_namespace_mut()
+            {
+                ns.remove_descendant(decl_id);
+            }
+        }
+    }
+
     /// The name's structural dependency is broken (its nesting or parent scope was removed).
     /// Unresolves the name and cascades to all dependents — both references and definitions.
     fn unresolve_dependent_name(&mut self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name_dependents(name_id);
         let dependents: Vec<NameDependent> = self.name_dependents.get(&name_id).cloned().unwrap_or_default();
         self.queue_structural_cascade(name_id, queue);
 
@@ -1933,7 +2016,7 @@ impl Graph {
             for dep in &dependents {
                 match dep {
                     NameDependent::Reference(ref_id) => {
-                        if let Some(decl) = self.declarations.get_mut(&old_decl_id) {
+                        if let Some(decl) = self.declaration_mut(old_decl_id) {
                             decl.remove_constant_reference(ref_id);
                         }
                         self.push_work(Unit::ConstantRef(*ref_id));
@@ -1941,14 +2024,13 @@ impl Graph {
                     NameDependent::Definition(def_id) => {
                         self.push_work(Unit::Definition(*def_id));
 
-                        if let Some(decl) = self.declarations.get_mut(&old_decl_id) {
+                        if let Some(decl) = self.declaration_mut(old_decl_id) {
                             decl.remove_definition(def_id);
                         }
 
                         if self
-                            .declarations
-                            .get(&old_decl_id)
-                            .is_some_and(Declaration::has_no_definitions)
+                            .declaration(old_decl_id)
+                            .is_some_and(|decl| decl.has_no_definitions())
                         {
                             queue.push(InvalidationItem::Declaration(old_decl_id));
                         }
@@ -1962,6 +2044,10 @@ impl Graph {
     /// Ancestor context changed but the name itself is still valid.
     /// Unresolves constant references under this name without unresolving the name itself.
     fn unresolve_dependent_references(&mut self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name_dependents(name_id);
+        #[cfg(feature = "redb-store")]
+        self.materialize_name(name_id);
         let dependents: Vec<NameDependent> = self.name_dependents.get(&name_id).cloned().unwrap_or_default();
         self.queue_ancestor_triggered_invalidation(name_id, queue);
 
@@ -1979,7 +2065,9 @@ impl Graph {
 
     /// Structural cascade: all dependent names must be unresolved regardless of edge type.
     /// Both `ChildName` and `NestedName` dependents get `UnresolveName`.
-    fn queue_structural_cascade(&self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+    fn queue_structural_cascade(&mut self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name_dependents(name_id);
         if let Some(deps) = self.name_dependents.get(&name_id) {
             for dep in deps {
                 match dep {
@@ -1994,7 +2082,9 @@ impl Graph {
 
     /// Ancestor context changed: `ChildName` dependents need full unresolve (structural),
     /// `NestedName` dependents only need reference re-evaluation.
-    fn queue_ancestor_triggered_invalidation(&self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+    fn queue_ancestor_triggered_invalidation(&mut self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+        #[cfg(feature = "redb-store")]
+        self.materialize_name_dependents(name_id);
         if let Some(deps) = self.name_dependents.get(&name_id) {
             for dep in deps {
                 match dep {
@@ -2012,24 +2102,42 @@ impl Graph {
 
     /// Collects all `NameId`s that resolved to the given declaration, by inspecting its
     /// definitions and references.
-    fn names_for_declaration(&self, decl_id: DeclarationId) -> IdentityHashSet<NameId> {
-        let Some(decl) = self.declarations.get(&decl_id) else {
-            return IdentityHashSet::default();
+    fn names_for_declaration(&mut self, decl_id: DeclarationId) -> IdentityHashSet<NameId> {
+        #[cfg(feature = "redb-store")]
+        self.materialize_declaration(decl_id);
+        // Read the id sets out first: the loops below materialize store nodes, which need a
+        // mutable borrow of self.
+        let (def_ids, ref_ids) = {
+            let Some(decl) = self.declarations.get(&decl_id) else {
+                return IdentityHashSet::default();
+            };
+            let def_ids: Vec<DefinitionId> = decl.definitions().to_vec();
+            let ref_ids: Vec<ConstantReferenceId> = decl.constant_references().into_iter().flatten().copied().collect();
+            (def_ids, ref_ids)
         };
 
         let mut names = IdentityHashSet::default();
 
-        for def_id in decl.definitions() {
-            if let Some(name_id) = self.definitions.get(def_id).and_then(|d| d.name_id())
-                && matches!(self.names.get(name_id), Some(NameRef::Resolved(_)))
-            {
-                names.insert(*name_id);
+        for def_id in def_ids {
+            #[cfg(feature = "redb-store")]
+            self.materialize_definition(def_id);
+            let name_id = self.definitions.get(&def_id).and_then(|d| d.name_id()).copied();
+            if let Some(name_id) = name_id {
+                #[cfg(feature = "redb-store")]
+                self.materialize_name(name_id);
+                if matches!(self.names.get(&name_id), Some(NameRef::Resolved(_))) {
+                    names.insert(name_id);
+                }
             }
         }
 
-        for ref_id in decl.constant_references().into_iter().flatten() {
-            if let Some(constant_ref) = self.constant_references.get(ref_id) {
+        for ref_id in ref_ids {
+            #[cfg(feature = "redb-store")]
+            self.materialize_constant_reference(ref_id);
+            if let Some(constant_ref) = self.constant_references.get(&ref_id) {
                 let name_id = *constant_ref.name_id();
+                #[cfg(feature = "redb-store")]
+                self.materialize_name(name_id);
                 if matches!(self.names.get(&name_id), Some(NameRef::Resolved(_))) {
                     names.insert(name_id);
                 }
