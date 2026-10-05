@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "English"
 require "fileutils"
 
 module Rubydex
@@ -74,6 +75,47 @@ module Rubydex
     # pins a snapshot at open, so every session must re-attach to see a new store; the rest find
     # the marker fresh and pay only the reopen (~71 ms measured, vs ~25 s for the rebuild).
     #: -> bool
+    # Git fast path for "what changed since the store was built". Far cheaper than
+    # walking the tree (a scoped `git diff` is ~10ms vs ~70ms to stat the tree), but
+    # it is only a fast path: returns nil when git cannot answer completely, i.e.
+    # when the workspace is not a git checkout, when the checkout is not clean
+    # (untracked/edited files are invisible to `git diff`), or when `from_sha` is
+    # not an ancestor of HEAD. Paths are returned workspace-relative.
+    def git_changed_files(workspace, from_sha)
+      git_dir = %x(git -C #{workspace} rev-parse --git-dir).strip
+      return unless $CHILD_STATUS.success? && !git_dir.empty?
+
+      root = File.expand_path(git_dir, File.expand_path(workspace))
+      root = root.sub(%r{/\.git\z}, "")
+      return unless %x(git -C #{root} status --porcelain).strip.empty?
+
+      head = %x(git -C #{root} rev-parse HEAD).strip
+      return if head == from_sha
+
+      # A scoped diff keeps a workspace inside a larger repo honest; git reports
+      # paths relative to the repo root, so translate them back.
+      root_path = root
+      ws_path = File.expand_path(workspace)
+      scope = if ws_path == root_path
+        "."
+      elsif ws_path.start_with?("#{root_path}/")
+        ws_path[root_path.length + 1..]
+      else
+        return
+      end
+      listing = %x(git -C #{root} diff --name-only #{from_sha}..#{head} -- #{scope})
+      return unless $CHILD_STATUS.success?
+
+      prefix = scope == "." ? "" : "#{scope}/"
+      listing.lines.map(&:strip).reject(&:empty?).map do |path|
+        return nil unless prefix.empty? || path.start_with?(prefix)
+
+        path[prefix.length..]
+      end
+    rescue StandardError
+      nil
+    end
+
     def refresh_if_stale
       cache = store_cache_path
       signature = store_signature
