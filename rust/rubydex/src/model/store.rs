@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Builder, Database, ReadOnlyDatabase, ReadableDatabase, TableDefinition};
 
 use serde::de::DeserializeOwned;
 
@@ -113,9 +113,19 @@ impl std::error::Error for StoreError {
 /// touch the layout would otherwise force every user to re-index.
 pub const STORE_FORMAT_VERSION: u32 = 1;
 
+/// Which redb handle backs a store. The writable handle exists only for the builder child, which
+/// writes and exits; readers open read-only, so multiple sessions (two editor windows on one
+/// worktree) can share one store. redb's read-write open takes an exclusive lock and answers
+/// `DatabaseAlreadyOpen` to a second process, which used to leave that session on the in-memory
+/// index.
+enum StoreDb {
+    Writable(Database),
+    ReadOnly(ReadOnlyDatabase),
+}
+
 /// A redb-backed node store.
 pub struct RedbStore {
-    db: Database,
+    db: StoreDb,
 }
 
 impl std::fmt::Debug for RedbStore {
@@ -125,8 +135,27 @@ impl std::fmt::Debug for RedbStore {
 }
 
 impl RedbStore {
-    /// Opens an existing redb store at `path` — e.g. a server reading a prebuilt gem/stdlib index
-    /// without holding the graph in memory.
+    /// Begins a read transaction on whichever handle backs the store.
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        match &self.db {
+            StoreDb::Writable(db) => db.begin_read(),
+            StoreDb::ReadOnly(db) => db.begin_read(),
+        }
+    }
+
+    /// Begins a write transaction. Only the builder's writable handle can take one; a read-only
+    /// store answering with an error is what keeps a write attempt from aborting the host.
+    fn begin_write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
+        match &self.db {
+            StoreDb::Writable(db) => db.begin_write(),
+            StoreDb::ReadOnly(_) => Err(redb::TransactionError::Storage(redb::StorageError::Io(
+                std::io::Error::other("the store is opened read-only"),
+            ))),
+        }
+    }
+
+    /// Opens an existing redb store at `path` read-only — e.g. a server reading a prebuilt gem/stdlib
+    /// index without holding the graph in memory.
     ///
     /// # Errors
     /// Returns an error if the database cannot be opened.
@@ -139,10 +168,12 @@ impl RedbStore {
         // on a damaged page rather than returning an error. That panic must not escape: this runs
         // under `extern "C"` at the Ruby boundary, where an unwind turns into a process abort.
         let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Database::builder().set_cache_size(8 * 1024 * 1024).open(path)
+            Builder::new().set_cache_size(8 * 1024 * 1024).open_read_only(path)
         }));
         match opened {
-            Ok(Ok(db)) => Ok(Self { db }),
+            Ok(Ok(db)) => Ok(Self {
+                db: StoreDb::ReadOnly(db),
+            }),
             Ok(Err(error)) => Err(StoreError::Open(error.into())),
             Err(_) => Err(StoreError::Open(redb::Error::Io(std::io::Error::other(
                 "redb panicked while opening the store; the file is damaged or not a rubydex store",
@@ -202,7 +233,9 @@ impl RedbStore {
 
             write_txn.commit()?;
         }
-        Ok(Self { db })
+        Ok(Self {
+            db: StoreDb::Writable(db),
+        })
     }
 
     /// Creates (or opens) a redb database at `path`.
@@ -211,7 +244,7 @@ impl RedbStore {
     /// Returns an error if the database file cannot be created or opened.
     pub fn create(path: &Path) -> Result<Self, redb::Error> {
         Ok(Self {
-            db: Database::create(path)?,
+            db: StoreDb::Writable(Database::create(path)?),
         })
     }
 
@@ -227,7 +260,7 @@ impl RedbStore {
         value: &V,
     ) -> Result<(), StoreError> {
         let bytes = postcard::to_allocvec(value).map_err(StoreError::Encode)?;
-        let write_txn = self.db.begin_write()?;
+        let write_txn = self.begin_write()?;
         {
             let mut table = write_txn.open_table(table)?;
             table.insert(key, bytes.as_slice())?;
@@ -241,7 +274,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb transaction fails.
     pub(crate) fn delete_node(&self, table: TableDefinition<u64, &[u8]>, key: u64) -> Result<bool, StoreError> {
-        let write_txn = self.db.begin_write()?;
+        let write_txn = self.begin_write()?;
         let existed = {
             let mut table = write_txn.open_table(table)?;
             table.remove(key)?.is_some()
@@ -300,7 +333,7 @@ impl RedbStore {
         name: &'static str,
         key: u64,
     ) -> Result<Option<V>, StoreError> {
-        let read_txn = self.db.begin_read()?;
+        let read_txn = self.begin_read()?;
         let table = read_txn.open_table(table)?;
         match table.get(key)? {
             Some(guard) => postcard::from_bytes::<V>(guard.value())
@@ -335,7 +368,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn search_names(&self) -> Result<Vec<(DeclarationId, String)>, redb::Error> {
-        let read_txn = self.db.begin_read()?;
+        let read_txn = self.begin_read()?;
         let table = read_txn.open_table(SEARCH_NAMES)?;
         table
             .range(..u64::MAX)?
@@ -354,7 +387,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn document_uris(&self) -> Result<Vec<(UriId, String)>, redb::Error> {
-        let read_txn = self.db.begin_read()?;
+        let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DOCUMENT_URIS)?;
         table
             .range(..u64::MAX)?
@@ -378,7 +411,7 @@ impl RedbStore {
         &self,
         predicate: &dyn Fn(&DeclarationId, &str) -> bool,
     ) -> Result<Vec<DeclarationId>, redb::Error> {
-        let read_txn = self.db.begin_read()?;
+        let read_txn = self.begin_read()?;
         let table = read_txn.open_table(SEARCH_NAMES)?;
         let ids = table
             .range(..u64::MAX)?
@@ -422,7 +455,7 @@ impl RedbStore {
                         (shard as u64 + 1) * shard_width
                     };
                     scope.spawn(move || {
-                        let read_txn = self.db.begin_read()?;
+                        let read_txn = self.begin_read()?;
                         let table = read_txn.open_table(SEARCH_NAMES)?;
                         let ids = table
                             .range(start..=end)?
@@ -452,7 +485,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn definition_ids(&self) -> Result<Vec<DefinitionId>, redb::Error> {
-        let read_txn = self.db.begin_read()?;
+        let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DEFINITIONS)?;
         table
             .range(..u64::MAX)?
@@ -862,6 +895,10 @@ mod tests {
             postcard::to_allocvec(&loaded_foo).expect("serialize loaded"),
         );
         assert!(store.get_declaration(bar_id).expect("get Bar").is_none(), "Bar deleted");
+        drop(store);
+        // The re-delete needs a writable handle: `open` is read-only, which is what every reader
+        // (server, second session) gets.
+        let store = RedbStore::create(&path).expect("reopen writable store");
         assert!(
             !store.delete_declaration(bar_id).expect("re-delete Bar"),
             "Bar already gone"
