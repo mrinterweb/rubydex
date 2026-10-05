@@ -671,3 +671,123 @@ fn edit_multi_file_branch_switch() {
         ("extra.rb", Some("class Extra < Parent; end\n")),
     ]);
 }
+
+/// Replaces only the first occurrence of `from` in `s` (renames one declaration per edit).
+fn replace_first(s: &str, from: &str, to: &str) -> String {
+    match s.find(from) {
+        Some(idx) => {
+            format!("{}{}{}", &s[..idx], to, &s[idx + from.len()..])
+        }
+        None => s.to_string(),
+    }
+}
+
+/// Heavy: applies a deterministic edit script to a copy of a real corpus through the live-edit API
+/// and requires sampled probes to match the same edits applied to an in-memory graph. Seed-fixed so
+/// a failure reproduces exactly.
+#[test]
+#[ignore = "set RUBYDEX_DIFF_CORPUS to a Ruby source tree to run"]
+fn edit_soak_on_corpus() {
+    let corpus = PathBuf::from(std::env::var("RUBYDEX_DIFF_CORPUS").expect("RUBYDEX_DIFF_CORPUS"));
+    let mut seed: u64 = std::env::var("RUBYDEX_SOAK_SEED").map_or(11, |s| s.parse().expect("seed"));
+    let edits: usize = std::env::var("RUBYDEX_SOAK_EDITS").map_or(200, |s| s.parse().expect("edits"));
+    let mut next = || -> usize {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(seed >> 33).expect("fits")
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ws = dir.path().join("ws");
+    let status = std::process::Command::new("cp")
+        .arg("-r")
+        .arg(&corpus)
+        .arg(&ws)
+        .status()
+        .expect("cp");
+    assert!(status.success(), "copy corpus");
+
+    let mut memory = build_graph_from(&ws);
+    let mut store_graph = build_store_graph_from(&ws, dir.path());
+    let mut files: Vec<PathBuf> = {
+        let (paths, _) = collect_file_paths(
+            vec![ws.to_string_lossy().into_owned()],
+            &store_graph.excluded_patterns(),
+        );
+        paths
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rb"))
+            .collect()
+    };
+    files.sort();
+
+    for round in 0..edits {
+        let path = files[next() % files.len()].clone();
+        let uri = url::Url::from_file_path(&path).expect("uri").to_string();
+        let uri_memory = uri.clone();
+        match next() % 3 {
+            0 if path.exists() => {
+                std::fs::remove_file(&path).expect("delete");
+                store_graph.delete_document(&uri);
+                memory.delete_document(&uri_memory);
+            }
+            1 => {
+                let mut src = std::fs::read_to_string(&path).unwrap_or_default();
+                let snippet = format!("\nclass RdxSoak{round} < Object; def soak_{round}; end; end\n");
+                src.push_str(&snippet);
+                std::fs::write(&path, &src).expect("append");
+                rubydex::indexing::index_source(
+                    &mut store_graph,
+                    uri.into(),
+                    &src,
+                    &rubydex::indexing::LanguageId::Ruby,
+                );
+                rubydex::indexing::index_source(
+                    &mut memory,
+                    uri_memory.into(),
+                    &src,
+                    &rubydex::indexing::LanguageId::Ruby,
+                );
+            }
+            _ => {
+                let src = std::fs::read_to_string(&path).unwrap_or_default();
+                let src = replace_first(&src, "\nclass ", &format!("\nclass Soak{round}"));
+                let src = replace_first(&src, "\nmodule ", &format!("\nmodule Soak{round}"));
+                std::fs::write(&path, &src).expect("rewrite");
+                rubydex::indexing::index_source(
+                    &mut store_graph,
+                    uri.into(),
+                    &src,
+                    &rubydex::indexing::LanguageId::Ruby,
+                );
+                rubydex::indexing::index_source(
+                    &mut memory,
+                    uri_memory.into(),
+                    &src,
+                    &rubydex::indexing::LanguageId::Ruby,
+                );
+            }
+        }
+    }
+    Resolver::new(&mut store_graph).resolve();
+    Resolver::new(&mut memory).resolve();
+
+    let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
+    let mut mem_probe = Vec::new();
+    probe_all(&memory, &name_ids, 2_000, &mut mem_probe);
+    let mut store_probe = Vec::new();
+    probe_all(&store_graph, &name_ids, 2_000, &mut store_probe);
+    normalize(&mut mem_probe);
+    normalize(&mut store_probe);
+
+    let mem_keys: HashSet<String> = mem_probe.iter().map(|(key, _)| key.clone()).collect();
+    let extra: usize = store_probe
+        .iter()
+        .filter(|(key, _)| !mem_keys.contains(key.as_str()))
+        .count();
+    assert_eq!(mem_probe.len(), store_probe.len() - extra, "probe case count differs");
+    for (m, s) in mem_probe.iter().zip(store_probe.iter()) {
+        assert_eq!(m, s, "soak divergence (seed/edits reproduce it)");
+    }
+}
