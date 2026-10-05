@@ -10,14 +10,17 @@ use serde_json::from_reader;
 use std::fs::{File, remove_file};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Session {
-    workspace: PathBuf,
-    store: PathBuf,
-    builder: Vec<String>,
+    pub store: PathBuf,
+    pub workspace: PathBuf,
+    pub builder: Vec<String>,
+    #[serde(default)]
+    pub docs: usize,
 }
 
 /// List the sessions that still hold their lock, pruning the dead ones from disk.
+#[must_use]
 pub fn live_sessions(dir: &Path) -> Vec<Session> {
     let mut alive = Vec::<Session>::new();
     let Ok(entries) = dir.read_dir() else {

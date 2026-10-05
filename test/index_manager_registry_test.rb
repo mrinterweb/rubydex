@@ -36,6 +36,7 @@ class IndexManagerRegistryTest < Minitest::Test
         workspace: "/ws",
         store: "/ws/tmp/index.redb",
         builder: ["ruby", "-r", "rubydex"],
+        docs: 100,
         registry: registry,
       )
       assert(handle.flock(File::LOCK_EX), "the test process must still hold the lock")
@@ -56,7 +57,7 @@ class IndexManagerRegistryTest < Minitest::Test
         require "rubydex"
         require "rubydex/index_manager"
         Rubydex::IndexManager.register(
-          workspace: "/ws", store: "/ws/tmp/index.redb", builder: ["ruby"],
+          workspace: "/ws", store: "/ws/tmp/index.redb", builder: ["ruby"], docs: 100,
           registry: ARGV[0]
         )
         sleep 60
@@ -88,7 +89,7 @@ class IndexManagerRegistryTest < Minitest::Test
       registry = File.join(dir, "sessions")
       FileUtils.mkdir_p(registry)
       started = Time.now
-      manager("--registry", registry, "--run", "--poll-ms", "100")
+      manager("--registry", registry, "--run", "--debounce-ms", "100")
       assert_operator(
         Time.now - started,
         :<,

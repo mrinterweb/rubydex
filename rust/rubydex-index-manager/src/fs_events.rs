@@ -80,6 +80,13 @@ impl NotifySource {
     }
 }
 
+/// The backend the manager uses today. Swapping the event crate means changing this
+/// one function; the manager itself never names a backend.
+#[must_use]
+pub fn default_source(paths: Vec<PathBuf>, debounce: Duration) -> Box<dyn FsEventSource> {
+    Box::from(NotifySource::new(paths, debounce))
+}
+
 impl FsEventSource for NotifySource {
     fn try_next_batch(&mut self, timeout: Duration) -> Vec<PathBuf> {
         let started = Instant::now();

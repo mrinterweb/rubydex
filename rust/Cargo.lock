@@ -915,7 +915,6 @@ dependencies = [
  "glob",
  "libc",
  "line-index",
- "notify",
  "postcard",
  "predicates",
  "redb",
@@ -937,6 +936,7 @@ name = "rubydex-index-manager"
 version = "0.4.1"
 dependencies = [
  "clap",
+ "notify",
  "serde",
  "serde_json",
  "tempfile",
