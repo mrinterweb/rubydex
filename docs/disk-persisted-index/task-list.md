@@ -75,3 +75,19 @@ Plan: `docs/disk-persisted-index/plan-post-rebase-hardening.md`. Executed inline
 Remaining (deferred): live-edit fuzzer/soak (Phase 2), write-back design,
 Windows disk-index CI result once the job runs on a runner, n-gram index only
 if measured need.
+
+## Incremental refresh (Phase 3) — executed 2026-10, unsigned (sign + push pending)
+
+Plan: `tmp/plan-incremental-refresh.md`.
+
+- [x] 3.1 FS-events crate: `notify` 9.0.0-rc.5 behind an adapter trait (`FsEventSource`); decision record `docs/disk-persisted-index/fs-event-crate.md`; user approved.
+- [x] 3.2 Session registry + lock liveness (`edc4a07`): Ruby `File#flock` holds, Rust `File::try_lock` prunes; 2 Rust + 3 Ruby tests.
+- [x] 3.3 Adapter + debounce + single-flight indexer (`846dcee`): adapter moved into the manager crate (notify out of the gem build); burst cap = 25% of manifest → `--full`; 5 builder + 4 adapter tests.
+- [x] 3.4 Config opt-in + session wiring (`9e228d6`, `aa9dc62`): `[disk_index] manager`, `RUBYDEX_INDEX_MANAGER`, `index_session.rb` builder, manager binary shipped by the compile task.
+
+Measurements (release build, 3 sessions on `/tmp/rdx-ws`):
+- Idle manager: **3.4 MB RSS max, 0.2 % CPU max** over 180 s (target < 15 MB, ~0 %).
+- Branch-switch storm (200 rewrites, 201 docs): **9.0 s** to a fresh store marker; the burst crossed the 25% cap, so the manager appended `--full` and rebuilt.
+- inotify watch cost unchanged: ~9 ms / ~2 MB for ~2,005 dirs.
+
+Deferred: 1.5 surgical refresh stays gated behind the soak (red at seed 11 / 5 edits); base-store split; `rdx cache` command.
