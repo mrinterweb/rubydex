@@ -933,6 +933,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubydex-index-manager"
+version = "0.4.1"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rubydex-sys"
 version = "0.4.1"
 dependencies = [
