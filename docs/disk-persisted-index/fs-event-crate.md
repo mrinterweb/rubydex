@@ -50,3 +50,10 @@ Rejected:
 
 Approving means the index manager (Phase 3, Tasks 3.2–3.4) may subscribe through
 `FsEventSource` and no other FS-event crate is introduced.
+
+## Approval
+
+Approved 2026-10: the user chose `notify`. Tasks 3.2–3.4 build on it, and the
+adapter lives in the manager crate (`rust/rubydex-index-manager/src/fs_events.rs`), so
+notify stays out of every gem build; `default_source` is the one place a backend swap
+changes.
