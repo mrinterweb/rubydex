@@ -251,3 +251,36 @@ fn document_uri_path_and_name_are_distinct() {
     #[cfg(windows)]
     assert_eq!(column_strings(&result, 1), vec!["file:///zoo.rb".to_string()]);
 }
+
+#[cfg(feature = "redb-store")]
+#[test]
+fn expand_in_resolves_store_backed_nodes() {
+    use super::schema::{NodeRef, expand_in};
+    use crate::model::ids::DeclarationId;
+    use crate::model::store::RedbStore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("index.redb");
+    RedbStore::build(&path, &fixture_graph()).expect("build store");
+    let mut graph = Graph::new();
+    graph.attach_store(RedbStore::open(&path).expect("open store"));
+
+    let speak = graph
+        .declaration(DeclarationId::from("Animal#speak()"))
+        .expect("store-backed method declaration");
+    let def_id = speak.definitions().first().copied().expect("definition");
+    let expected_doc = *graph.definition(def_id).expect("definition node").uri_id();
+    assert_eq!(
+        expand_in(&graph, NodeRef::Definition(def_id), RelType::Defines),
+        Some(vec![NodeRef::Document(expected_doc)]),
+        "DEFINES reverse edge must reach the store-backed document"
+    );
+
+    let declared = expand_in(
+        &graph,
+        NodeRef::Declaration(DeclarationId::from("Dog")),
+        RelType::Declares,
+    )
+    .expect("DECLARES reverse edge must reach store-backed definitions");
+    assert!(!declared.is_empty(), "Dog declares at least one definition");
+}

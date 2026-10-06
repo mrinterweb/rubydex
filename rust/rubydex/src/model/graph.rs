@@ -63,10 +63,10 @@ fn read_store<T>(
 /// Runs a whole-table store scan under the same guarantees as [`read_store`]: a redb failure or
 /// panic yields an empty result and a recorded error, never a silent empty answer.
 #[cfg(feature = "redb-store")]
-fn scan_store<T>(
+fn scan_store<T, E: std::fmt::Display>(
     store: &crate::model::store::RedbStore,
     errors: &std::sync::atomic::AtomicUsize,
-    scan: impl FnOnce(&crate::model::store::RedbStore) -> Result<Vec<T>, redb::Error>,
+    scan: impl FnOnce(&crate::model::store::RedbStore) -> Result<Vec<T>, E>,
 ) -> Vec<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan(store))) {
         Ok(Ok(items)) => items,
@@ -1126,9 +1126,34 @@ impl Graph {
         &self.method_references
     }
 
+    /// All diagnostics currently recorded in the graph: the in-memory documents' plus, when a
+    /// store is attached, the store-backed documents', skipping documents the overlay shadows or
+    /// tombstones. Store-backed diagnostics are as current as the snapshot the store was built
+    /// from; a live edit replaces the document (and its diagnostics) in the overlay.
     #[must_use]
-    pub fn all_diagnostics(&self) -> Vec<&Diagnostic> {
-        self.documents.values().flat_map(Document::diagnostics).collect()
+    pub fn all_diagnostics(&self) -> Vec<Diagnostic> {
+        let mut diagnostics: Vec<Diagnostic> = self
+            .documents
+            .values()
+            .flat_map(|document| document.diagnostics().iter().cloned())
+            .collect();
+        #[cfg(feature = "redb-store")]
+        if let Some(store) = &self.store {
+            let from_store = scan_store(
+                store,
+                &self.store_errors,
+                crate::model::store::RedbStore::document_diagnostics,
+            );
+            diagnostics.extend(
+                from_store
+                    .into_iter()
+                    .filter(|(id, _)| {
+                        !self.documents.contains_key(id) && !self.is_tombstoned(TombstoneKind::Document, id.get())
+                    })
+                    .map(|(_, diagnostic)| diagnostic),
+            );
+        }
+        diagnostics
     }
 
     /// Interns a string in the graph unless already interned. This method is only used to back the

@@ -79,7 +79,7 @@ pub fn check_integrity(graph: &Graph) -> Vec<IntegrityError> {
         }
 
         // Check that the owner exists
-        let Some(owner) = graph.declarations().get(owner_id) else {
+        let Some(owner) = graph.declaration(*owner_id) else {
             errors.push(IntegrityError {
                 kind: IntegrityErrorKind::OwnerDoesNotExist,
                 declaration_name: declaration.name().to_string(),
@@ -119,8 +119,8 @@ fn collect_uris(graph: &Graph, declaration: &Declaration) -> Vec<String> {
         .definitions()
         .iter()
         .map(|def_id| {
-            let definition = graph.definitions().get(def_id).unwrap();
-            let document = graph.documents().get(definition.uri_id()).unwrap();
+            let definition = graph.definition(*def_id).expect("definition exists");
+            let document = graph.document(*definition.uri_id()).expect("document exists");
             document.uri().to_string()
         })
         .collect()
@@ -132,11 +132,11 @@ fn singleton_chain_terminates(graph: &Graph, start_owner_id: DeclarationId) -> b
     let mut current_id = start_owner_id;
 
     for _ in 0..MAX_SINGLETON_DEPTH {
-        let Some(current) = graph.declarations().get(&current_id) else {
+        let Some(current) = graph.declaration(current_id) else {
             return false;
         };
 
-        match current {
+        match &*current {
             Declaration::Namespace(Namespace::SingletonClass(_)) => {
                 current_id = *current.owner_id();
             }
@@ -275,5 +275,46 @@ mod tests {
                 .iter()
                 .all(|e| e.kind == IntegrityErrorKind::SingletonClassChainDoesNotTerminate)
         );
+    }
+}
+
+#[cfg(feature = "redb-store")]
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    use crate::model::declaration::ClassDeclaration;
+    use crate::model::store::RedbStore;
+
+    #[test]
+    fn test_owner_is_found_in_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.redb");
+
+        let mut base = Graph::new();
+        let foo_id = DeclarationId::from("Foo");
+        base.declarations_mut().insert(
+            foo_id,
+            Declaration::Namespace(Namespace::Class(Box::new(ClassDeclaration::new(
+                "Foo".to_string(),
+                *OBJECT_ID,
+            )))),
+        );
+        RedbStore::build(&path, &base).expect("build store");
+        drop(base);
+
+        // A fresh graph backed by the store, with one overlay declaration owned by the
+        // store-backed `Foo`: the owner lookup must see the store, not just the overlay.
+        let mut graph = Graph::new();
+        graph.attach_store(RedbStore::open(&path).expect("open store"));
+        graph.declarations_mut().insert(
+            DeclarationId::from("Foo::Bar"),
+            Declaration::Namespace(Namespace::Class(Box::new(ClassDeclaration::new(
+                "Foo::Bar".to_string(),
+                foo_id,
+            )))),
+        );
+
+        let errors = check_integrity(&graph);
+        assert!(errors.is_empty(), "store-backed owner must count: {errors:?}");
     }
 }

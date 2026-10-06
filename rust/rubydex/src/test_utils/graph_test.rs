@@ -149,9 +149,10 @@ impl GraphTest {
             .filter(|d| !ignore_rules.contains(d.rule()))
             .collect();
 
-        diagnostics.sort_by_key(|d| {
-            let uri = self.graph().documents().get(d.uri_id()).unwrap().uri();
-            (uri, d.offset())
+        diagnostics.sort_by(|a, b| {
+            let uri_a = self.graph().documents().get(a.uri_id()).unwrap().uri();
+            let uri_b = self.graph().documents().get(b.uri_id()).unwrap().uri();
+            (uri_a, a.offset()).cmp(&(uri_b, b.offset()))
         });
 
         diagnostics

@@ -650,13 +650,12 @@ pub fn rel_source_nodes(graph: &Graph, rel: RelType) -> Vec<NodeRef> {
 pub fn expand_in(graph: &Graph, node: NodeRef, rel: RelType) -> Option<Vec<NodeRef>> {
     match (node, rel) {
         (NodeRef::Definition(def_id), RelType::Defines) => {
-            let uri_id = *graph.definitions().get(&def_id)?.uri_id();
+            let uri_id = *graph.definition(def_id)?.uri_id();
             Some(vec![NodeRef::Document(uri_id)])
         }
         (NodeRef::Declaration(decl_id), RelType::Declares) => Some(
             graph
-                .declarations()
-                .get(&decl_id)?
+                .declaration(decl_id)?
                 .definitions()
                 .iter()
                 .map(|id| NodeRef::Definition(*id))
