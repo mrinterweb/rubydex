@@ -463,8 +463,6 @@ impl Graph {
         }
     }
 
-    /// Looks up a declaration by ID, checking the in-memory graph first, then the disk-backed store.
-    /// Returns a `DeclRef` that derefs to `&Declaration` regardless of which layer it came from.
     /// Number of store reads that failed since the graph was created or last attached a store.
     /// Non-zero means the disk index is corrupt or was written by an incompatible layout; callers
     /// should fall back to the in-memory index.
@@ -1093,7 +1091,6 @@ impl Graph {
             .copied()
     }
 
-    /// Looks up the declaration for a `SelfReceiver` method/alias through the singleton class.
     /// Looks up the declaration for a `SelfReceiver` method/alias through the singleton class.
     ///
     /// Returns `None` when the owner cannot be resolved to a namespace with a singleton class. This
