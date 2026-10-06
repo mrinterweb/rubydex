@@ -6,7 +6,7 @@ use rubydex_index_manager::builder::FULL_FLAG;
 
 // The indexer argv every test uses.
 fn indexer() -> Vec<String> {
-    ["ruby", "builder.rb"]
+    ["ruby", "-e", ""]
         .iter()
         .map(std::string::ToString::to_string)
         .collect()
