@@ -171,8 +171,10 @@ impl<T: Eq + Hash> DeclarationCore<T> {
 
     pub fn remove_reference(&mut self, reference_id: &T) {
         if let Some(pos) = self.references.iter().position(|id| id == reference_id) {
+            // No shrink_to_fit: removal runs on the invalidation hot path and the vector regrows
+            // when a re-queued unit re-adds ids; keeping capacity trades a few words for no
+            // per-removal reallocation.
             self.references.swap_remove(pos);
-            self.references.shrink_to_fit();
         }
     }
 
@@ -198,7 +200,6 @@ impl<T: Eq + Hash> DeclarationCore<T> {
     pub fn remove_definition(&mut self, definition_id: &DefinitionId) -> bool {
         if let Some(pos) = self.definition_ids.iter().position(|id| id == definition_id) {
             self.definition_ids.swap_remove(pos);
-            self.definition_ids.shrink_to_fit();
             true
         } else {
             false

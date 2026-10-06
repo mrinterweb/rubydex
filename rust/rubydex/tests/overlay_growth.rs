@@ -8,7 +8,11 @@
 
 use rubydex::{
     indexing::{IndexerBackend, LanguageId, index_files, index_source},
-    model::{built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID}, graph::Graph, store::RedbStore},
+    model::{
+        built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID},
+        graph::Graph,
+        store::RedbStore,
+    },
     resolution::Resolver,
 };
 
