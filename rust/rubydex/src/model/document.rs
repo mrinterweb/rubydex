@@ -149,6 +149,16 @@ impl Document {
     }
 }
 
+/// Converts an absolute file path into the `file://` URI form the graph stores documents under.
+/// This is the same conversion the indexer uses, so a path addressed from the Ruby side resolves to
+/// the same document key; re-implementing it in Ruby would drift on escaping.
+#[must_use]
+pub fn path_to_uri(path: &str) -> Option<String> {
+    Url::from_file_path(PathBuf::from(&path))
+        .map(|uri| uri.to_string())
+        .ok()
+}
+
 /// Computes the require path for a document URI given load paths.
 ///
 /// Shared by in-memory documents and store-backed documents, which are enumerated by URI alone
