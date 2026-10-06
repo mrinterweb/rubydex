@@ -929,7 +929,12 @@ impl<'a> Resolver<'a> {
     ) -> Option<DeclarationId> {
         let attached_decl = self.graph.declaration(attached_id).unwrap();
 
-        if let Some(singleton_id) = attached_decl.as_namespace().and_then(|d| d.singleton_class()) {
+        // The pointer can be stale: an invalidation cascade removes a singleton declaration
+        // (with its owner) without clearing the owner's pointer, and re-resolving the owner must
+        // then re-create it rather than hand back an id that no longer names a declaration.
+        if let Some(singleton_id) = attached_decl.as_namespace().and_then(|d| d.singleton_class())
+            && self.graph.declaration(*singleton_id).is_some()
+        {
             return Some(*singleton_id);
         }
 

@@ -86,7 +86,7 @@ fn scan_store<T>(
 
 /// An entity whose validity depends on a particular `NameId`.
 /// Used as the value type in the `name_dependents` reverse index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub enum NameDependent {
     Definition(DefinitionId),
@@ -172,6 +172,14 @@ pub struct Graph {
     /// silently hide an unrelated store node of another kind.
     #[cfg(feature = "redb-store")]
     removed: HashSet<(TombstoneKind, u64)>,
+    // Name-to-name / name-to-node reverse edges the overlay world deleted. The store's list is a
+    // snapshot from before any live edit, so materializing it would resurrect edges whose node was
+    // removed without a tombstone (names are interned and shared, so a removed name is not
+    // tombstoned while a store is attached).
+    #[cfg(feature = "redb-store")]
+    removed_edges: HashSet<(NameId, NameDependent)>,
+    #[cfg(feature = "redb-store")]
+    removed_edge_lists: HashSet<NameId>,
 }
 #[cfg(not(feature = "redb-store"))]
 assert_mem_size!(Graph, 392);
@@ -242,6 +250,10 @@ impl Graph {
             store_errors: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "redb-store")]
             removed: HashSet::new(),
+            #[cfg(feature = "redb-store")]
+            removed_edges: HashSet::new(),
+            #[cfg(feature = "redb-store")]
+            removed_edge_lists: HashSet::new(),
         };
 
         add_built_in_data(&mut graph);
@@ -370,7 +382,10 @@ impl Graph {
     /// Pulls name dependents from the store into the in-memory overlay. See [`materialize_declaration`].
     #[cfg(feature = "redb-store")]
     pub fn materialize_name_dependents(&mut self, id: NameId) {
-        if self.name_dependents.contains_key(&id) || self.is_tombstoned(TombstoneKind::Name, id.get()) {
+        if self.name_dependents.contains_key(&id)
+            || self.is_tombstoned(TombstoneKind::Name, id.get())
+            || self.removed_edge_lists.contains(&id)
+        {
             return;
         }
         if let Some(store) = &self.store
@@ -381,6 +396,7 @@ impl Graph {
             // cascading through it resurrects nodes the invalidation already dealt with.
             let live = dependents
                 .into_iter()
+                .filter(|dep| !self.removed_edges.contains(&(id, *dep)))
                 .filter(|dep| !match dep {
                     NameDependent::Definition(dependent_id) => {
                         self.is_tombstoned(TombstoneKind::Definition, dependent_id.get())
@@ -1391,7 +1407,10 @@ impl Graph {
                 self.remove_name_dependent(nesting_id, NameDependent::NestedName(name_id));
             }
         }
-        self.name_dependents.remove(&name_id);
+        if self.name_dependents.remove(&name_id).is_some() {
+            #[cfg(feature = "redb-store")]
+            self.removed_edge_lists.insert(name_id);
+        }
         // Names are interned and shared across documents, so only tombstone when the name
         // actually left the overlay — a surviving sibling document keeps its copy alive.
         // With a store attached, refcount cleanup never tombstones: store nodes are snapshot
@@ -1410,11 +1429,15 @@ impl Graph {
     /// cleaning up the entry if no dependents remain.
     fn remove_name_dependent(&mut self, name_id: NameId, dependent: NameDependent) {
         #[cfg(feature = "redb-store")]
+        self.removed_edges.insert((name_id, dependent));
+        #[cfg(feature = "redb-store")]
         self.materialize_name_dependents(name_id);
         if let Some(deps) = self.name_dependents.get_mut(&name_id) {
             deps.retain(|d| *d != dependent);
-            if deps.is_empty() {
-                self.name_dependents.remove(&name_id);
+            if deps.is_empty() && self.name_dependents.remove(&name_id).is_some() {
+                // The whole entry went away, so the store's snapshot list must not come back.
+                #[cfg(feature = "redb-store")]
+                self.removed_edge_lists.insert(name_id);
             }
         }
     }
