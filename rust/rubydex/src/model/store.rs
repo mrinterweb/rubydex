@@ -800,7 +800,7 @@ mod tests {
         let nothing = store
             .declaration_ids_matching(&|_id, _name| false)
             .expect("streaming none");
-        assert!(nothing.is_empty());
+        assert_eq!(nothing.len(), 0);
     }
 
     #[test]
