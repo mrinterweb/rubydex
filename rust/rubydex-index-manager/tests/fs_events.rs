@@ -1,12 +1,12 @@
-//! The adapter is the only thing the index manager talks to, so these tests are the
-//! contract any future file-system event backend has to satisfy: watch a directory
+//! The event source is the only thing the index manager talks to, so these tests are
+//! the contract a file-system event backend has to satisfy: watch a directory
 //! recursively, report creation/modification/removal, and coalesce a burst of
 //! events into one batch.
 
 use std::path::Path;
 use std::time::Duration;
 
-use rubydex_index_manager::fs_events::{FsEventSource, NotifySource};
+use rubydex_index_manager::fs_events::NotifySource;
 
 /// Drain one batch (waiting up to three seconds) and report whether `file` is in it.
 fn batch_contains(source: &mut NotifySource, file: &Path) -> bool {

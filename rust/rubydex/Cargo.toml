@@ -35,7 +35,7 @@ test_utils = ["dep:tempfile"]
 # Disk-persisted, low-resident-memory index backed by an embedded redb store.
 # Opt-in: the default build keeps the all-in-memory graph unchanged.
 redb-store = ["dep:redb", "dep:postcard"]
-# File-system event source for the index manager. Adapter-swappable; see docs/disk-persisted-index/fs-event-crate.md
+# File-system event source for the index manager (notify-backed; see docs/disk-persisted-index/fs-event-crate.md)
 
 [dependencies]
 cypher-parser = "0.8.1"

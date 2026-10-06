@@ -1,25 +1,14 @@
-//! Adapter contract for file-system events, used by the disk-index manager.
+//! `notify`-backed file-system events for the disk-index manager.
 //!
-//! The manager only ever talks to [`FsEventSource`], so the concrete event backend
-//! (notify today) can be replaced by another implementation of this trait without
-//! touching the manager. See `docs/disk-persisted-index/fs-event-crate.md` for the
-//! backend choice and its known limitations.
+//! The manager batches changes through [`NotifySource`]: a burst of events inside the
+//! debounce window collapses into one batch. See `docs/disk-persisted-index/fs-event-crate.md`
+//! for the backend choice and its known limitations; swapping the event crate means
+//! replacing `NotifySource`.
 
 use notify::{Config, Event, EventHandler, EventKindMask, RecommendedWatcher, Result, Watcher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-/// A source of debounced change batches: a burst of events inside the debounce
-/// window collapses into one batch.
-pub trait FsEventSource {
-    /// Block until the next batch of changed paths is available.
-    fn next_batch(&mut self) -> Vec<PathBuf>;
-
-    /// Same, but give up after `timeout` and return an empty batch. Tests use it so
-    /// a broken backend fails instead of hanging.
-    fn try_next_batch(&mut self, timeout: Duration) -> Vec<PathBuf>;
-}
 
 /// Shared state that every watcher of one source reports into.
 struct EventCollector {
@@ -86,15 +75,14 @@ impl NotifySource {
     }
 }
 
-/// The backend the manager uses today. Swapping the event crate means changing this
-/// one function; the manager itself never names a backend.
-#[must_use]
-pub fn default_source(paths: &[PathBuf], debounce: Duration) -> Box<dyn FsEventSource> {
-    Box::from(NotifySource::new(paths, debounce))
-}
-
-impl FsEventSource for NotifySource {
-    fn try_next_batch(&mut self, timeout: Duration) -> Vec<PathBuf> {
+impl NotifySource {
+    /// Returns the next batch of changed paths, debounced: a burst of events inside the
+    /// debounce window collapses into one batch. Gives up after `timeout` and returns an
+    /// empty batch so a broken backend fails instead of hanging.
+    ///
+    /// # Panics
+    /// Panics if the shared batch lock is poisoned (a watcher thread panicked while holding it).
+    pub fn try_next_batch(&mut self, timeout: Duration) -> Vec<PathBuf> {
         let started = Instant::now();
         loop {
             std::thread::sleep(Duration::from_millis(20));
@@ -113,9 +101,5 @@ impl FsEventSource for NotifySource {
             batch.dedup();
             return batch;
         }
-    }
-
-    fn next_batch(&mut self) -> Vec<PathBuf> {
-        self.try_next_batch(Duration::MAX)
     }
 }
