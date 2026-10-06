@@ -2114,7 +2114,7 @@ impl Graph {
             return;
         };
         let def_ids: Vec<DefinitionId> = decl.definitions().to_vec();
-        let unqualified_str_id = StringId::from(&decl.unqualified_name());
+        let unqualified_str_id = StringId::from(decl.unqualified_name());
         let owner_id = *decl.owner_id();
         let is_singleton_class = matches!(decl, Declaration::Namespace(Namespace::SingletonClass(_)));
         let ancestors_to_detach: Vec<Ancestor> = decl
