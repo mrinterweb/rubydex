@@ -371,7 +371,7 @@ impl RedbStore {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(SEARCH_NAMES)?;
         table
-            .range(..u64::MAX)?
+            .range(..=u64::MAX)?
             .map(|entry| -> Result<(DeclarationId, String), redb::Error> {
                 let (id, name) = entry?;
                 Ok((
@@ -390,7 +390,7 @@ impl RedbStore {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DOCUMENT_URIS)?;
         table
-            .range(..u64::MAX)?
+            .range(..=u64::MAX)?
             .map(|entry| -> Result<(UriId, String), redb::Error> {
                 let (id, uri) = entry?;
                 Ok((
@@ -414,13 +414,16 @@ impl RedbStore {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(SEARCH_NAMES)?;
         let ids = table
-            .range(..u64::MAX)?
-            .filter_map(|entry| {
-                let (id, name) = entry.ok()?;
+            .range(..=u64::MAX)?
+            .map(|entry| -> Result<Option<DeclarationId>, redb::Error> {
+                let (id, name) = entry?;
                 let id = DeclarationId::new(id.value());
                 let name = String::from_utf8_lossy(name.value());
-                predicate(&id, &name).then_some(id)
+                Ok(predicate(&id, &name).then_some(id))
             })
+            .collect::<Result<Vec<_>, redb::Error>>()?
+            .into_iter()
+            .flatten()
             .collect::<Vec<_>>();
         Ok(ids)
     }
@@ -452,19 +455,22 @@ impl RedbStore {
                     let end = if shard == shards - 1 {
                         u64::MAX
                     } else {
-                        (shard as u64 + 1) * shard_width
+                        (shard as u64 + 1) * shard_width - 1
                     };
                     scope.spawn(move || {
                         let read_txn = self.begin_read()?;
                         let table = read_txn.open_table(SEARCH_NAMES)?;
                         let ids = table
                             .range(start..=end)?
-                            .filter_map(|entry| {
-                                let (id, name) = entry.ok()?;
+                            .map(|entry| -> Result<Option<DeclarationId>, redb::Error> {
+                                let (id, name) = entry?;
                                 let id = DeclarationId::new(id.value());
                                 let name = String::from_utf8_lossy(name.value());
-                                predicate(&id, &name).then_some(id)
+                                Ok(predicate(&id, &name).then_some(id))
                             })
+                            .collect::<Result<Vec<_>, redb::Error>>()?
+                            .into_iter()
+                            .flatten()
                             .collect::<Vec<_>>();
                         Ok::<_, redb::Error>(ids)
                     })
@@ -488,7 +494,7 @@ impl RedbStore {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DEFINITIONS)?;
         table
-            .range(..u64::MAX)?
+            .range(..=u64::MAX)?
             .map(|entry| -> Result<DefinitionId, redb::Error> { Ok(DefinitionId::new(entry?.0.value())) })
             .collect()
     }
@@ -688,6 +694,11 @@ mod tests {
             let parallel = store
                 .declaration_ids_matching_parallel(&|_, name| name.contains(query))
                 .expect("parallel scan");
+            assert_eq!(
+                serial.len(),
+                parallel.len(),
+                "a shard boundary must not list a node twice"
+            );
             let serial: BTreeSet<_> = serial.into_iter().map(|id| id.get()).collect();
             let parallel: BTreeSet<_> = parallel.into_iter().map(|id| id.get()).collect();
             assert_eq!(serial, parallel, "scans disagree for query {query:?}");
