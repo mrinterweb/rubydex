@@ -1968,7 +1968,10 @@ impl Graph {
         let Some(decl) = self.declarations.get(&decl_id) else {
             return;
         };
-        let should_remove = decl.has_no_definitions() || !self.declarations.contains_key(decl.owner_id());
+        // The owner may live in the store rather than the overlay: an overlay-only check reads a
+        // live store-backed owner as gone, which takes the Remove path (unresolve the name,
+        // cascade through every member and descendant) instead of the cheap ancestor update.
+        let should_remove = decl.has_no_definitions() || self.declaration(*decl.owner_id()).is_none();
 
         if should_remove {
             // Queue members + singleton for removal
