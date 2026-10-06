@@ -381,7 +381,8 @@ fn build_cell(graph: &Graph, value: &CypherValue) -> Result<CCell, String> {
 fn build_node_cell(graph: &Graph, encoded_id: &str) -> Option<CCell> {
     match NodeRef::decode(encoded_id)? {
         NodeRef::Declaration(id) => {
-            let kind = CDeclaration::kind_from_declaration(graph.declarations().get(&id)?);
+            let declaration = graph.declaration(id)?;
+            let kind = CDeclaration::kind_from_declaration(&declaration);
             Some(CCell::new(
                 CCellTag::Node,
                 CCellPayload {
@@ -394,7 +395,8 @@ fn build_node_cell(graph: &Graph, encoded_id: &str) -> Option<CCell> {
             ))
         }
         NodeRef::Definition(id) => {
-            let kind = map_definition_to_kind(graph.definitions().get(&id)?);
+            let definition = graph.definition(id)?;
+            let kind = map_definition_to_kind(&definition);
             Some(CCell::new(
                 CCellTag::Node,
                 CCellPayload {
@@ -406,7 +408,7 @@ fn build_node_cell(graph: &Graph, encoded_id: &str) -> Option<CCell> {
                 },
             ))
         }
-        NodeRef::Document(id) => graph.documents().contains_key(&id).then(|| {
+        NodeRef::Document(id) => graph.document(id).is_some().then(|| {
             CCell::new(
                 CCellTag::Node,
                 CCellPayload {

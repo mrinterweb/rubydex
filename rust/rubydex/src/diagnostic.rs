@@ -2,7 +2,7 @@
 use crate::model::document::Document;
 use crate::{assert_mem_size, model::ids::UriId, offset::Offset};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
 pub struct Diagnostic {
     rule: Rule,

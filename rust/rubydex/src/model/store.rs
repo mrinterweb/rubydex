@@ -13,6 +13,7 @@ use redb::{Builder, Database, ReadOnlyDatabase, ReadableDatabase, TableDefinitio
 
 use serde::de::DeserializeOwned;
 
+use crate::diagnostic::Diagnostic;
 use crate::model::declaration::Declaration;
 use crate::model::definitions::Definition;
 use crate::model::document::Document;
@@ -537,6 +538,33 @@ impl RedbStore {
     /// Returns an error if the redb read transaction fails.
     pub fn get_document(&self, id: UriId) -> Result<Option<Document>, StoreError> {
         self.get_node(DOCUMENTS, "documents", id.get())
+    }
+
+    /// Streams the `DOCUMENTS` table, returning every `(uri_id, diagnostic)` the store recorded,
+    /// so the caller can apply its overlay/tombstone shadowing per document.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction, table iteration, or a node decode fails.
+    pub fn document_diagnostics(&self) -> Result<Vec<(UriId, Diagnostic)>, StoreError> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(DOCUMENTS)?;
+        let mut diagnostics = Vec::new();
+        for entry in table.range(..=u64::MAX)? {
+            let (id, bytes) = entry?;
+            let uri_id = UriId::new(id.value());
+            let document: Document = postcard::from_bytes(bytes.value()).map_err(|source| StoreError::Corrupt {
+                table: "documents",
+                id: id.value(),
+                source,
+            })?;
+            diagnostics.extend(
+                document
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| (uri_id, diagnostic.clone())),
+            );
+        }
+        Ok(diagnostics)
     }
 
     /// Reads the dependents of a single name, if present.
@@ -1384,6 +1412,24 @@ mod tests {
         assert!(
             paths.contains(&"foo/bar".to_string()),
             "require_paths found no store documents: {paths:?}"
+        );
+    }
+    #[test]
+    fn all_diagnostics_includes_store_backed_documents() {
+        use crate::test_utils::GraphTest;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.redb");
+        let mut context = GraphTest::new();
+        // Unterminated class: the indexer records a parse diagnostic on the document.
+        context.index_uri("file:///foo.rb", "class Foo");
+        RedbStore::build(&path, context.graph()).expect("build store");
+
+        let mut graph = Graph::new();
+        graph.attach_store(RedbStore::open(&path).expect("open store"));
+        assert!(
+            !graph.all_diagnostics().is_empty(),
+            "store-backed document diagnostics must surface after attach"
         );
     }
 }
