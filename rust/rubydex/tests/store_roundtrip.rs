@@ -300,3 +300,42 @@ fn two_sessions_can_share_one_store() {
     assert!(first.get_declaration(*id).expect("read").is_some());
     assert!(second.get_declaration(*id).expect("read").is_some());
 }
+
+/// The edge tombstones of the overlay a session replaced must not survive into the store it
+/// re-attaches, or the new snapshot's name-dependency edges stay invisible to every cascade.
+#[test]
+fn reattaching_a_store_clears_the_previous_overlay_edge_tombstones() {
+    let memory = indexed_graph();
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let first = RedbStore::build(&dir.path().join("first.redb"), &memory).expect("build store");
+    let mut graph = Graph::with_store(first);
+
+    // A live edit tombstones the name-dependency edges it removed...
+    let child = corpus_dir().join("child.rb");
+    let uri = url::Url::from_file_path(&child).expect("file uri").to_string();
+    graph.delete_document(&uri);
+
+    // ...and the rebuilt store holds a fresh snapshot where those edges exist again.
+    let second = RedbStore::build(&dir.path().join("second.redb"), &memory).expect("rebuild store");
+    graph.attach_store(second);
+
+    let third = RedbStore::build(&dir.path().join("third.redb"), &memory).expect("build store");
+    let fresh = Graph::with_store(third);
+
+    let name_ids: Vec<NameId> = memory.name_dependents().keys().copied().collect();
+    assert_eq!(
+        dependents_total(graph, name_ids.as_ref()),
+        dependents_total(fresh, name_ids.as_ref()),
+        "a re-attached store answers like a freshly attached one",
+    );
+}
+
+fn dependents_total(mut graph: Graph, ids: &[NameId]) -> usize {
+    let mut total = 0;
+    for id in ids {
+        graph.materialize_name_dependents(*id);
+        total += graph.name_dependents().get(id).map_or(0, std::vec::Vec::len);
+    }
+    total
+}
