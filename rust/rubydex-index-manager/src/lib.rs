@@ -9,3 +9,4 @@
 pub mod builder;
 pub mod fs_events;
 pub mod registry;
+pub mod watches;
