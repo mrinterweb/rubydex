@@ -826,10 +826,17 @@ mod tests {
 
     #[test]
     fn disk_index_accepts_an_absolute_location() {
-        let config =
-            parse("[disk_index]\nlocation = \"/var/tmp/indexes\"\n").expect("an absolute location is a valid choice");
+        // The parser asks the platform whether the path is absolute, so the test has to offer one
+        // that is absolute on the platform running it
+        let location = if MAIN_SEPARATOR == '\\' {
+            "C:/indexes"
+        } else {
+            "/var/tmp/indexes"
+        };
+        let config = parse(format!("[disk_index]\nlocation = \"{location}\"\n").as_ref())
+            .expect("an absolute location is a valid choice");
 
-        assert_eq!(&*config.disk_index.location, "/var/tmp/indexes");
+        assert_eq!(&*config.disk_index.location, location);
     }
 
     #[test]
