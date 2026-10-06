@@ -147,14 +147,23 @@ pub unsafe extern "C" fn rdx_graph_attach_store(pointer: GraphPointer, path: *co
 }
 
 /// Layout version of the on-disk store. Ruby mixes this into the freshness signature so a store
-/// written by an incompatible layout is rebuilt instead of misread.
+/// written by an incompatible layout is rebuilt instead of misread. The C extension always links
+/// this symbol, so the build without the store feature keeps a stub: its signature is only mixed
+/// in when the disk layer is enabled, which that build cannot do.
 ///
 /// # Safety
 ///
 /// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
 #[unsafe(no_mangle)]
+#[cfg(feature = "redb-store")]
 pub extern "C" fn rdx_store_format_version() -> u32 {
     rubydex::model::store::STORE_FORMAT_VERSION
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "redb-store"))]
+pub extern "C" fn rdx_store_format_version() -> u32 {
+    0
 }
 
 /// Returns the number of store reads that failed since the graph was created or last attached a
