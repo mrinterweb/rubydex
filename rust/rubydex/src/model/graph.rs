@@ -1132,11 +1132,12 @@ impl Graph {
     /// from; a live edit replaces the document (and its diagnostics) in the overlay.
     #[must_use]
     pub fn all_diagnostics(&self) -> Vec<Diagnostic> {
-        let mut diagnostics: Vec<Diagnostic> = self
-            .documents
-            .values()
-            .flat_map(|document| document.diagnostics().iter().cloned())
-            .collect();
+        let mut diagnostics = Vec::new();
+        diagnostics.extend(
+            self.documents
+                .values()
+                .flat_map(|document| document.diagnostics().iter().cloned()),
+        );
         #[cfg(feature = "redb-store")]
         if let Some(store) = &self.store {
             let from_store = scan_store(

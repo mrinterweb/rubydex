@@ -146,6 +146,7 @@ impl RedbStore {
 
     /// Begins a write transaction. Only the builder's writable handle can take one; a read-only
     /// store answering with an error is what keeps a write attempt from aborting the host.
+    #[cfg(test)]
     fn begin_write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
         match &self.db {
             StoreDb::Writable(db) => db.begin_write(),
@@ -241,8 +242,13 @@ impl RedbStore {
 
     /// Creates (or opens) a redb database at `path`.
     ///
+    /// Test-only: production writes the store once via [`Self::build`] and never mutates it (live
+    /// edits land in the graph's overlay). If overlay writes are ever persisted back, bring this
+    /// back together with a batched write API — one write transaction per batch, not per node.
+    ///
     /// # Errors
     /// Returns an error if the database file cannot be created or opened.
+    #[cfg(test)]
     pub fn create(path: &Path) -> Result<Self, redb::Error> {
         Ok(Self {
             db: StoreDb::Writable(Database::create(path)?),
@@ -254,6 +260,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
+    #[cfg(test)]
     pub(crate) fn put_node<V: serde::Serialize>(
         &self,
         table: TableDefinition<u64, &[u8]>,
@@ -274,6 +281,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the redb transaction fails.
+    #[cfg(test)]
     pub(crate) fn delete_node(&self, table: TableDefinition<u64, &[u8]>, key: u64) -> Result<bool, StoreError> {
         let write_txn = self.begin_write()?;
         let existed = {
@@ -288,6 +296,7 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
+    #[cfg(test)]
     pub fn put_string(&self, id: StringId, value: &StringRef) -> Result<(), StoreError> {
         self.put_node(STRINGS, id.get(), value)
     }
@@ -296,32 +305,18 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if serialization or the redb transaction fails.
+    #[cfg(test)]
     pub fn put_declaration(&self, id: DeclarationId, value: &Declaration) -> Result<(), StoreError> {
         self.put_node(DECLARATIONS, id.get(), value)
-    }
-
-    /// Inserts or replaces a single document node.
-    ///
-    /// # Errors
-    /// Returns an error if serialization or the redb transaction fails.
-    pub fn put_document(&self, id: UriId, value: &Document) -> Result<(), StoreError> {
-        self.put_node(DOCUMENTS, id.get(), value)
     }
 
     /// Removes a declaration node, returning whether it existed.
     ///
     /// # Errors
     /// Returns an error if the redb transaction fails.
+    #[cfg(test)]
     pub fn delete_declaration(&self, id: DeclarationId) -> Result<bool, StoreError> {
         self.delete_node(DECLARATIONS, id.get())
-    }
-
-    /// Removes a document node, returning whether it existed.
-    ///
-    /// # Errors
-    /// Returns an error if the redb transaction fails.
-    pub fn delete_document(&self, id: UriId) -> Result<bool, StoreError> {
-        self.delete_node(DOCUMENTS, id.get())
     }
 
     /// Reads and deserializes a node of type `V` from `table` by its `u64` key, if present.
