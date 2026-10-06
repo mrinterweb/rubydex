@@ -20,6 +20,23 @@ const DEFAULT_EXCLUDED_DIRECTORIES: &[&str] = &[
     "tmp",
 ];
 
+/// Takes `key` from `table` as a `T`, falling back to `default` when the setting is absent. A
+/// wrong type or value reports "invalid `{section}.{key}` setting: ...", naming the exact setting
+/// a workspace has to fix.
+fn setting<T: serde::de::DeserializeOwned>(
+    table: &mut Table,
+    section: &str,
+    key: &str,
+    default: T,
+) -> Result<T, String> {
+    match table.remove(key) {
+        None => Ok(default),
+        Some(value) => value
+            .try_into::<T>()
+            .map_err(|error| format!("invalid `{section}.{key}` setting: {error}")),
+    }
+}
+
 /// The graph's settings, read from the `[graph]` section of the configuration file
 #[derive(Debug, Clone)]
 pub struct GraphSettings {
@@ -41,12 +58,7 @@ impl Default for GraphSettings {
 impl GraphSettings {
     /// Parses the `[graph]` section on top of the default exclusions
     fn parse(mut table: Table) -> Result<Self, String> {
-        let exclude = match table.remove("exclude") {
-            None => Vec::new(),
-            Some(value) => value
-                .try_into::<Vec<Box<str>>>()
-                .map_err(|error| format!("invalid `graph.exclude` setting: {error}"))?,
-        };
+        let exclude: Vec<Box<str>> = setting(&mut table, "graph", "exclude", Vec::new())?;
 
         if let Some(key) = table.keys().next() {
             return Err(format!("unknown setting `graph.{key}`"));
@@ -103,33 +115,11 @@ impl Rule {
         let Value::Table(mut table) = value else {
             return Err(format!("invalid `linter.rules.{name}` setting: expected a table"));
         };
+        let section = format!("linter.rules.{name}");
 
-        let enabled = match table.remove("enabled") {
-            Some(Value::Boolean(enabled)) => enabled,
-            Some(_) => {
-                return Err(format!(
-                    "invalid `linter.rules.{name}.enabled` setting: expected a boolean"
-                ));
-            }
-            None => true,
-        };
-
-        let exclude_patterns = match table.remove("exclude") {
-            Some(value) => value
-                .try_into::<Vec<Box<str>>>()
-                .map_err(|error| format!("invalid `linter.rules.{name}.exclude` setting: {error}"))?
-                .into_boxed_slice(),
-            None => Box::default(),
-        };
-
-        let severity = match table.remove("severity") {
-            Some(value) => Some(
-                value
-                    .try_into::<Severity>()
-                    .map_err(|error| format!("invalid `linter.rules.{name}.severity` setting: {error}"))?,
-            ),
-            None => None,
-        };
+        let enabled = setting(&mut table, &section, "enabled", true)?;
+        let exclude_patterns: Vec<Box<str>> = setting(&mut table, &section, "exclude", Vec::new())?;
+        let severity = setting(&mut table, &section, "severity", None)?;
 
         if let Some(key) = table.keys().next() {
             return Err(format!("unknown setting `linter.rules.{name}.{key}`"));
@@ -138,7 +128,7 @@ impl Rule {
         Ok(Self {
             name: Box::from(name),
             enabled,
-            exclude_patterns,
+            exclude_patterns: exclude_patterns.into_boxed_slice(),
             severity,
         })
     }
@@ -213,26 +203,9 @@ impl Default for DiskIndexSettings {
 impl DiskIndexSettings {
     /// Parses the `[disk_index]` section
     fn parse(mut table: Table) -> Result<Self, String> {
-        let enabled = match table.remove("enabled") {
-            None => false,
-            Some(value) => value
-                .try_into::<bool>()
-                .map_err(|error| format!("invalid `disk_index.enabled` setting: {error}"))?,
-        };
-
-        let location = match table.remove("location") {
-            None => Box::from(""),
-            Some(value) => value
-                .try_into::<Box<str>>()
-                .map_err(|error| format!("invalid `disk_index.location` setting: {error}"))?,
-        };
-
-        let manager = match table.remove("manager") {
-            None => false,
-            Some(value) => value
-                .try_into::<bool>()
-                .map_err(|error| format!("invalid `disk_index.manager` setting: {error}"))?,
-        };
+        let enabled = setting(&mut table, "disk_index", "enabled", false)?;
+        let location: Box<str> = setting(&mut table, "disk_index", "location", Box::from(""))?;
+        let manager = setting(&mut table, "disk_index", "manager", false)?;
 
         // A relative location is ambiguous: it would mean different things depending on the
         // process's working directory, which is not what the workspace configured it for.
