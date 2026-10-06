@@ -264,8 +264,8 @@ impl Graph {
     }
 
     /// Creates a graph backed by a prebuilt store as its disk-backed base layer. The in-memory maps
-    /// start empty (built-ins live in the store); workspace nodes are indexed on top, and reads that
-    /// miss memory fall back to the store.
+    /// hold only the resident built-ins (everything else lives in the store); workspace nodes are
+    /// indexed on top, and reads that miss memory fall back to the store.
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn with_store(store: crate::model::store::RedbStore) -> Self {
@@ -278,7 +278,8 @@ impl Graph {
     }
 
     /// Switches an existing graph over to a prebuilt store: drops the in-memory node maps (their
-    /// contents live in the store) and serves all subsequent reads from disk. Used by the launcher
+    /// contents live in the store, with the built-ins pulled back into memory as the resident hot
+    /// set) and serves all subsequent reads from disk. Used by the launcher
     /// orchestration after a forked child has built the store, so the long-lived server holds the
     /// bulk index off-heap.
     #[cfg(feature = "redb-store")]
