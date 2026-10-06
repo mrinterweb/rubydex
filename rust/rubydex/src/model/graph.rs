@@ -376,7 +376,24 @@ impl Graph {
         if let Some(store) = &self.store
             && let Some(dependents) = read_store(store, &self.store_errors, |store| store.get_name_dependents(id))
         {
-            self.name_dependents.insert(id, dependents);
+            // The store's copy predates live edits: a dependent whose node a later edit
+            // tombstoned is stale (the overlay world removed it when the node went away), and
+            // cascading through it resurrects nodes the invalidation already dealt with.
+            let live = dependents
+                .into_iter()
+                .filter(|dep| !match dep {
+                    NameDependent::Definition(dependent_id) => {
+                        self.is_tombstoned(TombstoneKind::Definition, dependent_id.get())
+                    }
+                    NameDependent::Reference(dependent_id) => {
+                        self.is_tombstoned(TombstoneKind::ConstantReference, dependent_id.get())
+                    }
+                    NameDependent::ChildName(dependent_id) | NameDependent::NestedName(dependent_id) => {
+                        self.is_tombstoned(TombstoneKind::Name, dependent_id.get())
+                    }
+                })
+                .collect();
+            self.name_dependents.insert(id, live);
         }
     }
 
