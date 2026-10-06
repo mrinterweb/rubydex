@@ -161,16 +161,22 @@ pub fn require_paths(graph: &Graph, load_paths: &[PathBuf]) -> Vec<String> {
     let num_threads = thread::available_parallelism().map_or(4, std::num::NonZero::get);
 
     // A store-backed graph keeps its bulk documents on disk; pull their URIs so require
-    // completion covers them too. The URI is the document's identity, so the same file present in
-    // both layers deduplicates to one entry (the require path only depends on the URI).
-    let mut uris: Vec<String> = graph
+    // completion covers them too. The URI is the document's identity: a document present in both
+    // layers deduplicates by id (overlay ids shadow store ids), so nothing needs sorting or
+    // string comparison to collapse duplicates.
+    let overlay: IdentityHashSet<UriId> = graph.documents().keys().copied().collect();
+    let store_uris: Vec<String> = graph
+        .store_document_uris()
+        .into_iter()
+        .filter(|(uri_id, _)| !overlay.contains(uri_id))
+        .map(|(_, uri)| uri)
+        .collect();
+    let mut uris: Vec<&str> = graph
         .documents()
         .values()
-        .map(|document| document.uri().to_string())
+        .map(crate::model::document::Document::uri)
         .collect();
-    uris.extend(graph.store_document_uris().into_iter().map(|(_, uri)| uri));
-    uris.sort();
-    uris.dedup();
+    uris.extend(store_uris.iter().map(String::as_str));
 
     let chunk_size = uris.len().div_ceil(num_threads);
 
