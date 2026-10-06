@@ -516,14 +516,7 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        let names = store
-            .search_names()
-            .map_err(|error| {
-                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
-            })
-            .unwrap_or_default();
-        names
+        scan_store(store, &self.store_errors, crate::model::store::RedbStore::search_names)
             .into_iter()
             .filter(|(id, _)| !self.is_tombstoned(TombstoneKind::Declaration, id.get()))
             .collect()
@@ -573,14 +566,8 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        let uris = store
-            .document_uris()
-            .map_err(|error| {
-                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
-            })
-            .unwrap_or_default();
-        uris.into_iter()
+        scan_store(store, &self.store_errors, crate::model::store::RedbStore::document_uris)
+            .into_iter()
             .filter(|(id, _)| !self.is_tombstoned(TombstoneKind::Document, id.get()))
             .collect()
     }
@@ -631,16 +618,14 @@ impl Graph {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        let ids = store
-            .definition_ids()
-            .map_err(|error| {
-                self.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("rubydex: disk index scan failed ({error}); the store is not trustworthy");
-            })
-            .unwrap_or_default();
-        ids.into_iter()
-            .filter(|id| !self.is_tombstoned(TombstoneKind::Definition, id.get()))
-            .collect()
+        scan_store(
+            store,
+            &self.store_errors,
+            crate::model::store::RedbStore::definition_ids,
+        )
+        .into_iter()
+        .filter(|id| !self.is_tombstoned(TombstoneKind::Definition, id.get()))
+        .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
