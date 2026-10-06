@@ -575,6 +575,30 @@ impl RedbStore {
 mod tests {
     use super::*;
 
+    /// The declarations `attach_store`/`with_store` keep resident (the built-ins): the hot nodes
+    /// of every completion walk.
+    fn built_in_ids() -> [DeclarationId; 5] {
+        use crate::model::built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID};
+        [*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID]
+    }
+
+    /// Inserts a non-built-in sample declaration: the built-ins stay resident across attach by
+    /// design, so they cannot serve as "must not be in memory" samples.
+    fn insert_sample(graph: &mut Graph) -> (DeclarationId, String) {
+        use crate::model::built_in::OBJECT_ID;
+        use crate::model::declaration::{ClassDeclaration, Namespace};
+
+        let id = DeclarationId::from("Sample");
+        graph.declarations_mut().insert(
+            id,
+            Declaration::Namespace(Namespace::Class(Box::new(ClassDeclaration::new(
+                "Sample".to_string(),
+                *OBJECT_ID,
+            )))),
+        );
+        (id, "Sample".to_string())
+    }
+
     #[test]
     fn build_persists_full_graph() {
         // `Graph::new()` seeds built-in data (Object, BasicObject, etc.), giving us a real,
@@ -944,14 +968,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("base.redb");
 
-        // Build a store with built-in declarations, then drop the in-memory graph.
-        let base = Graph::new();
-        let (sample_id, sample_name) = base
-            .declarations()
-            .iter()
-            .next()
-            .map(|(id, declaration)| (*id, declaration.name().to_string()))
-            .expect("built-in declarations exist");
+        // Build a store with a non-built-in sample declaration, then drop the in-memory graph.
+        let mut base = Graph::new();
+        let (sample_id, sample_name) = insert_sample(&mut base);
         RedbStore::build(&path, &base).expect("build store");
         drop(base);
 
@@ -1055,7 +1074,10 @@ mod tests {
 
         // Reopen store-backed: `Foo` reads from disk with `bar` as a member.
         let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
-        assert!(graph.declarations().is_empty(), "memory layer is empty");
+        assert!(
+            graph.declarations().keys().all(|id| built_in_ids().contains(id)),
+            "memory layer holds only the built-ins"
+        );
         let foo_id = DeclarationId::from("Foo");
         let removed_member = StringId::from("bar()");
         let added_member = StringId::from("baz()");
@@ -1092,14 +1114,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("base.redb");
 
-        // Build a store from a graph (its built-in declarations give us real nodes to read back).
-        let base = Graph::new();
-        let (sample_id, sample_name) = base
-            .declarations()
-            .iter()
-            .next()
-            .map(|(id, declaration)| (*id, declaration.name().to_string()))
-            .expect("built-in declarations exist");
+        // Build a store from a graph with a non-built-in sample declaration to read back.
+        let mut base = Graph::new();
+        let (sample_id, sample_name) = insert_sample(&mut base);
         RedbStore::build(&path, &base).expect("build store");
         drop(base);
 
@@ -1134,7 +1151,10 @@ mod tests {
         // `Animal` can only surface its `speak` member by reading through the layered accessor.
         // This is the gem-member completion path that previously degraded to empty.
         let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
-        assert!(graph.declarations().is_empty(), "memory layer is empty");
+        assert!(
+            graph.declarations().keys().all(|id| built_in_ids().contains(id)),
+            "memory layer holds only the built-ins"
+        );
 
         let receiver = CompletionReceiver::MethodCall {
             self_decl_id: None,
@@ -1187,7 +1207,10 @@ mod tests {
         // A fresh store-backed graph has empty in-memory maps, so expression completion (the
         // lexical-scope path) can only work by reading through the layered accessors.
         let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
-        assert!(graph.declarations().is_empty(), "memory layer is empty");
+        assert!(
+            graph.declarations().keys().all(|id| built_in_ids().contains(id)),
+            "memory layer holds only the built-ins"
+        );
 
         let receiver = CompletionReceiver::Expression {
             self_decl_id: Some(DeclarationId::from("Animal")),
@@ -1234,7 +1257,10 @@ mod tests {
         drop(graph); // the alias and its target live only in the store now
 
         let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
-        assert!(graph.declarations().is_empty(), "memory layer is empty");
+        assert!(
+            graph.declarations().keys().all(|id| built_in_ids().contains(id)),
+            "memory layer holds only the built-ins"
+        );
 
         // Aliasing a store-only method used to panic in the in-memory-only member lookup; it must
         // resolve to the real method's declaration through the layered accessors.
@@ -1263,7 +1289,10 @@ mod tests {
         drop(graph); // the declarations live only in the store now
 
         let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
-        assert!(graph.declarations().is_empty(), "memory layer is empty");
+        assert!(
+            graph.declarations().keys().all(|id| built_in_ids().contains(id)),
+            "memory layer holds only the built-ins"
+        );
 
         let animal_id = DeclarationId::from("Animal");
 
@@ -1409,6 +1438,7 @@ mod tests {
             "require_paths found no store documents: {paths:?}"
         );
     }
+
     #[test]
     fn all_diagnostics_includes_store_backed_documents() {
         use crate::test_utils::GraphTest;
@@ -1426,5 +1456,39 @@ mod tests {
             !graph.all_diagnostics().is_empty(),
             "store-backed document diagnostics must surface after attach"
         );
+    }
+
+    #[test]
+    fn attach_and_with_store_keep_built_in_declarations_resident() {
+        use crate::model::built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID};
+
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.redb");
+        // Production builds resolve before persisting, and `Kernel`'s declaration only exists
+        // after resolution (the eager inserts cover the other four).
+        let mut base = Graph::new();
+        Resolver::new(&mut base).resolve();
+        RedbStore::build(&path, &base).expect("build store");
+
+        let built_ins = [*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID];
+
+        let mut graph = Graph::new();
+        graph.attach_store(RedbStore::open(&path).expect("open store"));
+        for id in built_ins {
+            assert!(
+                graph.declarations().contains_key(&id),
+                "built-in {id:?} must be resident after attach_store"
+            );
+        }
+
+        let graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        for id in built_ins {
+            assert!(
+                graph.declarations().contains_key(&id),
+                "built-in {id:?} must be resident after with_store"
+            );
+        }
     }
 }

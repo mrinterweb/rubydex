@@ -266,10 +266,12 @@ impl Graph {
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn with_store(store: crate::model::store::RedbStore) -> Self {
-        Self {
+        let mut graph = Self {
             store: Some(store),
             ..Self::default()
-        }
+        };
+        graph.materialize_built_ins();
+        graph
     }
 
     /// Switches an existing graph over to a prebuilt store: drops the in-memory node maps (their
@@ -296,6 +298,19 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         self.store_errors.store(0, std::sync::atomic::Ordering::Relaxed);
         self.store = Some(store);
+        self.materialize_built_ins();
+    }
+
+    /// Pulls the built-in declarations into the overlay at attach time. They are the hottest
+    /// nodes in the graph — every completion walk touches `Object` — and the pre-disk graph kept
+    /// them resident; five bounded nodes (with their members and ancestors inside) cost a few
+    /// tens of KB and save a full store decode per lookup.
+    #[cfg(feature = "redb-store")]
+    fn materialize_built_ins(&mut self) {
+        use crate::model::built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID};
+        for id in [*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID] {
+            self.materialize_declaration(id);
+        }
     }
 
     /// Whether this graph is backed by a disk store (orchestration has attached one).

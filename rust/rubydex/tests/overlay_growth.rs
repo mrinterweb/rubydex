@@ -8,7 +8,7 @@
 
 use rubydex::{
     indexing::{IndexerBackend, LanguageId, index_files, index_source},
-    model::{graph::Graph, store::RedbStore},
+    model::{built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID}, graph::Graph, store::RedbStore},
     resolution::Resolver,
 };
 
@@ -30,7 +30,13 @@ fn repeated_edits_of_the_same_files_do_not_grow_the_overlay() {
     drop(graph);
 
     let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("reopen store"));
-    assert_eq!(graph.declarations().len(), 0, "memory layer starts empty");
+    // The boot memory is the resident built-ins (attach keeps them for the hot completion
+    // walks) — nothing else from the store may leak into the overlay.
+    let built_ins = [*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID];
+    assert!(
+        graph.declarations().keys().all(|id| built_ins.contains(id)),
+        "memory layer starts with only the resident built-ins"
+    );
 
     // 500 edit rounds over the same two files, each round changing the method name so every edit
     // is real work: a new definition, a removed one, and a re-resolution.
