@@ -35,6 +35,11 @@ impl Builder {
         let running = self.child.take();
         if let Some(mut child) = running {
             let status = child.wait();
+            if let Ok(exit) = status
+                && !exit.success()
+            {
+                eprintln!("rubydex-index-manager: the indexer exited {exit}");
+            }
             if status.is_err() {
                 eprintln!("rubydex-index-manager: the indexer failed: {status:?}");
             }
@@ -60,7 +65,6 @@ impl Builder {
         }
 
         let events = self.pending;
-        self.pending = 0;
         let full = manifest > 0 && events * REBUILD_DIFF_RATIO >= manifest;
         let argv = if full {
             let mut full_argv = self.argv.clone();
@@ -73,8 +77,9 @@ impl Builder {
         let spawned = std::process::Command::new(argv[0].clone()).args(&argv[1..]).spawn();
         let Ok(spawned) = spawned else {
             eprintln!("rubydex-index-manager: could not start the indexer: {argv:?}");
-            return None;
+            return None; // `pending` still holds the batch, so the next event retries it
         };
+        self.pending = 0;
         self.child = Some(spawned);
         Some(argv)
     }
