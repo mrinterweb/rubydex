@@ -58,7 +58,7 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     graph = booted_graph
     12.times { |i| write("c#{i}.rb", "class C#{i}\n  def big#{i}; end\nend\n") } # 12/22 > 0.25
     rebuilt = false
-    graph.define_singleton_method(:build_store_via_fork) do |*args|
+    graph.define_singleton_method(:build_store_in_child) do |*args|
       rebuilt = true
       super(*args)
     end
@@ -70,7 +70,7 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     graph = booted_graph
     write("Gemfile.lock", "GEM\n  specs:\n")
     rebuilt = false
-    graph.define_singleton_method(:build_store_via_fork) do |*args|
+    graph.define_singleton_method(:build_store_in_child) do |*args|
       rebuilt = true
       super(*args)
     end
@@ -108,7 +108,7 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
   end
 
   def refute_rebuild(graph, &block)
-    graph.define_singleton_method(:build_store_via_fork) { |*| raise "unexpected rebuild" }
+    graph.define_singleton_method(:build_store_in_child) { |*| raise "unexpected rebuild" }
     block.call
   end
 end

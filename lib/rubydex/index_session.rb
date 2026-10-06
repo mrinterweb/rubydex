@@ -15,7 +15,7 @@ ENV["RUBYDEX_INDEX_MANAGER"] = "0"
 graph = Rubydex::Graph.configure_for_workspace(workspace)
 if flags.include?("--full")
   graph.send(:claim_rebuild, store)
-  graph.send(:build_store_via_fork, store)
+  graph.send(:build_store_in_child, store)
 else
   graph.refresh_if_stale
 end
