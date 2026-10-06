@@ -1056,6 +1056,21 @@ static VALUE rdxr_graph_disk_index_location(VALUE self) {
     return rdxi_owned_c_string_to_ruby(result);
 }
 
+// Rubydex::Graph#path_to_uri: (String path) -> String. The `file://` URI the graph stores a document
+// under for an absolute path. The conversion lives in Rust so a Ruby-side edit addresses the same
+// document key the indexer used (re-implementing the escaping in Ruby drifts on spaces and
+// non-ASCII names).
+static VALUE rdxr_graph_path_to_uri(VALUE _self, VALUE path) {
+    Check_Type(path, T_STRING);
+
+    const char *uri = rdx_path_to_uri(StringValueCStr(path));
+    if (uri == NULL) {
+        rb_raise(rb_eRuntimeError, "Converting a path to a document URI failed");
+    }
+
+    return rdxi_owned_c_string_to_ruby(uri);
+}
+
 // Rubydex::Graph.store_format_version: () -> Integer. Part of the store-freshness signature; see
 // STORE_FORMAT_VERSION in rust/rubydex/src/model/store.rs.
 static VALUE rdxr_graph_store_format_version(VALUE _self) {
@@ -1085,6 +1100,7 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "disk_index_enabled", rdxr_graph_disk_index_enabled, 0);
     rb_define_method(cGraph, "disk_index_location", rdxr_graph_disk_index_location, 0);
     rb_define_method(cGraph, "disk_index_manager", rdxr_graph_disk_index_manager, 0);
+    rb_define_method(cGraph, "path_to_uri", rdxr_graph_path_to_uri, 1);
     rb_define_singleton_method(cGraph, "rdx_store_format_version", rdxr_graph_store_format_version, 0);
     rb_define_method(cGraph, "resolve_constant", rdxr_graph_resolve_constant, 2);
     rb_define_method(cGraph, "declarations", rdxr_graph_declarations, 0);

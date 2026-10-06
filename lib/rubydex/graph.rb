@@ -14,6 +14,11 @@ module Rubydex
     # reclaimed, so a directory can never wedge itself out of rebuilding forever.
     REBUILD_LOCK_TIMEOUT = 30 * 60
 
+    # Above this fraction of changed files a full rebuild (one child, a fresh store shared by every
+    # session) is cheaper than growing each session's overlay. Measured on reserv-api: surgical 200
+    # files = 71 ms; full rebuild = 24.6 s.
+    REBUILD_DIFF_RATIO = 0.25
+
     class << self
       # Creates a new graph with the loaded configuration. For use cases where the graph must be shared between
       # different tools, do not use this. Create and own a `Config` object instead.
@@ -59,7 +64,8 @@ module Rubydex
       attach_store(cache)
       return index_all(workspace_paths) if quarantine_untrustworthy_store(cache)
 
-      @attached_signature = store_signature
+      adopt_manifest(cache)
+      @session_signature = store_signature
       register_session(cache) if index_manager_enabled?
 
       []
@@ -118,29 +124,35 @@ module Rubydex
       nil
     end
 
+    # Moves this session to the current source state, cheapest route first: a fresh marker means
+    # nothing changed; else a small diff is applied into the overlay (no rebuild); else the store is
+    # rebuilt once for everyone. Returns true when the session moved.
     def refresh_if_stale
       cache = store_cache_path
-      signature = store_signature
+      scan = source_scan
+      signature = store_signature(scan)
+      return false if @session_signature == signature
+
       marker = "#{cache}.hash"
-
       if File.exist?(marker) && File.read(marker) == signature
-        return false if @attached_signature == signature
-
         attach_store(cache)
-        @attached_signature = signature
-        return true
-      end
+        adopt_manifest(cache)
+      elsif (changes = surgical_changes(scan))
+        apply_changes(changes)
+        @applied_files = scan
+      else
+        lock = claim_rebuild(cache)
+        return false unless lock
 
-      lock = claim_rebuild(cache)
-      return false unless lock
-
-      begin
-        build_store_via_fork(cache)
-      ensure
-        Dir.rmdir(lock) if File.exist?(lock)
+        begin
+          build_store_via_fork(cache, scan)
+        ensure
+          Dir.rmdir(lock) if File.exist?(lock)
+        end
+        attach_store(cache)
+        adopt_manifest(cache)
       end
-      attach_store(cache)
-      @attached_signature = signature
+      @session_signature = signature
       true
     rescue StandardError => e
       # A session must never lose its index because a refresh failed; keeping the current
@@ -164,6 +176,44 @@ module Rubydex
         registry: registry,
       )
       Rubydex::IndexManager.launch_if_absent(registry)
+    end
+
+    # Files to re-index/delete to move this session from @applied_files to `scan`, or nil when a full
+    # rebuild is required (no manifest, lockfile changed, or the diff exceeds REBUILD_DIFF_RATIO).
+    #: (Hash[String, String]) -> Hash[Symbol, Array[String]]?
+    def surgical_changes(scan)
+      return unless @applied_files && @applied_lockfile == lockfile_hash
+
+      changed = scan.filter_map { |rel, stamp| rel if @applied_files[rel] != stamp }
+      removed = @applied_files.keys - scan.keys
+      return if (changed.size + removed.size) > (scan.size * REBUILD_DIFF_RATIO)
+
+      { changed: changed, removed: removed }
+    end
+
+    # Re-indexes the changed files and deletes the removed ones, then resolves. The store is never
+    # rewritten: these mutations land in the session's overlay on top of the store.
+    #: (Hash[Symbol, Array[String]]) -> void
+    def apply_changes(changes)
+      root = workspace_path
+      to_uri = ->(rel) { path_to_uri(File.join(root, rel)) }
+      changes[:removed].each { |rel| delete_document(to_uri.call(rel)) }
+      changes[:changed].each do |rel|
+        language = File.extname(rel) == ".rbs" ? "rbs" : "ruby"
+        index_source(to_uri.call(rel), File.read(File.join(root, rel)), language)
+      end
+      resolve
+    end
+
+    # What the store at `cache` was built from: the manifest sidecar written next to the marker.
+    # A store predating manifests has no sidecar, so the first stale refresh rebuilds and writes one.
+    #: (String) -> void
+    def adopt_manifest(cache)
+      manifest = Marshal.load(File.binread("#{cache}.files"))
+      @applied_files = manifest["files"]
+      @applied_lockfile = manifest["lockfile"]
+    rescue Errno::ENOENT
+      @applied_files = nil
     end
 
     # Create-exclusive rebuild lock: `Dir.mkdir` raises `Errno::EEXIST` atomically, so N
@@ -304,12 +354,15 @@ module Rubydex
     # workspace. The file signature catches source changes for workspaces without a Gemfile.lock too
     # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
     # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
-    def store_signature
+    def store_signature(scan = source_scan)
       require "digest"
       # The layout version is part of the key so a store written by an incompatible layout is
       # invalidated instead of silently degrading against it. The gem version deliberately does not
       # participate: a release that leaves the layout untouched must not force a full re-index.
-      Digest::SHA1.hexdigest(self.class.store_format_version.to_s + lockfile_hash + workspace_source_signature)
+      Digest::SHA1.hexdigest(self.class.store_format_version.to_s + lockfile_hash + workspace_source_signature(scan))
+    rescue Errno::ENOENT
+      # A file vanished mid-walk; treat the signature as unknown so the store is rebuilt.
+      "unknown"
     end
 
     # SHA of the workspace Gemfile.lock, used to invalidate the store when dependencies change.
@@ -320,18 +373,18 @@ module Rubydex
       File.exist?(lock) ? Digest::SHA1.hexdigest(File.read(lock)) : "no-lockfile"
     end
 
-    # Hash over the path/mtime/size of every indexable Ruby/RBS file under the workspace (excluding
-    # ignored directories). Detects source changes between runs without reading file contents.
-    #: -> String
-    def workspace_source_signature
-      require "digest"
+    # One walk over every indexable Ruby/RBS file under the workspace (excluded directories pruned):
+    # workspace-relative path => "mtime:size". Feeds both the freshness signature and the surgical
+    # diff, so the walk happens once per refresh instead of once per signature.
+    #: -> Hash[String, String]
+    def source_scan
       require "find"
-      digest = Digest::SHA1.new
       root = workspace_path
       excluded = excluded_patterns
       # Excluded patterns are absolute globs anchored at the workspace root (e.g.
       # "/workspace/.git", "/workspace/**/fixtures"), matching the Rust listing's semantics.
       excluded_match = ->(path) { excluded.any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
+      scan = {}
       Find.find(root) do |path|
         if File.directory?(path)
           # Prune excluded directories (e.g. .git, node_modules) so Find doesn't descend into them.
@@ -341,19 +394,28 @@ module Rubydex
         next unless INDEXABLE_EXTENSIONS.include?(File.extname(path))
         next if excluded_match.call(path)
 
-        rel = path.delete_prefix(root + File::SEPARATOR)
         stat = File.stat(path)
+        scan[path.delete_prefix(root + File::SEPARATOR)] = "#{stat.mtime.to_i}:#{stat.size}"
+      end
+      scan
+    end
+
+    # Digest over the scan, field order and separators unchanged from the pre-scan walk so markers
+    # written by older releases stay valid.
+    #: (Hash[String, String]) -> String
+    def workspace_source_signature(scan)
+      require "digest"
+      digest = Digest::SHA1.new
+      scan.each do |rel, stamp|
+        mtime, size = stamp.split(":", 2)
         digest.update(rel)
         digest.update("\0")
-        digest.update(stat.mtime.to_i.to_s)
+        digest.update(mtime)
         digest.update("\0")
-        digest.update(stat.size.to_s)
+        digest.update(size)
         digest.update("\0")
       end
       digest.hexdigest
-    rescue Errno::ENOENT
-      # A file vanished mid-walk; treat the signature as unknown so the store is rebuilt.
-      "unknown"
     end
 
     #: (String) -> bool
@@ -382,7 +444,7 @@ module Rubydex
     # heap and live threads, and a forked child that then allocates heavily corrupts its allocator
     # (SIGSEGV in `tcache_bin_flush` during `index_all`). A fresh process starts with a clean heap.
     #: (String) -> void
-    def build_store_via_fork(cache)
+    def build_store_via_fork(cache, scan = source_scan)
       require "fileutils"
       require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))
@@ -390,6 +452,8 @@ module Rubydex
       tmp = "#{cache}.#{Process.pid}.building"
       marker = "#{cache}.hash"
       marker_tmp = "#{marker}.#{Process.pid}.building"
+      manifest = "#{cache}.files"
+      manifest_tmp = "#{manifest}.#{Process.pid}.building"
       builder = File.expand_path("store_builder.rb", __dir__)
 
       begin
@@ -404,14 +468,19 @@ module Rubydex
         # rebuilds — a wasted rebuild, never staleness (a stale store can only be served when the
         # marker says fresh, which requires the new marker, which is written last). Concurrent builders
         # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
-        File.write(marker_tmp, store_signature)
+        # The scan is captured BEFORE the child runs, so a file edited during the build is marked
+        # stale and re-diffed by the next refresh rather than wrongly served as fresh.
+        File.binwrite(manifest_tmp, Marshal.dump({ "lockfile" => lockfile_hash, "files" => scan }))
+        File.write(marker_tmp, store_signature(scan))
         File.rename(tmp, cache)
+        File.rename(manifest_tmp, manifest)
         File.rename(marker_tmp, marker)
       ensure
         # A failed build (or a crash mid-publish) must not leave .building temps behind; after a
-        # successful publish both were renamed, so these are no-ops.
+        # successful publish all three were renamed, so these are no-ops.
         File.delete(tmp) if File.exist?(tmp)
         File.delete(marker_tmp) if File.exist?(marker_tmp)
+        File.delete(manifest_tmp) if File.exist?(manifest_tmp)
       end
     end
 

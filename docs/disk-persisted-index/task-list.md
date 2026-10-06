@@ -90,4 +90,15 @@ Measurements (release build, 3 sessions on `/tmp/rdx-ws`):
 - Branch-switch storm (200 rewrites, 201 docs): **9.0 s** to a fresh store marker; the burst crossed the 25% cap, so the manager appended `--full` and rebuilt.
 - inotify watch cost unchanged: ~9 ms / ~2 MB for ~2,005 dirs.
 
-Deferred: 1.5 surgical refresh stays gated behind the soak (red at seed 11 / 5 edits); base-store split; `rdx cache` command.
+### Task 1.4 soak gate + Task 1.5 surgical refresh — executed 2026-10, unsigned (sign + push pending)
+
+- [x] Edit soak (`edit_soak_on_corpus`, deterministic LCG script) drove out five store-path invalidation bugs: duplicate references, recording onto a dead declaration, poisoned name materialization, tombstoned name dependents, and the store snapshot resurrecting deleted name-dependency edges (`20e4186`, `d318e74`, `71c441f`).
+- [x] Final soak root cause: `invalidate_declaration` chose Remove-vs-Update with an **overlay-only** owner check, so a store-backed live owner read as gone and every visit cascaded the Remove path (`2237b78`). Cascade visit sets then matched exactly (round 0: 4253 vs 1633 → 1633 vs 1633).
+- [x] Soak GREEN: seeds 11/12/13 at 5 edits and seed 11 at 20 edits on the stdlib corpus.
+- [x] Task 1.5 surgical refresh (`lib/rubydex/graph.rb`): `build_store_via_fork` writes a `<store>.files` manifest of the per-file stamps it stored; `refresh_if_stale` diffs the live tree and re-indexes only those documents, falling back to a full rebuild past `REBUILD_DIFF_RATIO` (25%) or on a lockfile change. Document URIs come from the Rust conversion over FFI (`Graph#path_to_uri`); Ruby's `URI::File.build` disagrees on paths with spaces.
+
+Measurements (release build, `/tmp/rdx-ws` copy of reserv-api, 6,423 files):
+- Surgical refresh of 50 touched files: **341 ms** (stat scan 56 ms, `resolve` 64 ms, ~3 ms/file) vs **24.6 s** full rebuild — 72x faster. RSS growth 17 MB (target ≤ 50 MB). 1-file refresh 186 ms, so ~120 ms is the fixed floor.
+- Missed the plan's 250 ms target by ~90 ms; the floor is scan + resolve, not per-file work.
+
+Deferred: base-store split; `rdx cache` command; persisting overlay writes back to the store; Stage-5 name-keyed search index; Windows build.

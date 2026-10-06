@@ -523,6 +523,23 @@ pub unsafe extern "C" fn rdx_graph_workspace_path(pointer: GraphPointer) -> *con
     })
 }
 
+/// Converts an absolute file path into the `file://` URI the graph stores documents under, so a Ruby-side
+/// edit addresses the same document key the indexer used. Returns null when the path cannot be
+/// represented. Caller must free with `free_c_string`.
+///
+/// # Safety
+///
+/// `path` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_path_to_uri(path: *const c_char) -> *const c_char {
+    let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
+        return ptr::null();
+    };
+    rubydex::model::document::path_to_uri(path.as_ref())
+        .and_then(|uri| CString::new(uri).ok())
+        .map_or(ptr::null(), |c_string| c_string.into_raw().cast_const())
+}
+
 /// Applies a parsed configuration file to the graph, which adopts the workspace it was loaded for along with the
 /// settings of its `[graph]` section. This is the only way to point the graph at a workspace other than the current
 /// directory, and it replaces any previously applied configuration. Tool-specific sections are ignored.
