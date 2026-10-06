@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-require "English"
 require "fileutils"
+require "open3"
 require "rubydex/index_manager"
 
 module Rubydex
@@ -60,7 +60,7 @@ module Rubydex
       return index_all(workspace_paths) unless disk_index_enabled?
 
       cache = store_cache_path
-      build_store_via_fork(cache) unless File.exist?(cache) && store_fresh?(cache)
+      build_store_in_child(cache) unless File.exist?(cache) && store_fresh?(cache)
       attach_store(cache)
       return index_all(workspace_paths) if quarantine_untrustworthy_store(cache)
 
@@ -90,14 +90,19 @@ module Rubydex
     # (untracked/edited files are invisible to `git diff`), or when `from_sha` is
     # not an ancestor of HEAD. Paths are returned workspace-relative.
     def git_changed_files(workspace, from_sha)
-      git_dir = %x(git -C #{workspace} rev-parse --git-dir).strip
-      return unless $CHILD_STATUS.success? && !git_dir.empty?
+      git_dir, status = Open3.capture2("git", "-C", workspace, "rev-parse", "--git-dir")
+      git_dir = git_dir.strip
+      return unless status.success? && !git_dir.empty?
 
       root = File.expand_path(git_dir, File.expand_path(workspace))
       root = root.sub(%r{/\.git\z}, "")
-      return unless %x(git -C #{root} status --porcelain).strip.empty?
+      clean, status = Open3.capture2("git", "-C", root, "status", "--porcelain")
+      return unless status.success? && clean.strip.empty?
 
-      head = %x(git -C #{root} rev-parse HEAD).strip
+      head, status = Open3.capture2("git", "-C", root, "rev-parse", "HEAD")
+      head = head.strip
+      return unless status.success?
+
       return if head == from_sha
 
       # A scoped diff keeps a workspace inside a larger repo honest; git reports
@@ -111,8 +116,8 @@ module Rubydex
       else
         return
       end
-      listing = %x(git -C #{root} diff --name-only #{from_sha}..#{head} -- #{scope})
-      return unless $CHILD_STATUS.success?
+      listing, status = Open3.capture2("git", "-C", root, "diff", "--name-only", "#{from_sha}..#{head}", "--", scope)
+      return unless status.success?
 
       prefix = scope == "." ? "" : "#{scope}/"
       listing.lines.map(&:strip).reject(&:empty?).map do |path|
@@ -145,7 +150,7 @@ module Rubydex
         return false unless lock
 
         begin
-          build_store_via_fork(cache, scan)
+          build_store_in_child(cache, scan)
         ensure
           Dir.rmdir(lock) if File.exist?(lock)
         end
@@ -227,8 +232,17 @@ module Rubydex
       rescue Errno::EEXIST
         return false unless File.exist?(lock) && (Time.now - File.mtime(lock)) > REBUILD_LOCK_TIMEOUT
 
-        Dir.rmdir(lock)
-        Dir.mkdir(lock)
+        # Reclaiming is racy: a competing session may have reclaimed and re-created the lock
+        # between the check and here, in which case this session lost and someone else is
+        # building. A build legitimately slower than REBUILD_LOCK_TIMEOUT is reclaimed too, so
+        # two builders can run on one store; the publish is atomic and the marker decides which
+        # store a session reads.
+        begin
+          Dir.rmdir(lock)
+          Dir.mkdir(lock)
+        rescue Errno::ENOENT, Errno::EEXIST
+          return false
+        end
       end
       lock
     end
@@ -444,7 +458,7 @@ module Rubydex
     # heap and live threads, and a forked child that then allocates heavily corrupts its allocator
     # (SIGSEGV in `tcache_bin_flush` during `index_all`). A fresh process starts with a clean heap.
     #: (String) -> void
-    def build_store_via_fork(cache, scan = source_scan)
+    def build_store_in_child(cache, scan = source_scan)
       require "fileutils"
       require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))

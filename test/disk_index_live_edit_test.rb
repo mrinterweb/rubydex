@@ -61,7 +61,7 @@ class DiskIndexLiveEditTest < Minitest::Test
     original_spawn = Process.method(:spawn)
     Process.define_singleton_method(:spawn) { |*| original_spawn.call("false") }
 
-    assert_raises(RuntimeError) { graph.send(:build_store_via_fork, cache) }
+    assert_raises(RuntimeError) { graph.send(:build_store_in_child, cache) }
     assert_empty(
       Dir.glob(File.join(cache_dir, "*.building")),
       "temp files leaked after a failed store build",
