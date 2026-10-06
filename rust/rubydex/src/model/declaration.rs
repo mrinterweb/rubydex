@@ -145,9 +145,9 @@ impl<T: Eq + Hash> DeclarationCore<T> {
     }
 
     #[must_use]
-    pub fn unqualified_name(&self) -> String {
+    pub fn unqualified_name(&self) -> &str {
         let after_colons = self.name.rsplit("::").next().unwrap_or(&self.name);
-        after_colons.rsplit('#').next().unwrap_or(after_colons).to_string()
+        after_colons.rsplit('#').next().unwrap_or(after_colons)
     }
 
     pub fn extend(&mut self, other: Self) {
@@ -482,7 +482,7 @@ impl Declaration {
 
     // Splits the fully qualified name either in the last `::` or the `#` to return the simple name of this declaration
     #[must_use]
-    pub fn unqualified_name(&self) -> String {
+    pub fn unqualified_name(&self) -> &str {
         match self {
             Self::Namespace(namespace) => namespace.core().unqualified_name(),
             Self::Constant(it) | Self::ConstantAlias(it) => it.unqualified_name(),
