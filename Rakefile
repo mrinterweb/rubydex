@@ -27,7 +27,17 @@ begin
   namespace(:ruby_test) do
     RubyMemcheck::TestTask.new(valgrind: :compile) do |task|
       test_config.call(task)
-      task.test_files = FileList["test/**/*_test.rb"].exclude("test/integration/**/*_test.rb", "test/cli_test.rb")
+      # Valgrind runs with --trace-children=yes and --leak-check=full, which costs ~1000x: the
+      # whole suite is hours per sanitizer. Keep the tests that exercise the native surface on
+      # small workspaces; the ones that index a real workspace stay on the plain ruby_test task.
+      task.test_files = FileList["test/**/*_test.rb"].exclude(
+        "test/integration/**/*_test.rb",
+        "test/cli_test.rb",
+        "test/disk_index_session_refresh_test.rb",
+        "test/disk_index_corrupt_store_test.rb",
+        "test/disk_index_manager_session_test.rb",
+        "test/disk_index_live_edit_test.rb",
+      )
     end
   end
 rescue LoadError

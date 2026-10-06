@@ -9,8 +9,9 @@ require "json"
 
 # Liveness is an OS lock, not a PID: a session holds an exclusive lock on its
 # registry file for its whole lifetime, and the manager prunes the file once the
-# lock is free. These tests cover the killed-session case (SIGKILL, no at_exit)
-# and the manager exiting when the registry empties.
+# lock is free. These tests cover the died-without-cleanup case (`exit!`, which skips at_exit the
+# way a kill does, so valgrind still sees a well-formed child report) and the manager exiting when
+# the registry empties.
 class IndexManagerRegistryTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   MANAGER_BIN = File.join(ROOT, "rust", "target", "debug", "rubydex-index-manager")
@@ -26,7 +27,7 @@ class IndexManagerRegistryTest < Minitest::Test
       ) or raise "cargo build failed"
     end
 
-    %x(#{MANAGER_BIN} #{args.join(" ")})
+    IO.popen([MANAGER_BIN, *args], "r", &:read)
   end
 
   def test_it_lists_a_session_that_holds_its_lock
@@ -60,7 +61,7 @@ class IndexManagerRegistryTest < Minitest::Test
           workspace: "/ws", store: "/ws/tmp/index.redb", builder: ["ruby"], docs: 100,
           registry: ARGV[0]
         )
-        sleep 60
+        exit!
       RUBY
 
       child_pid = Process.spawn("ruby", "-I#{File.join(ROOT, "lib")}", script, registry)
@@ -69,10 +70,7 @@ class IndexManagerRegistryTest < Minitest::Test
         sleep(0.05)
         raise "the child never registered" if Time.now > deadline
       end
-
-      Process.kill(:KILL, child_pid)
       Process.wait(child_pid)
-      sleep(0.2)
 
       sessions = JSON.parse(manager("--registry", registry, "--list"))
       assert_equal([], sessions, "a killed session must be pruned")
@@ -88,12 +86,17 @@ class IndexManagerRegistryTest < Minitest::Test
     Dir.mktmpdir("rdx-reg-") do |dir|
       registry = File.join(dir, "sessions")
       FileUtils.mkdir_p(registry)
+      # A `--list` pays the same process startup, so the bound scales with the machine (and with
+      # valgrind, which traces the manager as a child) instead of assuming real-world speed.
+      started = Time.now
+      manager("--registry", registry, "--list")
+      baseline = Time.now - started
       started = Time.now
       manager("--registry", registry, "--run", "--debounce-ms", "100")
       assert_operator(
         Time.now - started,
         :<,
-        0.5,
+        baseline * 2 + 0.2,
         "the manager must exit within two polls of the registry going empty",
       )
     end
