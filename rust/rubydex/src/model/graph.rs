@@ -288,6 +288,11 @@ impl Graph {
         self.name_dependents = IdentityHashMap::default();
         self.pending_work = Vec::new();
         self.removed = HashSet::new();
+        // The edge ledgers describe the overlay that was just replaced: kept against a new
+        // snapshot they would hide edges that legitimately exist again (a restored file, a
+        // branch toggle).
+        self.removed_edges = HashSet::new();
+        self.removed_edge_lists = HashSet::new();
         #[cfg(feature = "redb-store")]
         self.store_errors.store(0, std::sync::atomic::Ordering::Relaxed);
         self.store = Some(store);
