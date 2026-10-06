@@ -25,10 +25,13 @@ use crate::{query, stats};
 /// Records a failed store read: bumps the counter and explains itself once, on stderr.
 #[cfg(feature = "redb-store")]
 fn record_store_error(errors: &std::sync::atomic::AtomicUsize, error: impl std::fmt::Display) {
-    errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // A one-line stderr note: the Ruby layer reads the counter and falls back to the in-memory
-    // index, so this only has to explain what the counter is reacting to.
-    eprintln!("rubydex: disk index read failed ({error}); the store is not trustworthy");
+    // Only the first failure prints: on a corrupt store a resolution pass makes thousands of
+    // reads, and one line per node would flood stderr. The Ruby layer reads the counter and
+    // falls back to the in-memory index, so the single note only has to explain what the counter
+    // is reacting to.
+    if errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+        eprintln!("rubydex: disk index read failed ({error}); the store is not trustworthy");
+    }
 }
 
 /// Reads a node from the store, turning any failure into `None` plus a recorded error.
