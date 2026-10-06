@@ -18,14 +18,16 @@ choice can be judged against working code.
 ## Decision
 
 `notify` v9, behind the optional Cargo feature `fs_events`, wrapped by the
-`FsEventSource` adapter trait (`next_batch`, `try_next_batch`).
+`FsEventSource` adapter trait (`next_batch`, `try_next_batch`). (Later folded into
+the concrete `NotifySource` type: the trait had exactly one implementation and
+`next_batch` had no caller, so a backend swap now means replacing that one type.)
 
 Why:
 - it is the only maintained crate that actually covers Linux/macOS/Windows in one
   API, and it is the de-facto standard (41.7M recent downloads, used by the
   editors/CLIs this project is compared against);
 - MSRV 1.88 fits the repo's `rust-version = "1.89"` floor;
-- the adapter trait means the manager never names notify, so a backend swap
+- the manager names only the source type in one place, so a backend swap
   (kqueue-only builds, polling, or a future crate) is one file.
 
 Rejected:
@@ -54,6 +56,6 @@ Approving means the index manager (Phase 3, Tasks 3.2–3.4) may subscribe throu
 ## Approval
 
 Approved 2026-10: the user chose `notify`. Tasks 3.2–3.4 build on it, and the
-adapter lives in the manager crate (`rust/rubydex-index-manager/src/fs_events.rs`), so
-notify stays out of every gem build; `default_source` is the one place a backend swap
+source lives in the manager crate (`rust/rubydex-index-manager/src/fs_events.rs`), so
+notify stays out of every gem build; `NotifySource` is the one type a backend swap
 changes.

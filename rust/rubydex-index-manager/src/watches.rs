@@ -2,8 +2,7 @@
 //! store change.
 
 use crate::builder::Builder;
-use crate::fs_events::FsEventSource;
-use crate::fs_events::default_source;
+use crate::fs_events::NotifySource;
 use crate::registry::Session;
 
 use std::path::PathBuf;
@@ -13,7 +12,7 @@ pub struct Watch {
     pub store: PathBuf,
     pub workspaces: Vec<PathBuf>,
     pub builder: Builder,
-    pub source: Box<dyn FsEventSource>,
+    pub source: NotifySource,
     pub manifest: usize,
 }
 
@@ -72,7 +71,7 @@ pub fn watch_for(group: Group, debounce: Duration) -> Watch {
         store: group.store.clone(),
         workspaces: group.workspaces.clone(),
         builder: Builder::new(group.builder),
-        source: default_source(group.workspaces.as_ref(), debounce),
+        source: NotifySource::new(group.workspaces.as_ref(), debounce),
         manifest: group.manifest,
     }
 }
