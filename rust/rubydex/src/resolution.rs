@@ -285,8 +285,13 @@ impl<'a> Resolver<'a> {
 
         match self.resolve_constant_internal(*constant_ref.name_id()) {
             Outcome::Resolved(declaration_id) => {
-                self.graph.record_resolved_reference(id, declaration_id);
-                self.made_progress = true;
+                if self.graph.record_resolved_reference(id, declaration_id) {
+                    self.made_progress = true;
+                } else {
+                    // The target declaration was removed since the name resolved; the resolution
+                    // is stale. Retry the unit instead of recording onto a removed declaration.
+                    self.unit_queue.push_back(unit_id);
+                }
             }
             Outcome::Retry { .. } => {
                 self.unit_queue.push_back(unit_id);

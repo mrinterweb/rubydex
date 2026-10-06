@@ -352,6 +352,17 @@ impl Graph {
         if let Some(store) = &self.store
             && let Some(name) = read_store(store, &self.store_errors, |store| store.get_name(id))
         {
+            // The store's copy predates any live edit: its resolved target may be a declaration
+            // a later edit tombstoned. Serving it resolved would point at a dead declaration and
+            // resurrect the stale world around it; the overlay world unresolved this name, so
+            // mirror that.
+            if let NameRef::Resolved(resolved) = &name
+                && self.is_tombstoned(TombstoneKind::Declaration, resolved.declaration_id().get())
+            {
+                let name_data = resolved.name().clone();
+                self.names.insert(id, NameRef::Unresolved(Box::new(name_data)));
+                return;
+            }
             self.names.insert(id, name);
         }
     }
@@ -1542,15 +1553,33 @@ impl Graph {
     /// # Panics
     ///
     /// Will panic if invoked for a non existing declaration
-    pub fn record_resolved_reference(&mut self, reference_id: ConstantReferenceId, declaration_id: DeclarationId) {
+    /// Returns whether the reference was recorded. `false` means the target declaration no longer
+    /// exists (tombstoned since the name resolved), so the caller retries the unit instead of
+    /// recording onto a removed declaration.
+    pub fn record_resolved_reference(
+        &mut self,
+        reference_id: ConstantReferenceId,
+        declaration_id: DeclarationId,
+    ) -> bool {
         // The target may live only in the store (e.g. an overlay reference resolving to a gem
         // class); materialize it so the reference is recorded on the in-memory copy.
         #[cfg(feature = "redb-store")]
         self.materialize_declaration(declaration_id);
-        self.declarations
-            .get_mut(&declaration_id)
-            .expect("Tried to record a constant reference for a declaration that doesn't exist")
-            .add_constant_reference(reference_id);
+        // The declaration may already list this reference: an edit that keeps a reference at the
+        // same name and offsets re-creates the same reference id, and the store's copy of the
+        // holder persisted it. Recording it twice would corrupt the list.
+        if let Some(existing) = self.declarations.get(&declaration_id)
+            && let Some(refs) = existing.constant_references()
+            && refs.contains(&reference_id)
+        {
+            return true;
+        }
+
+        let Some(declaration) = self.declarations.get_mut(&declaration_id) else {
+            return false;
+        };
+        declaration.add_constant_reference(reference_id);
+        true
     }
 
     /// Handles the deletion of a document identified by `uri`.
@@ -1769,6 +1798,21 @@ impl Graph {
 
                 self.remove_name_dependent(*constant_ref.name_id(), NameDependent::Reference(*ref_id));
                 self.untrack_name(*constant_ref.name_id());
+            }
+            #[cfg(feature = "redb-store")]
+            if let Some(stored) = self.constant_reference(*ref_id) {
+                // The reference lives only in the store, so the detach above never saw it: its
+                // target declaration still lists it. Detach there, or a re-resolve of the edited
+                // document adds the same reference id a second time.
+                let name_id = *stored.name_id();
+                self.materialize_name(name_id);
+                if let Some(NameRef::Resolved(resolved)) = self.names.get(&name_id) {
+                    let declaration_id = *resolved.declaration_id();
+                    self.materialize_declaration(declaration_id);
+                    if let Some(declaration) = self.declarations.get_mut(&declaration_id) {
+                        declaration.remove_constant_reference(ref_id);
+                    }
+                }
             }
             #[cfg(feature = "redb-store")]
             self.tombstone(TombstoneKind::ConstantReference, ref_id.get());

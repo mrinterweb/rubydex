@@ -425,8 +425,9 @@ fn probe_search(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>) {
 
     // Every declaration must be findable by exact-FQN search (search is substring-based,
     // so the result set may include other names — the invariant is an identical result
-    // set on both graphs).
-    let fqns: Vec<String> = cap_sample(all_declaration_ids(graph), sample)
+    // set on both graphs). Search is a full scan per term, so cap the term list: on a
+    // store-backed graph each scan reads from disk.
+    let fqns: Vec<String> = cap_sample(all_declaration_ids(graph), sample.min(300))
         .into_iter()
         .filter_map(|raw| graph.declaration(DeclarationId::new(raw)).map(|d| d.name().to_string()))
         .collect();
@@ -476,6 +477,7 @@ fn harness_detects_divergence() {
 
     let memory = build_graph_from(&corpus_dir());
     let store_graph = build_store_graph_from(&extended, dir.path());
+    eprintln!("HB: probing");
     let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
 
     let mut mem_probe = Vec::new();
@@ -496,6 +498,7 @@ fn differential_memory_vs_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let memory = build_graph_from(&corpus_dir());
     let store_graph = build_store_graph_from(&corpus_dir(), dir.path());
+    eprintln!("HB: probing");
     let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
 
     let mut mem_probe = Vec::new();
@@ -559,9 +562,13 @@ fn edit_case(edits: &[(&str, Option<&str>)]) {
             memory.delete_document(&uri_memory);
         }
     }
+    eprintln!("HB: edits done");
     Resolver::new(&mut store_graph).resolve();
+    eprintln!("HB: store resolved");
     Resolver::new(&mut memory).resolve();
+    eprintln!("HB: memory resolved");
 
+    eprintln!("HB: probing");
     let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
     let mut mem_probe = Vec::new();
     probe_all(&memory, &name_ids, 0, &mut mem_probe);
@@ -682,15 +689,10 @@ fn replace_first(s: &str, from: &str, to: &str) -> String {
     }
 }
 
-/// Heavy: applies a deterministic edit script to a copy of a real corpus through the live-edit API
-/// and requires sampled probes to match the same edits applied to an in-memory graph. Seed-fixed so
+/// Applies the deterministic edit script to a copy of `corpus` through the live-edit API and
+/// requires sampled probes to match the same edits applied to an in-memory graph. Seed-fixed so
 /// a failure reproduces exactly.
-#[test]
-#[ignore = "set RUBYDEX_DIFF_CORPUS to a Ruby source tree to run"]
-fn edit_soak_on_corpus() {
-    let corpus = PathBuf::from(std::env::var("RUBYDEX_DIFF_CORPUS").expect("RUBYDEX_DIFF_CORPUS"));
-    let mut seed: u64 = std::env::var("RUBYDEX_SOAK_SEED").map_or(11, |s| s.parse().expect("seed"));
-    let edits: usize = std::env::var("RUBYDEX_SOAK_EDITS").map_or(200, |s| s.parse().expect("edits"));
+fn soak(corpus: &Path, mut seed: u64, edits: usize) {
     let mut next = || -> usize {
         seed = seed
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -702,7 +704,7 @@ fn edit_soak_on_corpus() {
     let ws = dir.path().join("ws");
     let status = std::process::Command::new("cp")
         .arg("-r")
-        .arg(&corpus)
+        .arg(corpus)
         .arg(&ws)
         .status()
         .expect("cp");
@@ -773,11 +775,27 @@ fn edit_soak_on_corpus() {
     Resolver::new(&mut store_graph).resolve();
     Resolver::new(&mut memory).resolve();
 
-    let name_ids: Vec<NameId> = memory.names().keys().copied().collect();
+    // Sample the completion probe: per-name completion against the store is a redb read per
+    // lookup, so hundreds of thousands of names would take hours. Both graphs probe the same
+    // truncated, deterministic prefix so the results stay comparable.
+    let mut name_ids: Vec<NameId> = memory
+        .names()
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    name_ids.truncate(300);
+
+    probe_battery_matches(&memory, &store_graph, &name_ids);
+}
+
+/// Runs the full probe battery on both graphs and requires the normalized results to match.
+fn probe_battery_matches(memory: &Graph, store_graph: &Graph, name_ids: &[NameId]) {
     let mut mem_probe = Vec::new();
-    probe_all(&memory, &name_ids, 2_000, &mut mem_probe);
+    probe_all(memory, name_ids, 2_000, &mut mem_probe);
     let mut store_probe = Vec::new();
-    probe_all(&store_graph, &name_ids, 2_000, &mut store_probe);
+    probe_all(store_graph, name_ids, 2_000, &mut store_probe);
     normalize(&mut mem_probe);
     normalize(&mut store_probe);
 
@@ -790,4 +808,23 @@ fn edit_soak_on_corpus() {
     for (m, s) in mem_probe.iter().zip(store_probe.iter()) {
         assert_eq!(m, s, "soak divergence (seed/edits reproduce it)");
     }
+}
+
+/// Always-on regression gate for the edit script, on the fixture corpus: small enough to run in
+/// every `cargo test`, and it caught the duplicate-reference and dead-target recording bugs.
+#[test]
+fn edits_on_the_fixture_corpus_match_memory() {
+    soak(&corpus_dir(), 11, 12);
+}
+
+/// Heavy: applies a deterministic edit script to a copy of a real corpus through the live-edit API
+/// and requires sampled probes to match the same edits applied to an in-memory graph. Seed-fixed so
+/// a failure reproduces exactly.
+#[test]
+#[ignore = "set RUBYDEX_DIFF_CORPUS to a Ruby source tree to run"]
+fn edit_soak_on_corpus() {
+    let corpus = PathBuf::from(std::env::var("RUBYDEX_DIFF_CORPUS").expect("RUBYDEX_DIFF_CORPUS"));
+    let seed: u64 = std::env::var("RUBYDEX_SOAK_SEED").map_or(11, |s| s.parse().expect("seed"));
+    let edits: usize = std::env::var("RUBYDEX_SOAK_EDITS").map_or(200, |s| s.parse().expect("edits"));
+    soak(&corpus, seed, edits);
 }
