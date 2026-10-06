@@ -13,6 +13,10 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::time::Duration;
 
+use rubydex_index_manager::watches::Watch;
+use rubydex_index_manager::watches::groups;
+use rubydex_index_manager::watches::sync;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "rubydex-index-manager",
@@ -38,37 +42,6 @@ struct Args {
         help = "A burst of events inside this window collapses into one indexer"
     )]
     debounce_ms: u32,
-}
-
-struct Watch {
-    store: PathBuf,
-    workspaces: Vec<PathBuf>,
-    builder: rubydex_index_manager::builder::Builder,
-    source: Box<dyn rubydex_index_manager::fs_events::FsEventSource>,
-    manifest: usize,
-}
-
-/// One watcher set and one indexer per store, rebuilt only when the sessions for that
-/// store change.
-fn groups(sessions: &[rubydex_index_manager::registry::Session]) -> Vec<(PathBuf, Vec<PathBuf>, Vec<String>, usize)> {
-    let mut sorted = sessions.to_vec();
-    sorted.sort();
-
-    let mut grouped = Vec::<(PathBuf, Vec<PathBuf>, Vec<String>, usize)>::new();
-    for session in sorted {
-        let store = session.store.clone();
-        let same = grouped.iter().any(|group| group.0 == store);
-        if same {
-            let last = grouped.len() - 1;
-            grouped[last].1.push(session.workspace);
-        } else {
-            grouped.push((store, vec![session.workspace], session.builder.clone(), session.docs));
-        }
-    }
-    for group in &mut grouped {
-        group.1.sort();
-    }
-    grouped
 }
 
 fn main() {
@@ -104,21 +77,7 @@ fn main() {
                 exit(0);
             }
 
-            let grouped = groups(&sessions);
-            watches.retain(|watch| grouped.iter().any(|group| group.0 == watch.store));
-            for group in grouped {
-                let existing = watches.iter().find(|watch| watch.store == group.0);
-                if existing.is_some() && existing.unwrap().workspaces == group.1 {
-                    continue;
-                }
-                watches.push(Watch {
-                    store: group.0.clone(),
-                    workspaces: group.1.clone(),
-                    builder: rubydex_index_manager::builder::Builder::new(group.2.clone()),
-                    source: rubydex_index_manager::fs_events::default_source(group.1.as_ref(), debounce),
-                    manifest: group.3,
-                });
-            }
+            sync(&mut watches, groups(&sessions), debounce);
 
             for watch in &mut watches {
                 watch.builder.reap();
