@@ -560,7 +560,7 @@ fn declaration_property(graph: &Graph, id: DeclarationId, prop: &str) -> CypherV
 
     match prop {
         "name" => CypherValue::Str(declaration.name().to_string()),
-        "unqualified_name" => CypherValue::Str(declaration.unqualified_name()),
+        "unqualified_name" => CypherValue::Str(declaration.unqualified_name().to_string()),
         "visibility" => graph
             .visibility(&id)
             .map_or(CypherValue::Null, |visibility| CypherValue::Str(visibility.to_string())),
