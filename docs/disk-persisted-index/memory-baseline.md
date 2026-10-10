@@ -246,3 +246,11 @@ Composition: descendants = 58,406 (`BasicObject`), 58,332 (`Object`), 58,328 (`K
 (`Module`), 17,344 (`Class`); serialized node sizes 173-604 KB. So the big three are ~2 MB each in
 memory and `Module`/`Class` ~0.5 MB. Dropping `Module`+`Class` saves only 1.2 MB; keeping `Object`
 alone costs +2.2 MB instead of +7.8 MB and keeps the one node every lexical walk reaches.
+
+### Reverted: the resident built-ins are gone
+
+The measured win was 0.4 ms on hovers of five specific constants and nothing else moved (other core
+constants, gem-scoped constants, misses and the 76 ms/op completion scan all unchanged), against
++7.8 MB permanent on the open path. Reverted. After the revert: bare `--open-store` 4.71/5.03 MB,
+query+search 18.93 MB. If store-backed read latency needs work again the lever is a shared read
+transaction (every constant, no resident cost), not residency.
