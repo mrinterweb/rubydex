@@ -264,22 +264,19 @@ impl Graph {
     }
 
     /// Creates a graph backed by a prebuilt store as its disk-backed base layer. The in-memory maps
-    /// hold only the resident built-ins (everything else lives in the store); workspace nodes are
-    /// indexed on top, and reads that miss memory fall back to the store.
+    /// start empty (everything lives in the store); workspace nodes are indexed on top, and reads
+    /// that miss memory fall back to the store.
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn with_store(store: crate::model::store::RedbStore) -> Self {
-        let mut graph = Self {
+        Self {
             store: Some(store),
             ..Self::default()
-        };
-        graph.materialize_built_ins();
-        graph
+        }
     }
 
     /// Switches an existing graph over to a prebuilt store: drops the in-memory node maps (their
-    /// contents live in the store, with the built-ins pulled back into memory as the resident hot
-    /// set) and serves all subsequent reads from disk. Used by the launcher
+    /// contents live in the store) and serves all subsequent reads from disk. Used by the launcher
     /// orchestration after a forked child has built the store, so the long-lived server holds the
     /// bulk index off-heap.
     #[cfg(feature = "redb-store")]
@@ -302,19 +299,6 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         self.store_errors.store(0, std::sync::atomic::Ordering::Relaxed);
         self.store = Some(store);
-        self.materialize_built_ins();
-    }
-
-    /// Pulls the built-in declarations into the overlay at attach time. They are the hottest
-    /// nodes in the graph — every completion walk touches `Object` — and the pre-disk graph kept
-    /// them resident; five bounded nodes (with their members and ancestors inside) cost a few
-    /// tens of KB and save a full store decode per lookup.
-    #[cfg(feature = "redb-store")]
-    fn materialize_built_ins(&mut self) {
-        use crate::model::built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID};
-        for id in [*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID] {
-            self.materialize_declaration(id);
-        }
     }
 
     /// Whether this graph is backed by a disk store (orchestration has attached one).
