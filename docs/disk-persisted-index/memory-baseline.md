@@ -227,3 +227,22 @@ set** (drop `Module`/`Class`, split node serialization so a declaration core dec
 Fourth measurement trap: `require "rubydex"` resolves `rubydex/4.0/rubydex` through RubyGems, so a
 bare `ruby -Ilib` run loads a globally-installed rubydex gem's `.so` and profiles that build. Run
 the profile under `bundle exec`.
+
+### What the resident built-ins actually cost (same binary, env-selected set, bare `--open-store`)
+
+| resident set | RSS | Δ vs none |
+|---|---|---|
+| none | 4.89 MB | — |
+| `Class` | 5.27 MB | +0.4 |
+| `Module` | 5.46 MB | +0.6 |
+| `BasicObject` | 6.91 MB | +2.0 |
+| `Kernel` | 6.99 MB | +2.1 |
+| `Object` | 7.08 MB | +2.2 |
+| `Object` + `Kernel` | 9.29 MB | +4.4 |
+| `BasicObject` + `Kernel` + `Object` | 11.50 MB | +6.6 |
+| all five (shipped) | 12.70 MB | **+7.8** |
+
+Composition: descendants = 58,406 (`BasicObject`), 58,332 (`Object`), 58,328 (`Kernel`), 25,508
+(`Module`), 17,344 (`Class`); serialized node sizes 173-604 KB. So the big three are ~2 MB each in
+memory and `Module`/`Class` ~0.5 MB. Dropping `Module`+`Class` saves only 1.2 MB; keeping `Object`
+alone costs +2.2 MB instead of +7.8 MB and keeps the one node every lexical walk reaches.
