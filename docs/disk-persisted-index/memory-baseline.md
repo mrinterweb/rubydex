@@ -188,3 +188,42 @@ commit             0.21 s
 single-threaded — redb permits one write transaction, so the shards-parallel trick from C1 does not
 apply. The commit itself is 0.21s; compression would trade CPU for space while CPU is already the
 cost. Cold builds stay a one-time cost per workspace (freshness marker); no change made.
+
+## Post-simplification A/B (`ea75779` -> `e0a0332`, release .so)
+
+Base = `git worktree` at `ea75779` (the commit before the simplification pass), HEAD = `e0a0332`.
+Same stdlib corpus (29,282 `.rb`/`.rbs` files counted this run, 386,192 declarations). Medians of 3
+profile runs, 2-3 CLI runs. `/usr/bin/time` is absent on this host, so memory comes from the CLI's
+`MemoryStats` and `/proc/self/status`.
+
+| Metric | `ea75779` | `e0a0332` | Δ |
+|---|---|---|---|
+| Build path wall / peak RSS | 6.91 s / 1,580 MB | 6.88 s / 1,575 MB | flat |
+| In-memory index wall / peak RSS | 2.14 s / 1,069 MB | 2.02 s / 1,056 MB | flat (inside run spread) |
+| Open path, bare open RSS | 4.55 MB | **12.50 MB** | **+8 MB** |
+| Open path, query+search RSS | 19.5 MB | 23.3 MB | +3.8 MB |
+| Session boot | 0.80 s | 0.79 s | flat |
+| Session RSS after boot / final (HWM) | 57 MB / 89 MB (97) | 71 MB / 99 MB (104) | +14 MB |
+| search | 76.0 ms/op | 75.7 ms/op | flat |
+| hover (resolve_constant) | 0.22 ms/op | 0.02 ms/op | 10x — but see below |
+| resolve_require_path | 0.00 ms/op | 0.00 ms/op | flat |
+| require_paths (full) | 22.7 ms/op | 21.3 ms/op | -6% (noisy: 18.4-22.5 spread) |
+
+**The hover win is narrow, not broad.** Timed per class of constant (500 ops each, disk mode):
+
+| hover target | `ea75779` | `e0a0332` |
+|---|---|---|
+| the five kept built-ins (`Object`, `Kernel`, `Module`, `Class`, `BasicObject`) | 0.405 ms/op | ~0 ms/op |
+| other core constants (`Hash`, `String`, `Enumerable`, `Struct`, `Comparable`) | 0.026 | 0.026 |
+| gem-scoped constants (`ActiveRecord::Base`, `Bundler::Thor::Argument`, …) | 0.002 | 0.002 |
+| missing constant | 0.001 | 0.001 |
+
+So keeping the built-ins resident (`3d15445`) buys 0.4 ms on hovers of five specific constants and
+costs ~8 MB resident on the open path, which is meant to sit near 5 MB. The profile's 10x headline
+is an artifact of its hover list being four-fifths built-ins. **Open: revert, or shrink the resident
+set** (drop `Module`/`Class`, split node serialization so a declaration core decodes without its
+`NamespaceStore`, or a bounded decode cache instead of permanent residency).
+
+Fourth measurement trap: `require "rubydex"` resolves `rubydex/4.0/rubydex` through RubyGems, so a
+bare `ruby -Ilib` run loads a globally-installed rubydex gem's `.so` and profiles that build. Run
+the profile under `bundle exec`.
