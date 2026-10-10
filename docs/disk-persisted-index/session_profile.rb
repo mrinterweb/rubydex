@@ -2,7 +2,11 @@
 
 # Session profile: RSS + latency of a long-lived Ruby process using the graph API,
 # disk-store-backed vs in-memory. Usage:
-#   ruby -Ilib docs/disk-persisted-index/session-profile.rb <corpus> <store> [disk|memory]
+#   bundle exec ruby -Ilib docs/disk-persisted-index/session_profile.rb <corpus> <store> [disk|memory]
+#
+# `bundle exec` is not optional: `require "rubydex"` resolves `rubydex/4.0/rubydex` through
+# RubyGems, so a bare `ruby -Ilib` silently loads a globally-installed rubydex gem's .so and
+# profiles that build instead of this checkout.
 #
 # <corpus> is the workspace to index (e.g. $(ruby -e 'print RbConfig::CONFIG["rubylibdir"]')/..).
 # <store> is a store built from that corpus, which disk mode copies into its cache:
