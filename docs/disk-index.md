@@ -127,6 +127,15 @@ subscribes to filesystem events; it debounces 200 ms of events into one indexer,
 time, and spawns it as a child so build memory dies with it. A burst covering a quarter of the
 workspace rebuilds from scratch. It exits when no session is alive.
 
+It watches through the [notify](https://crates.io/crates/notify) crate — inotify on Linux, FSEvents on
+macOS, `ReadDirectoryChangesW` on Windows, polling fallback where none of those exist — so it reacts to
+OS events rather than scanning your tree. Each watched root is subscribed recursively, which means the
+resource that scales is the number of directories, not the number of files (2,005 directories measured
+at ~9 ms of setup and ~2 MB; a stock Linux default allows 8,192 inotify watches). Only create, modify
+and remove events are collected; ordinary reads are ignored. The 200 ms debounce is rubydex's own,
+because notify v9 dropped its debouncers. A rename can arrive as a removal plus a creation, which costs
+one extra reindex instead of a missed change.
+
 It is a head start, never a dependency: with it absent, killed, or never started, sessions still
 refresh exactly as described above. Liveness is an OS lock rather than a PID — a session holds its
 registry file under an exclusive lock for its whole lifetime, so the manager learns a session died the

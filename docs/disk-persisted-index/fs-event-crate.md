@@ -1,8 +1,7 @@
 # File-system event crate — decision record (Task 3.1)
 
-Status: **awaiting approval** before the index manager depends on it. The adapter
-spike (`rust/rubydex/src/fs_events.rs`, `tests/fs_events.rs`) already exists so the
-choice can be judged against working code.
+Status: **approved** (2026-10) and implemented in
+`rust/rubydex-index-manager/src/fs_events.rs` (`NotifySource`).
 
 ## Candidates (crates.io data, fetched 2026-10-05)
 
@@ -17,10 +16,19 @@ choice can be judged against working code.
 
 ## Decision
 
-`notify` v9, behind the optional Cargo feature `fs_events`, wrapped by the
-`FsEventSource` adapter trait (`next_batch`, `try_next_batch`). (Later folded into
-the concrete `NotifySource` type: the trait had exactly one implementation and
-`next_batch` had no caller, so a backend swap now means replacing that one type.)
+`notify` v9, wrapped by the `FsEventSource` adapter trait (`next_batch`,
+`try_next_batch`). (Later folded into the concrete `NotifySource` type: the trait had
+exactly one implementation and `next_batch` had no caller, so a backend swap now means
+replacing that one type. It was also originally behind an optional `fs_events` feature
+in the `rubydex` crate; that feature, its dependency and the spike are gone, and notify
+is now a plain dependency of the manager crate only.)
+
+`9.0.0-rc.5` is still a release candidate as of 2026-10-10: it is the newest published
+version, and the newest stable is `8.2.0` — v9's `EventHandler` trait (which replaced
+v8's closure handler) is what `NotifySource` is written against. The requirement is a
+caret range, so `cargo update` moves it to `9.0.0` when that is published, with no
+manifest edit. Verified with `cargo update --dry-run -p notify`: still `9.0.0-rc.5`,
+nothing newer to move to.
 
 Why:
 - it is the only maintained crate that actually covers Linux/macOS/Windows in one
@@ -50,12 +58,9 @@ Rejected:
 
 ## Approval
 
-Approving means the index manager (Phase 3, Tasks 3.2–3.4) may subscribe through
-`FsEventSource` and no other FS-event crate is introduced.
-
-## Approval
-
 Approved 2026-10: the user chose `notify`. Tasks 3.2–3.4 build on it, and the
 source lives in the manager crate (`rust/rubydex-index-manager/src/fs_events.rs`), so
 notify stays out of every gem build; `NotifySource` is the one type a backend swap
-changes.
+changes. Its tests live beside it in `rust/rubydex-index-manager/tests/fs_events.rs`,
+`watches.rs` and `builder.rs`; the earlier spike in the `rubydex` crate is gone,
+along with that crate's `fs_events` feature and dependency.
