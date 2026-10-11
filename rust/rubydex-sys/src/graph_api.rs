@@ -146,6 +146,30 @@ pub unsafe extern "C" fn rdx_graph_attach_store(pointer: GraphPointer, path: *co
     })
 }
 
+/// Drops a prebuilt store and the overlay above it, returning the graph to a plain in-memory state.
+/// Returns `true` on success, `false` when the `redb-store` feature was not compiled in. Used by the
+/// Ruby layer when a store reports read failures, so the session can index in memory instead of
+/// answering from the untrustworthy copy.
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub extern "C" fn rdx_graph_detach_store(pointer: GraphPointer) -> bool {
+    with_mut_graph(pointer, |graph| {
+        #[cfg(feature = "redb-store")]
+        {
+            graph.detach_store();
+            true
+        }
+        #[cfg(not(feature = "redb-store"))]
+        {
+            let _ = graph;
+            false
+        }
+    })
+}
+
 /// Layout version of the on-disk store. Ruby mixes this into the freshness signature so a store
 /// written by an incompatible layout is rebuilt instead of misread. The C extension always links
 /// this symbol, so the build without the store feature keeps a stub: its signature is only mixed

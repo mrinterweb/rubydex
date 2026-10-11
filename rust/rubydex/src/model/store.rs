@@ -966,6 +966,43 @@ mod tests {
     }
 
     #[test]
+    fn detach_store_leaves_an_empty_graph_that_indexes_in_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("base.redb");
+
+        let base = Graph::new();
+        let (sample_id, _sample_name) = base
+            .declarations()
+            .iter()
+            .next()
+            .map(|(id, declaration)| (*id, declaration.name().to_string()))
+            .expect("built-in declarations exist");
+        RedbStore::build(&path, &base).expect("build store");
+        drop(base);
+
+        let mut graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        assert!(graph.declarations().is_empty(), "overlay is empty");
+        assert!(graph.declaration(sample_id).is_some(), "the store answers the node");
+
+        // Detaching is the corrupt-store fallback: the session must end up with no store and an
+        // empty overlay so it can index in memory. A store that stays attached would keep serving
+        // the copy that was just declared untrustworthy.
+        graph.detach_store();
+
+        assert!(!graph.is_store_backed(), "no store behind the graph");
+        assert_eq!(graph.store_error_count(), 0, "the error counter is reset");
+        assert!(graph.declaration(DeclarationId::from("NothingLeft")).is_none(), "the store answers nothing");
+
+        // Back to a plain in-memory graph: the built-ins are there (resolution seeds itself from
+        // `Object`, so without them the next resolve panics) and re-indexing resolves cleanly.
+        assert!(
+            graph.declaration(*crate::model::built_in::OBJECT_ID).is_some(),
+            "the built-in declarations are back"
+        );
+        crate::resolution::Resolver::new(&mut graph).resolve();
+    }
+
+    #[test]
     fn add_member_materializes_store_backed_owner() {
         use crate::model::ids::StringId;
 

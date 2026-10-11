@@ -62,7 +62,7 @@ module Rubydex
       cache = store_cache_path
       build_store_in_child(cache) unless File.exist?(cache) && store_fresh?(cache)
       attach_store(cache)
-      return index_all(workspace_paths) if quarantine_untrustworthy_store(cache)
+      return index_all(workspace_paths) if quarantine_if_untrustworthy(cache)
 
       adopt_manifest(cache)
       @session_signature = store_signature
@@ -164,6 +164,25 @@ module Rubydex
       # snapshot is strictly better than raising into the editor's tool call.
       warn("rubydex: session refresh failed (#{e.class}: #{e.message}); keeping the current snapshot")
       false
+    end
+
+    # Moves an untrustworthy store out of the cache path and detaches it, returning true when it
+    # did. A store that failed to decode (corrupt, or written by an incompatible layout) must not
+    # keep answering queries with holes: while one stays attached the layered accessors keep serving
+    # it and `index_all` refuses to index, so detaching is what makes the in-memory fallback real.
+    # Quarantining drops the freshness marker with it, so the next run rebuilds instead of re-reading
+    # the same bad file. Also called before every MCP tool call, because the error counter only fills
+    # up once something has read, and `attach_store` resets it.
+    #
+    #: (?String) -> bool
+    def quarantine_if_untrustworthy(cache = store_cache_path)
+      return false unless respond_to?(:store_errors) && store_errors.positive?
+
+      warn("rubydex: disk-backed index returned errors; quarantining the store and indexing in memory")
+      detach_store
+      FileUtils.mv(cache, "#{cache}.corrupt", force: true)
+      FileUtils.rm_f("#{cache}.hash")
+      true
     end
 
     # Makes this session visible to the machine-wide manager and starts the manager when none is
@@ -436,20 +455,6 @@ module Rubydex
     def store_fresh?(cache)
       marker = "#{cache}.hash"
       File.exist?(marker) && File.read(marker) == store_signature
-    end
-
-    # Moves an untrustworthy store out of the cache path; returns true when it did. A store that
-    # failed to decode (corrupt, or written by an incompatible layout) must not keep answering
-    # queries with holes. Quarantining drops the freshness marker with it, so the next run rebuilds
-    # instead of re-reading the same bad file.
-    #: (String cache) -> bool
-    def quarantine_untrustworthy_store(cache)
-      return false unless respond_to?(:store_errors) && store_errors.positive?
-
-      warn("rubydex: disk-backed index returned errors; quarantining the store and indexing in memory")
-      FileUtils.mv(cache, "#{cache}.corrupt", force: true)
-      FileUtils.rm_f("#{cache}.hash")
-      true
     end
 
     # Builds the store in a short-lived child process (whose peak indexing memory is reclaimed

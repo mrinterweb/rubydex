@@ -766,6 +766,11 @@ class Rubydex::Graph
   sig { params(path: String).void }
   def attach_store(path); end
 
+  # Drops the disk store and the overlay above it, leaving a plain in-memory graph. Used when a
+  # store reports read failures and the session must index in memory instead.
+  sig { void }
+  def detach_store; end
+
   # Opens a prebuilt redb store at `path` and returns a new Graph that uses it as its base layer.
   # The `redb-store` feature is compiled into the gem by default; opt out at build time with
   # RUBYDEX_NO_REDB_STORE=1.
