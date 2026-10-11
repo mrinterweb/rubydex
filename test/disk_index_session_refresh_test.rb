@@ -128,6 +128,31 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
+  # The manager decides "rebuild instead of surgical" by comparing a burst of filesystem events
+  # against the number a session registers, so it must be the manifest's file count and not the count
+  # of indexed roots.
+  def test_a_session_registers_the_manifest_size
+    with_workspace do |dir, _rb|
+      4.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\nend\n") }
+      graph = session(dir)
+
+      registered = nil
+      mod = Rubydex::IndexManager.singleton_class
+      original = mod.instance_method(:register)
+      original_launch = mod.instance_method(:launch_if_absent)
+      mod.define_method(:register) { |docs:, **| registered = docs; nil }
+      mod.define_method(:launch_if_absent) { |_| nil }
+      begin
+        graph.send(:register_session, graph.send(:store_cache_path))
+      ensure
+        mod.define_method(:register, original)
+        mod.define_method(:launch_if_absent, original_launch)
+      end
+
+      assert_equal(5, registered, "foo.rb plus four files, not a list of five roots")
+    end
+  end
+
   def test_a_session_reopens_when_the_store_is_rebuilt_elsewhere
     with_workspace do |dir, rb|
       first = session(dir)
