@@ -281,6 +281,27 @@ impl Graph {
     /// bulk index off-heap.
     #[cfg(feature = "redb-store")]
     pub fn attach_store(&mut self, store: crate::model::store::RedbStore) {
+        self.clear_overlay();
+        self.store = Some(store);
+    }
+
+    /// Drops the disk store and the overlay on top of it, leaving a plain in-memory graph. Used
+    /// when a store proves untrustworthy: while one is attached the layered accessors keep answering
+    /// from the copy that was just quarantined, and `index_all` refuses to index anything.
+    #[cfg(feature = "redb-store")]
+    pub fn detach_store(&mut self) {
+        self.clear_overlay();
+        self.store = None;
+        // A plain in-memory graph always carries the built-in declarations: resolution seeds itself
+        // from `Object`/`BasicObject`, so a graph left without them panics on the next resolve.
+        add_built_in_data(self);
+    }
+
+    /// Empties every in-memory node map, the tombstones and the edge ledgers, and resets the store
+    /// error counter. The ledgers describe the overlay being replaced: kept against a new snapshot
+    /// they would hide edges that legitimately exist again (a restored file, a branch toggle).
+    #[cfg(feature = "redb-store")]
+    fn clear_overlay(&mut self) {
         self.declarations = IdentityHashMap::default();
         self.definitions = IdentityHashMap::default();
         self.documents = IdentityHashMap::default();
@@ -291,14 +312,9 @@ impl Graph {
         self.name_dependents = IdentityHashMap::default();
         self.pending_work = Vec::new();
         self.removed = HashSet::new();
-        // The edge ledgers describe the overlay that was just replaced: kept against a new
-        // snapshot they would hide edges that legitimately exist again (a restored file, a
-        // branch toggle).
         self.removed_edges = HashSet::new();
         self.removed_edge_lists = HashSet::new();
-        #[cfg(feature = "redb-store")]
         self.store_errors.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.store = Some(store);
     }
 
     /// Whether this graph is backed by a disk store (orchestration has attached one).

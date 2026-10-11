@@ -192,6 +192,10 @@ module Rubydex
         graph = graph_or_error
         return Tool::Response.new([{ type: "text", text: JSON.generate(graph) }]).to_h if graph.is_a?(Error)
 
+        # A store that started reporting read failures must not keep answering with holes: the
+        # counter only fills up once something has read, so the previous call is what notices.
+        graph.quarantine_if_untrustworthy
+
         # A branch switch is a filesystem event no session owns, so the freshness marker is what
         # notices. Reopening is per-session (redb pins a snapshot at open), so every live session
         # in the directory converges at its own next tool call; only the first to claim the

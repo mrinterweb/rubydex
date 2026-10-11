@@ -63,7 +63,14 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     refute(File.exist?(cache), "the corrupt store must not stay on the active cache path")
     refute(File.exist?("#{cache}.hash"), "its freshness marker must go with it, so the next run rebuilds")
 
-    # The session still answers, from the in-memory index it fell back to.
+    # The session must have fallen back to an in-memory index. `index_all` is a no-op while a store
+    # is attached (static store-backed mode), so a file indexed after the fallback can only be found
+    # if the store was really detached — asserting on a constant the store already had would pass
+    # either way, with the quarantined store answering from its open handle.
+    File.write(File.join(@tmp, "late.rb"), "class LateToAdd; end\n")
+    graph.index_all([File.join(@tmp, "late.rb")])
+    graph.resolve # what MCPServer#spawn_indexer does after index_workspace
+    refute_nil(graph["LateToAdd"], "the fallback must index in memory, not keep serving the store")
     refute_nil(graph["Klass0"], "the session must keep working after quarantining the store")
   end
 
