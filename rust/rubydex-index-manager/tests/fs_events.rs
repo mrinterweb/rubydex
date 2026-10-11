@@ -77,3 +77,56 @@ fn adapter_coalesces_a_burst_into_one_batch() {
         assert!(batch.contains(file), "burst split across batches: {file:?}");
     }
 }
+
+/// A root that cannot be watched must be reported rather than silently dropped, and retried: the
+/// per-user inotify budget that caused the failure frees up later, and without a retry the workspace
+/// stays unwatched for the manager's whole lifetime.
+#[test]
+fn an_unwatchable_root_is_reported_and_can_recover() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("not-yet");
+    let mut source = NotifySource::new(std::slice::from_ref(&missing), Duration::from_millis(50));
+
+    assert_eq!(
+        source.unwatched(),
+        std::slice::from_ref(&missing),
+        "a root that could not be watched has to be reported"
+    );
+    assert_eq!(source.retry_unwatched(), 1, "and retried while it is still missing");
+
+    std::fs::create_dir(&missing).expect("create");
+    assert_eq!(source.retry_unwatched(), 0, "once it exists the retry must succeed");
+    assert!(source.unwatched().is_empty());
+
+    let file = missing.join("a.rb");
+    std::fs::write(&file, "class A; end").expect("write");
+    assert!(
+        batch_contains(&mut source, &file),
+        "a retried root must actually deliver events"
+    );
+}
+
+/// A retry must not disturb the roots that are already being watched.
+#[test]
+fn retrying_one_root_keeps_the_others_watched() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let good = dir.path().to_path_buf();
+    let missing = dir.path().join("not-yet");
+    let paths = [good.clone(), missing.clone()];
+    let mut source = NotifySource::new(&paths, Duration::from_millis(50));
+    assert_eq!(
+        source.unwatched(),
+        std::slice::from_ref(&missing),
+        "only the missing root failed"
+    );
+
+    std::fs::create_dir(&missing).expect("create");
+    assert_eq!(source.retry_unwatched(), 0);
+
+    let file = good.join("a.rb");
+    std::fs::write(&file, "class A; end").expect("write");
+    assert!(
+        batch_contains(&mut source, &file),
+        "the healthy root stopped delivering"
+    );
+}

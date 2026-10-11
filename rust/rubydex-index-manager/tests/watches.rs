@@ -65,3 +65,37 @@ fn a_store_that_loses_its_last_session_loses_its_watchers() {
         "the surviving watcher set is untouched"
     );
 }
+
+/// Retrying an unwatched root costs a tree walk, so it happens on an interval rather than on every
+/// pass; a watch with nothing unwatched is never retried at all.
+#[test]
+fn an_unwatched_root_is_not_retried_on_every_pass() {
+    let store = "/ws/index.redb";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("not-yet");
+    let mut watches: Vec<Watch> = vec![];
+    sync(
+        &mut watches,
+        groups(&[session(store, missing.to_str().unwrap())]),
+        debounce(),
+    );
+
+    assert_eq!(
+        watches[0].source.unwatched().len(),
+        1,
+        "a workspace that could not be watched must be visible in the watch"
+    );
+    let retry_at = watches[0].retry_at;
+
+    sync(
+        &mut watches,
+        groups(&[session(store, missing.to_str().unwrap())]),
+        debounce(),
+    );
+    assert_eq!(retry_at, watches[0].retry_at, "the interval must not have been reset");
+    assert_eq!(
+        watches[0].source.unwatched().len(),
+        1,
+        "a retry inside the interval would walk the tree again for nothing"
+    );
+}

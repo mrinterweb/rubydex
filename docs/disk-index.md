@@ -134,7 +134,9 @@ one watch per *directory*, not per file, so that is what scales: reserv's 2,960-
 watches, one thread and ~4 MB resident for the whole manager. That count is per user
 (`fs.inotify.max_user_watches`: 8,192 on many stock distros, 524,288 on this machine), so a few large
 worktrees can exhaust a low default — in which case the manager warns, skips that one workspace, and
-everything keeps working through the session's own refresh. Only create, modify and remove events are
+keeps retrying it once a minute until the budget frees up, so recovery needs neither a restart nor your
+attention. Every other workspace keeps working meanwhile, and a workspace that is not watched still
+refreshes through the session's own path. Only create, modify and remove events are
 collected; ordinary reads are ignored. The 200 ms debounce is rubydex's own, because notify v9 dropped
 its debouncers. A rename can arrive as a removal plus a creation, which costs one extra reindex instead
 of a missed change.
