@@ -129,12 +129,21 @@ workspace rebuilds from scratch. It exits when no session is alive.
 
 It watches through the [notify](https://crates.io/crates/notify) crate — inotify on Linux, FSEvents on
 macOS, `ReadDirectoryChangesW` on Windows, polling fallback where none of those exist — so it reacts to
-OS events rather than scanning your tree. Each watched root is subscribed recursively, which means the
-resource that scales is the number of directories, not the number of files (2,005 directories measured
-at ~9 ms of setup and ~2 MB; a stock Linux default allows 8,192 inotify watches). Only create, modify
-and remove events are collected; ordinary reads are ignored. The 200 ms debounce is rubydex's own,
-because notify v9 dropped its debouncers. A rename can arrive as a removal plus a creation, which costs
-one extra reindex instead of a missed change.
+OS events rather than scanning your tree. Each watched root is subscribed recursively, and inotify wants
+one watch per *directory*, not per file, so that is what scales: reserv's 2,960-directory tree is 3,051
+watches, one thread and ~4 MB resident for the whole manager. That count is per user
+(`fs.inotify.max_user_watches`: 8,192 on many stock distros, 524,288 on this machine), so a few large
+worktrees can exhaust a low default — in which case the manager warns, skips that one workspace, and
+everything keeps working through the session's own refresh. Only create, modify and remove events are
+collected; ordinary reads are ignored. The 200 ms debounce is rubydex's own, because notify v9 dropped
+its debouncers. A rename can arrive as a removal plus a creation, which costs one extra reindex instead
+of a missed change.
+
+Subscribing is cheap: delivery is pushed by the kernel, and the ~0.2% CPU the manager costs while idle
+is its own 20 ms poll of an in-memory queue, not the events. It does not filter by path, though, and
+`.git` sits inside the watched tree — so a git operation adds events to the count that decides
+surgical-versus-rebuild. The threshold is a quarter of the manifest (1,610 events on a 6,441-file
+workspace), which a commit's `.git` churn does not reach.
 
 It is a head start, never a dependency: with it absent, killed, or never started, sessions still
 refresh exactly as described above. Liveness is an OS lock rather than a PID — a session holds its
