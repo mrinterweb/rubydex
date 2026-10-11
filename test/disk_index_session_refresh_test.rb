@@ -30,6 +30,29 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     graph
   end
 
+  # `prepare_for_tool_call` is the whole pre-tool sequence, and it resolves exactly once itself —
+  # that is what lets the caller skip its own resolve, which used to walk and sort every document
+  # URI in the store on top of the refresh.
+  def test_a_tool_call_refresh_leaves_the_graph_resolved
+    with_workspace do |dir, rb|
+      # Enough files that editing one stays inside REBUILD_DIFF_RATIO and takes the surgical branch
+      # (with a single-file workspace any change is a rebuild, which resolves zero times).
+      20.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\nend\n") }
+      graph = session(dir)
+      resolves = 0
+      graph.define_singleton_method(:resolve) do
+        resolves += 1
+        super()
+      end
+
+      File.write(rb, "class Foo\n  def quux; end\nend\n")
+      assert(graph.prepare_for_tool_call)
+
+      assert_equal(1, resolves, "the refresh resolves once, internally")
+      assert_includes(graph["Foo"].members.map(&:name), "Foo#quux()", "and the graph answers")
+    end
+  end
+
   def test_a_session_reopens_when_the_store_is_rebuilt_elsewhere
     with_workspace do |dir, rb|
       first = session(dir)

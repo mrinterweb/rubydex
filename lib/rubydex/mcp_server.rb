@@ -192,15 +192,12 @@ module Rubydex
         graph = graph_or_error
         return Tool::Response.new([{ type: "text", text: JSON.generate(graph) }]).to_h if graph.is_a?(Error)
 
-        # A store that started reporting read failures must not keep answering with holes: the
-        # counter only fills up once something has read, so the previous call is what notices.
-        graph.quarantine_if_untrustworthy
-
         # A branch switch is a filesystem event no session owns, so the freshness marker is what
-        # notices. Reopening is per-session (redb pins a snapshot at open), so every live session
-        # in the directory converges at its own next tool call; only the first to claim the
-        # rebuild lock pays the rebuild, the rest pay the ~71 ms reopen.
-        graph.resolve if graph.refresh_if_stale
+        # notices. Reopening is per-session (redb pins a snapshot at open), so every live session in
+        # the directory converges at its own next tool call; only the first to claim the rebuild lock
+        # pays the rebuild, the rest pay the reopen. This also leaves the graph resolved — resolving
+        # again here would be a full store scan on every tool call.
+        graph.prepare_for_tool_call
 
         response = tool.new(graph).call(**arguments.transform_keys(&:to_sym))
         response.to_h
