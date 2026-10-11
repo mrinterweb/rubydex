@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 # The indexer the background manager spawns: it refreshes one store and exits. The
-# manager already runs it as a subprocess, so the store build forks inside it only to
-# keep the builder's peak memory off the daemon's resident set. `--full` (appended by
-# the manager for a burst that covers a quarter of the manifest) skips the fast paths
-# and rebuilds the store from scratch.
+# manager already runs it as a subprocess, and it in turn spawns the store build, so
+# the builder's peak memory is reclaimed by a process that exits rather than by the
+# daemon. `--full` (appended by the manager for a burst that covers a quarter of the
+# manifest) skips the fast paths and rebuilds the store from scratch.
 
 require "rubydex"
 
