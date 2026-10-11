@@ -90,14 +90,33 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     refute_nil(graph["WithSpace"], "a path with a space must re-index, not silently miss the URI")
   end
 
+  # The stamp a freshness check records used to be whole-second mtime + size, so an edit that
+  # landed in the same second and did not change the byte count was invisible forever: the session
+  # kept answering with the deleted constant and had no way to learn otherwise. Agents rewriting a
+  # file with sed and then querying immediately hit exactly this.
+  def test_a_same_size_edit_inside_the_same_second_is_noticed
+    graph = booted_graph
+    path = File.join(@ws, "c0.rb")
+    second = Time.now.to_i + 1_000
+    File.utime(Time.at(second + 0.1), Time.at(second + 0.1), path)
+    graph.refresh_if_stale
+
+    before = File.size(path)
+    source = "class C0Renamed\nend\n"
+    File.write(path, source + ("#" * (before - source.bytesize)))
+    assert_equal(before, File.size(path), "the edit must not change the file size")
+    File.utime(Time.at(second + 0.2), Time.at(second + 0.2), path)
+
+    assert(graph.refresh_if_stale, "a same-size edit inside the same second must be noticed")
+    refute_nil(graph["C0Renamed"])
+    assert_nil(graph["C0"])
+  end
+
   private
 
   def write(rel, src)
     path = File.join(@ws, rel)
     File.write(path, src)
-    # mtime has 1 s resolution in the signature; force a visible change.
-    t = Time.now + rand(10..1000)
-    File.utime(t, t, path)
   end
 
   def booted_graph

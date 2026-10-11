@@ -407,8 +407,10 @@ module Rubydex
     end
 
     # One walk over every indexable Ruby/RBS file under the workspace (excluded directories pruned):
-    # workspace-relative path => "mtime:size". Feeds both the freshness signature and the surgical
-    # diff, so the walk happens once per refresh instead of once per signature.
+    # workspace-relative path => "mtime_micros:size". Microseconds, not whole seconds: a same-size
+    # edit that lands inside the same second is otherwise invisible to the freshness check forever.
+    # Feeds both the freshness signature and the surgical diff, so the walk happens once per refresh
+    # instead of once per signature.
     #: -> Hash[String, String]
     def source_scan
       require "find"
@@ -428,13 +430,14 @@ module Rubydex
         next if excluded_match.call(path)
 
         stat = File.stat(path)
-        scan[path.delete_prefix(root + File::SEPARATOR)] = "#{stat.mtime.to_i}:#{stat.size}"
+        scan[path.delete_prefix(root + File::SEPARATOR)] = "#{stat.mtime.tv_sec * 1_000_000 + stat.mtime.tv_nsec / 1000}:#{stat.size}"
       end
       scan
     end
 
-    # Digest over the scan, field order and separators unchanged from the pre-scan walk so markers
-    # written by older releases stay valid.
+    # Digest over the scan. Field order and separators are stable by design; the mtime field gained
+    # sub-second resolution, which makes every pre-existing marker mismatch exactly once (one
+    # rebuild per workspace) and then hold again.
     #: (Hash[String, String]) -> String
     def workspace_source_signature(scan)
       require "digest"
