@@ -506,25 +506,30 @@ impl Graph {
         None
     }
 
-    /// `(id, FQN name)` pairs for all declarations held by the disk store, excluding tombstoned
-    /// declarations so a live edit's deletion is not resurrected by search. Empty when no store is
-    /// attached. Used by declaration search to cover store-backed declarations.
+    /// Declaration ids held by the disk store, excluding tombstoned declarations so a live edit's
+    /// deletion is not resurrected by enumeration. Empty when no store is attached. Keys only: node
+    /// enumeration keeps the ids and throws the names away, so deserializing every declaration cost
+    /// one String per declaration per query.
     #[cfg(feature = "redb-store")]
     #[must_use]
-    pub fn store_declaration_names(&self) -> Vec<(DeclarationId, String)> {
+    pub fn store_declaration_ids(&self) -> Vec<DeclarationId> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        scan_store(store, &self.store_errors, crate::model::store::RedbStore::search_names)
-            .into_iter()
-            .filter(|(id, _)| !self.is_tombstoned(TombstoneKind::Declaration, id.get()))
-            .collect()
+        scan_store(
+            store,
+            &self.store_errors,
+            crate::model::store::RedbStore::declaration_ids,
+        )
+        .into_iter()
+        .filter(|id| !self.is_tombstoned(TombstoneKind::Declaration, id.get()))
+        .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
     #[must_use]
     #[allow(clippy::unused_self)]
-    pub fn store_declaration_names(&self) -> Vec<(DeclarationId, String)> {
+    pub fn store_declaration_ids(&self) -> Vec<DeclarationId> {
         Vec::new()
     }
 
@@ -554,6 +559,27 @@ impl Graph {
         &self,
         _predicate: &dyn Fn(&DeclarationId, &str) -> bool,
     ) -> Vec<DeclarationId> {
+        Vec::new()
+    }
+
+    /// Document ids held by the disk store, excluding tombstoned documents — keys only, see
+    /// [`Self::store_declaration_ids`]. Empty when no store is attached.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_document_ids(&self) -> Vec<UriId> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        scan_store(store, &self.store_errors, crate::model::store::RedbStore::document_ids)
+            .into_iter()
+            .filter(|id| !self.is_tombstoned(TombstoneKind::Document, id.get()))
+            .collect()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn store_document_ids(&self) -> Vec<UriId> {
         Vec::new()
     }
 

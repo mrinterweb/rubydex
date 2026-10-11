@@ -424,7 +424,7 @@ impl GraphProvider for Graph {
 /// All document ids the graph can see: in-memory map ∪ disk store.
 fn document_node_ids(graph: &Graph) -> Vec<UriId> {
     let mut ids = graph.documents().keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_document_uris().into_iter().map(|(id, _)| id));
+    ids.extend(graph.store_document_ids());
     ids
 }
 
@@ -438,7 +438,7 @@ fn definition_node_ids(graph: &Graph) -> Vec<DefinitionId> {
 /// All declaration ids the graph can see: in-memory map ∪ disk store.
 fn declaration_node_ids(graph: &Graph) -> Vec<DeclarationId> {
     let mut ids = graph.declarations().keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_declaration_names().into_iter().map(|(id, _)| id));
+    ids.extend(graph.store_declaration_ids());
     ids
 }
 
