@@ -80,6 +80,30 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     assert(rebuilt, "a lockfile change must rebuild (the gem closure changed)")
   end
 
+  # Each round edits two files — well under REBUILD_DIFF_RATIO — but a surgical apply leaves them in
+  # the overlay and only a rebuild compacts it. Without a ceiling, a session that absorbs many small
+  # branch switches converges on holding the whole index in memory (~12 MB per 1,000 files).
+  def test_enough_surgical_edits_trigger_a_rebuild
+    graph = booted_graph
+    rebuilt = false
+    graph.define_singleton_method(:build_store_in_child) do |*args|
+      rebuilt = true
+      super(*args)
+    end
+
+    rounds = 0
+    until rebuilt
+      rounds += 1
+      refute(rounds > 11, "no rebuild in #{rounds} rounds: the overlay ceiling never fires")
+
+      write("c#{rounds * 2}.rb", "class C#{rounds * 2}\n  def r#{rounds}; end\nend\n")
+      write("c#{rounds * 2 + 1}.rb", "class C#{rounds * 2 + 1}\n  def r#{rounds}; end\nend\n")
+      graph.refresh_if_stale
+    end
+
+    assert_equal(3, rounds, "25% of 22 files is 5, so the round that applies the 6th file rebuilds")
+  end
+
   def test_store_signature_is_unchanged_by_the_scan_refactor
     graph = Rubydex::Graph.configure_for_workspace(@ws)
     assert_equal(graph.send(:store_signature), graph.send(:store_signature, graph.send(:source_scan)))

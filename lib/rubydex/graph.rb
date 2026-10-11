@@ -27,6 +27,13 @@ module Rubydex
     # its own saves. RUBYDEX_REFRESH_TTL overrides it.
     REFRESH_TTL = 2
 
+    # Once the overlay would hold this fraction of the workspace's files, a rebuild is the cheaper
+    # answer. A surgical apply leaves the edited files in the overlay and only a rebuild compacts it,
+    # so a session that absorbs many small branch switches converges on holding the whole index in
+    # memory: ~12 MB per 1,000 files measured on reserv, against ~5 MB for the store it opened. Same
+    # shape as REBUILD_DIFF_RATIO, which bounds one refresh; this one bounds the session.
+    OVERLAY_COMPACTION_RATIO = 0.25
+
     class << self
       # Creates a new graph with the loaded configuration. For use cases where the graph must be shared between
       # different tools, do not use this. Create and own a `Config` object instead.
@@ -196,8 +203,17 @@ module Rubydex
       changed = scan.filter_map { |rel, stamp| rel if @applied_files[rel] != stamp }
       removed = @applied_files.keys - scan.keys
       return if (changed.size + removed.size) > (scan.size * REBUILD_DIFF_RATIO)
+      return if overlay_divergence(scan) > (scan.size * OVERLAY_COMPACTION_RATIO)
 
       { changed: changed, removed: removed }
+    end
+
+    # What the overlay would hold after applying `scan`: every file whose stamp moved away from what
+    # the attached store was built from, plus what the store holds that no longer exists. Only a
+    # rebuild (or a re-attach) resets it.
+    #: (Hash[String, String]) -> Integer
+    def overlay_divergence(scan)
+      scan.count { |rel, stamp| @manifest_files[rel] != stamp } + (@manifest_files.keys - scan.keys).size
     end
 
     # Re-indexes the changed files and deletes the removed ones, then resolves. The store is never
@@ -219,9 +235,13 @@ module Rubydex
     #: (String) -> void
     def adopt_manifest(cache)
       manifest = Marshal.load(File.binread("#{cache}.files"))
-      @applied_files = manifest["files"]
+      # What the attached store holds, kept apart from `@applied_files` (what this session is serving)
+      # so the overlay can be measured against the store it sits on.
+      @manifest_files = manifest["files"]
+      @applied_files = @manifest_files
       @applied_lockfile = manifest["lockfile"]
     rescue Errno::ENOENT
+      @manifest_files = nil
       @applied_files = nil
     end
 
