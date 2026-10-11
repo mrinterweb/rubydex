@@ -19,6 +19,14 @@ module Rubydex
     # files = 71 ms; full rebuild = 24.6 s.
     REBUILD_DIFF_RATIO = 0.25
 
+    # How stale the freshness walk may go, in seconds. The walk stats every indexable file (407 ms on
+    # reserv, about 10% of a cold boot) and runs before every tool call, so it is reused inside this
+    # window. Owner decision 2026-08-10: an edit made outside the editor (sed, a formatter, a script)
+    # may be answered up to this stale. A moved HEAD bounds the case that matters (a branch switch or a
+    # commit rewrites files in bulk) and the editor path is unaffected, because it indexes its own
+    # saves. RUBYDEX_REFRESH_TTL overrides it.
+    REFRESH_TTL = 2
+
     class << self
       # Creates a new graph with the loaded configuration. For use cases where the graph must be shared between
       # different tools, do not use this. Create and own a `Config` object instead.
@@ -60,6 +68,7 @@ module Rubydex
       return index_all(workspace_paths) unless disk_index_enabled?
 
       cache = store_cache_path
+      @head_sha = workspace_head
       build_store_in_child(cache) unless File.exist?(cache) && store_fresh?(cache)
       attach_store(cache)
       return index_all(workspace_paths) if quarantine_if_untrustworthy(cache)
@@ -76,69 +85,26 @@ module Rubydex
       index_all(workspace_paths)
     end
 
-    # Refreshes this session onto the newest snapshot for its directory. Sessions never
-    # coordinate: the freshness marker is compared against what this session attached, and the
-    # first session to claim the create-exclusive rebuild lock spawns the one rebuild child — a
-    # branch switch is a filesystem event no session owns, so the signature is what notices. redb
-    # pins a snapshot at open, so every session must re-attach to see a new store; the rest find
-    # the marker fresh and pay only the reopen (~71 ms measured, vs ~25 s for the rebuild).
-    #: -> bool
-    # Git fast path for "what changed since the store was built". Far cheaper than
-    # walking the tree (a scoped `git diff` is ~10ms vs ~70ms to stat the tree), but
-    # it is only a fast path: returns nil when git cannot answer completely, i.e.
-    # when the workspace is not a git checkout, when the checkout is not clean
-    # (untracked/edited files are invisible to `git diff`), or when `from_sha` is
-    # not an ancestor of HEAD. Paths are returned workspace-relative.
-    def git_changed_files(workspace, from_sha)
-      git_dir, status = Open3.capture2("git", "-C", workspace, "rev-parse", "--git-dir")
-      git_dir = git_dir.strip
-      return unless status.success? && !git_dir.empty?
-
-      root = File.expand_path(git_dir, File.expand_path(workspace))
-      root = root.sub(%r{/\.git\z}, "")
-      clean, status = Open3.capture2("git", "-C", root, "status", "--porcelain")
-      return unless status.success? && clean.strip.empty?
-
-      head, status = Open3.capture2("git", "-C", root, "rev-parse", "HEAD")
-      head = head.strip
-      return unless status.success?
-
-      return if head == from_sha
-
-      # A scoped diff keeps a workspace inside a larger repo honest; git reports
-      # paths relative to the repo root, so translate them back.
-      root_path = root
-      ws_path = File.expand_path(workspace)
-      scope = if ws_path == root_path
-        "."
-      elsif ws_path.start_with?("#{root_path}/")
-        ws_path[root_path.length + 1..]
-      else
-        return
-      end
-      listing, status = Open3.capture2("git", "-C", root, "diff", "--name-only", "#{from_sha}..#{head}", "--", scope)
-      return unless status.success?
-
-      prefix = scope == "." ? "" : "#{scope}/"
-      listing.lines.map(&:strip).reject(&:empty?).map do |path|
-        return nil unless prefix.empty? || path.start_with?(prefix)
-
-        path[prefix.length..]
-      end
-    rescue StandardError
-      nil
-    end
-
     # Moves this session to the current source state, cheapest route first: a fresh marker means
     # nothing changed; else a small diff is applied into the overlay (no rebuild); else the store is
-    # rebuilt once for everyone. Returns true when the session moved.
+    # rebuilt once for everyone. Sessions never coordinate: the signature is what notices, and the
+    # first session to claim the create-exclusive rebuild lock spawns the one rebuild child. redb pins
+    # a snapshot at open, so every session must re-attach to see a new store; the rest find the marker
+    # fresh and pay only the reopen (~71 ms measured, vs ~25 s for the rebuild).
     #
     # Leaves the graph resolved: a surgical apply resolves, a re-attached store is already resolved,
     # and a rebuilt store was built from a resolved graph. Callers must not resolve again.
+    #
+    # -> bool
     def refresh_if_stale
       cache = store_cache_path
-      scan = source_scan
-      signature = store_signature(scan)
+      head = workspace_head
+      # A moved HEAD means the tree changed in bulk, which is exactly what the walk measures, so the
+      # memo is dropped rather than reused stale: stale stamps would be published as what the rebuild
+      # had just indexed, and the next session would disagree and rebuild again.
+      scan = source_scan(rewalk: @head_sha != head)
+      @head_sha = head
+      signature = store_signature(scan, head)
       return false if @session_signature == signature
 
       marker = "#{cache}.hash"
@@ -153,7 +119,7 @@ module Rubydex
         return false unless lock
 
         begin
-          build_store_in_child(cache, scan)
+          build_store_in_child(cache, scan, head)
         ensure
           Dir.rmdir(lock) if File.exist?(lock)
         end
@@ -402,15 +368,35 @@ module Rubydex
     # workspace. The file signature catches source changes for workspaces without a Gemfile.lock too
     # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
     # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
-    def store_signature(scan = source_scan)
+    def store_signature(scan = source_scan, head = workspace_head)
       require "digest"
       # The layout version is part of the key so a store written by an incompatible layout is
       # invalidated instead of silently degrading against it. The gem version deliberately does not
-      # participate: a release that leaves the layout untouched must not force a full re-index.
-      Digest::SHA1.hexdigest(self.class.store_format_version.to_s + lockfile_hash + workspace_source_signature(scan))
+      # participate: a release that leaves the layout untouched must not force a full re-index. HEAD
+      # participates because it is the one freshness signal that costs no filesystem walk: a commit or
+      # branch switch changes the answer without changing any file's path (their mtimes change too, but
+      # seeing those is the walk this signature is allowed to be up to REFRESH_TTL stale about).
+      Digest::SHA1.hexdigest(
+        self.class.store_format_version.to_s + head.to_s + lockfile_hash + workspace_source_signature(scan),
+      )
     rescue Errno::ENOENT
       # A file vanished mid-walk; treat the signature as unknown so the store is rebuilt.
       "unknown"
+    end
+
+    # The commit this workspace is checked out to, or nil outside a repository. One `git rev-parse`
+    # (~1 ms) per freshness check, and the reason the walk can afford a TTL. Deliberately not
+    # `git status`: that stats every tracked file, which is the very cost the TTL exists to avoid.
+    #
+    # -> String?
+    def workspace_head
+      sha, status = Open3.capture2("git", "-C", workspace_path, "rev-parse", "HEAD")
+      return unless status.success?
+
+      sha = sha.strip
+      sha.empty? ? nil : sha
+    rescue StandardError
+      nil
     end
 
     # SHA of the workspace Gemfile.lock, used to invalidate the store when dependencies change.
@@ -426,8 +412,26 @@ module Rubydex
     # edit that lands inside the same second is otherwise invisible to the freshness check forever.
     # Feeds both the freshness signature and the surgical diff, so the walk happens once per refresh
     # instead of once per signature.
+    #
+    # Reused for REFRESH_TTL seconds because it is the expensive part of a tool call; `rewalk:` forces
+    # a fresh one, which is what a moved HEAD asks for. RUBYDEX_REFRESH_TTL overrides the window (the
+    # tests edit files out of band and expect the next refresh to see them).
+    #
+    #: (?rewalk: bool) -> Hash[String, String]
+    def source_scan(rewalk: false)
+      fresh = @scan && (Time.now - @scan_at) < ENV.fetch("RUBYDEX_REFRESH_TTL", REFRESH_TTL).to_f
+      return @scan if fresh && !rewalk
+
+      @scan = walk_sources
+      @scan_at = Time.now
+      @scan
+    end
+
+    # The walk itself: workspace-relative path => "mtime_micros:size", excluded directories pruned
+    # without descending into them.
+    #
     #: -> Hash[String, String]
-    def source_scan
+    def walk_sources
       require "find"
       root = workspace_path
       excluded = excluded_patterns
@@ -480,8 +484,8 @@ module Rubydex
     # Uses spawn rather than fork: the parent is a long-lived Ruby process with a warm jemalloc
     # heap and live threads, and a forked child that then allocates heavily corrupts its allocator
     # (SIGSEGV in `tcache_bin_flush` during `index_all`). A fresh process starts with a clean heap.
-    #: (String) -> void
-    def build_store_in_child(cache, scan = source_scan)
+    #: (String, ?Hash[String, String], ?String?) -> void
+    def build_store_in_child(cache, scan = source_scan, head = workspace_head)
       require "fileutils"
       require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))
@@ -508,7 +512,7 @@ module Rubydex
         # The scan is captured BEFORE the child runs, so a file edited during the build is marked
         # stale and re-diffed by the next refresh rather than wrongly served as fresh.
         File.binwrite(manifest_tmp, Marshal.dump({ "lockfile" => lockfile_hash, "files" => scan }))
-        File.write(marker_tmp, store_signature(scan))
+        File.write(marker_tmp, store_signature(scan, head))
         File.rename(tmp, cache)
         File.rename(manifest_tmp, manifest)
         File.rename(marker_tmp, marker)

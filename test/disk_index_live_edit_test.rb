@@ -9,11 +9,13 @@ class DiskIndexLiveEditTest < Minitest::Test
     super
     @tmp = Dir.mktmpdir
     ENV["RUBYDEX_DISK_INDEX"] = "1"
+    ENV["RUBYDEX_REFRESH_TTL"] = "0" # tests edit out of band and expect the next refresh to see them
     ENV["RUBYDEX_CACHE_DIR"] = @tmp
   end
 
   def teardown
     ENV.delete("RUBYDEX_DISK_INDEX")
+    ENV.delete("RUBYDEX_REFRESH_TTL")
     ENV.delete("RUBYDEX_CACHE_DIR")
     FileUtils.remove_entry(@tmp) if @tmp && File.exist?(@tmp)
     super

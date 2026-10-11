@@ -15,6 +15,7 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     @ws = File.join(@tmp, "ws")
     FileUtils.mkdir_p(@ws)
     ENV["RUBYDEX_DISK_INDEX"] = "1"
+    ENV["RUBYDEX_REFRESH_TTL"] = "0" # tests edit out of band and expect the next refresh to see them
     ENV["RUBYDEX_CACHE_DIR"] = File.join(@tmp, "cache")
     20.times { |i| write("c#{i}.rb", "class C#{i}\n  def m#{i}; end\nend\n") }
     write("parent.rb", "class Parent\nend\n")
@@ -23,6 +24,7 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
 
   def teardown
     ENV.delete("RUBYDEX_DISK_INDEX")
+    ENV.delete("RUBYDEX_REFRESH_TTL")
     ENV.delete("RUBYDEX_CACHE_DIR")
     FileUtils.remove_entry(@tmp) if @tmp && File.exist?(@tmp)
     super

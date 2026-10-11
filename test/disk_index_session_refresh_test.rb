@@ -15,10 +15,14 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       rb = File.join(dir, "foo.rb")
       File.write(rb, "class Foo\n  def bar; end\nend\n")
       ENV["RUBYDEX_DISK_INDEX"] = "1"
+      # Tests edit files out of band and expect the next refresh to see them; the TTL exists to
+      # amortize real tool calls.
+      ENV["RUBYDEX_REFRESH_TTL"] = "0"
       begin
         yield(dir, rb)
       ensure
         ENV.delete("RUBYDEX_DISK_INDEX")
+        ENV.delete("RUBYDEX_REFRESH_TTL")
       end
     end
   end
@@ -28,6 +32,20 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     graph.index_workspace
     graph.resolve
     graph
+  end
+
+  def git(dir, *args)
+    # A developer's git config may sign commits (and a signing agent may not answer in CI).
+    args = ["-c", "commit.gpgsign=false", *args] if args.first == "commit"
+    identity = {
+      "GIT_AUTHOR_NAME" => "test",
+      "GIT_AUTHOR_EMAIL" => "test@example.com",
+      "GIT_COMMITTER_NAME" => "test",
+      "GIT_COMMITTER_EMAIL" => "test@example.com",
+    }
+    Dir.chdir(dir) do
+      system(identity, "git", *args, out: File::NULL, err: File::NULL) || raise("git #{args.join(" ")} failed")
+    end
   end
 
   # `prepare_for_tool_call` is the whole pre-tool sequence, and it resolves exactly once itself —
@@ -50,6 +68,63 @@ class DiskIndexSessionRefreshTest < Minitest::Test
 
       assert_equal(1, resolves, "the refresh resolves once, internally")
       assert_includes(graph["Foo"].members.map(&:name), "Foo#quux()", "and the graph answers")
+    end
+  end
+
+  # The freshness walk is the expensive signal, so it is only redone every REFRESH_TTL seconds. A
+  # commit or branch switch is the change that must not wait for it: HEAD moves for free.
+  def test_the_freshness_walk_is_reused_inside_its_ttl
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      walks = 0
+      graph.define_singleton_method(:walk_sources) do
+        walks += 1
+        super()
+      end
+
+      ENV["RUBYDEX_REFRESH_TTL"] = "60" # the suite runs with the window closed
+      graph.refresh_if_stale
+      graph.refresh_if_stale
+      assert_equal(0, walks, "inside the window the boot walk is reused")
+
+      ENV["RUBYDEX_REFRESH_TTL"] = "0"
+      graph.refresh_if_stale
+      assert_equal(1, walks, "once the window passes the walk runs again")
+    end
+  end
+
+  # A branch switch rewrites files in bulk, which is exactly what the walk measures — so the walk is
+  # forced, and the switch is visible even a millisecond after the boot walk.
+  def test_a_branch_switch_is_noticed_inside_the_walk_ttl
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "tmp"))
+      rb = File.join(dir, "foo.rb")
+      File.write(rb, "class Foo\n  def bar; end\nend\n")
+      git(dir, "init", "-q")
+      git(dir, "add", "foo.rb")
+      git(dir, "commit", "-q", "-m", "main")
+      git(dir, "checkout", "-q", "-b", "other")
+      File.write(rb, "class Foo\n  def baz; end\nend\n")
+      git(dir, "add", "foo.rb")
+      git(dir, "commit", "-q", "-m", "other")
+      git(dir, "checkout", "-q", "main")
+
+      ENV["RUBYDEX_DISK_INDEX"] = "1"
+      ENV["RUBYDEX_REFRESH_TTL"] = "60" # the walk must stay suppressed: only HEAD may notice
+      begin
+        graph = Rubydex::Graph.configure_for_workspace(dir)
+        graph.index_workspace
+        graph.resolve
+        assert_includes(graph["Foo"].members.map(&:name), "Foo#bar()")
+
+        git(dir, "checkout", "-q", "other")
+        assert(graph.refresh_if_stale, "a moved HEAD must move the session, TTL or no TTL")
+        members = graph["Foo"].members.map(&:name)
+        assert_includes(members, "Foo#baz()")
+        refute_includes(members, "Foo#bar()", "must not still answer from the previous branch")
+      ensure
+        ENV.delete("RUBYDEX_DISK_INDEX")
+      end
     end
   end
 
