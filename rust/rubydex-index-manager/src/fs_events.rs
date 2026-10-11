@@ -28,50 +28,72 @@ impl EventHandler for EventCollector {
 /// `notify`-backed source: Linux inotify, macOS `FSEvents`, Windows
 /// `ReadDirectoryChangesW`, polling fallback elsewhere.
 pub struct NotifySource {
-    _watchers: Vec<RecommendedWatcher>,
+    watchers: Vec<RecommendedWatcher>,
     pending: Arc<Mutex<Vec<PathBuf>>>,
     last_event: Arc<Mutex<Instant>>,
     debounce: Duration,
+    /// Roots that could not be subscribed when they were tried. A per-user inotify budget is spent
+    /// for minutes at a time (editors and other tools share it), so the manager keeps these to retry
+    /// rather than leaving the workspace unwatched for its whole lifetime.
+    unwatched: Vec<PathBuf>,
 }
 
 impl NotifySource {
     /// Subscribe to `paths` (watched recursively). Only creation, modification and
     /// removal events are collected; access events are ignored. A path that cannot be
-    /// watched (a workspace that went away) is reported and skipped, never fatal: the
-    /// manager keeps serving the other sessions.
+    /// watched (a workspace that went away, or a spent inotify budget) is reported and
+    /// kept in [`Self::unwatched`], never fatal: the manager keeps serving the other
+    /// sessions.
     #[must_use]
     pub fn new(paths: &[PathBuf], debounce: Duration) -> NotifySource {
-        let pending = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
-        let last_event = Arc::new(Mutex::new(Instant::now()));
+        let mut source = NotifySource {
+            watchers: Vec::new(),
+            pending: Arc::new(Mutex::new(Vec::<PathBuf>::new())),
+            last_event: Arc::new(Mutex::new(Instant::now())),
+            debounce,
+            unwatched: Vec::new(),
+        };
+        for path in paths {
+            source.subscribe(path.clone());
+        }
+        source
+    }
+
+    /// Attempts to watch one root recursively, recording it as unwatched when that fails.
+    fn subscribe(&mut self, path: PathBuf) {
+        let collector = EventCollector {
+            pending: Arc::clone(&self.pending),
+            last_event: Arc::clone(&self.last_event),
+        };
         let config = Config::default()
             .with_event_kinds(EventKindMask::CREATE | EventKindMask::ALL_MODIFY | EventKindMask::REMOVE);
-
-        let watchers = paths
-            .iter()
-            .filter_map(|path| {
-                let collector = EventCollector {
-                    pending: Arc::clone(&pending),
-                    last_event: Arc::clone(&last_event),
-                };
-                let shown = path.display();
-                let Ok(mut watcher) = RecommendedWatcher::new(collector, config) else {
-                    eprintln!("rubydex-index-manager: cannot watch {shown}");
-                    return None;
-                };
-                if let Err(error) = watcher.watch(path, notify::RecursiveMode::Recursive) {
-                    eprintln!("rubydex-index-manager: cannot watch {shown}: {error:?}");
-                    return None;
-                }
-                Some(watcher)
-            })
-            .collect();
-
-        NotifySource {
-            _watchers: watchers,
-            pending,
-            last_event,
-            debounce,
+        let shown = path.display();
+        let Ok(mut watcher) = RecommendedWatcher::new(collector, config) else {
+            eprintln!("rubydex-index-manager: cannot watch {shown}");
+            self.unwatched.push(path);
+            return;
+        };
+        if let Err(error) = watcher.watch(&path, notify::RecursiveMode::Recursive) {
+            eprintln!("rubydex-index-manager: cannot watch {shown}: {error:?}");
+            self.unwatched.push(path);
+            return;
         }
+        self.watchers.push(watcher);
+    }
+
+    /// The roots this source is not watching. Empty is the normal case.
+    #[must_use]
+    pub fn unwatched(&self) -> &[PathBuf] {
+        &self.unwatched
+    }
+
+    /// Re-attempts every root that failed, returning how many are still unwatched. Whatever already
+    /// succeeded keeps its watches, so a retry cannot disturb a workspace that is being watched.
+    pub fn retry_unwatched(&mut self) -> usize {
+        for path in std::mem::take(&mut self.unwatched) {
+            self.subscribe(path);
+        }
+        self.unwatched.len()
     }
 }
 

@@ -7,6 +7,12 @@ use crate::registry::Session;
 
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
+
+/// How often a root that could not be subscribed is retried. A spent inotify budget frees up when
+/// the tools sharing it exit, so retrying recovers a workspace without a manager restart — but each
+/// attempt walks the tree it could not watch, so it is an interval rather than every pass.
+const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct Watch {
     pub store: PathBuf,
@@ -14,6 +20,8 @@ pub struct Watch {
     pub builder: Builder,
     pub source: NotifySource,
     pub manifest: usize,
+    /// When this watch's unwatched roots may be retried. Only consulted when there are any.
+    pub retry_at: Instant,
 }
 
 /// The sessions that share one store, which is what a watcher set is built from.
@@ -63,6 +71,21 @@ pub fn sync(watches: &mut Vec<Watch>, grouped: Vec<Group>, debounce: Duration) {
         }
         watches.push(watch_for(group, debounce));
     }
+    retry_unwatched_roots(watches);
+}
+
+/// A root can fail to subscribe when the per-user inotify budget is spent, which frees up later.
+/// Those roots are retried on an interval so the workspace does not stay unwatched for the whole
+/// lifetime of the manager; a watch with nothing unwatched is never touched.
+fn retry_unwatched_roots(watches: &mut [Watch]) {
+    let now = Instant::now();
+    for watch in watches.iter_mut() {
+        if watch.source.unwatched().is_empty() || now < watch.retry_at {
+            continue;
+        }
+        watch.retry_at = now + WATCH_RETRY_INTERVAL;
+        watch.source.retry_unwatched();
+    }
 }
 
 #[must_use]
@@ -73,5 +96,6 @@ pub fn watch_for(group: Group, debounce: Duration) -> Watch {
         builder: Builder::new(group.builder),
         source: NotifySource::new(group.workspaces.as_ref(), debounce),
         manifest: group.manifest,
+        retry_at: Instant::now() + WATCH_RETRY_INTERVAL,
     }
 }
