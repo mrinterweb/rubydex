@@ -182,6 +182,52 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
+  # A manager that cannot start must cost the pre-warm it provides and nothing else. Letting that
+  # failure reach `index_workspace`'s rescue threw away the store it had just built and re-indexed the
+  # workspace in memory — the footprint the store exists to avoid, caused by the optional part.
+  def test_a_manager_that_cannot_start_does_not_disable_the_disk_index
+    with_workspace do |dir, _rb|
+      ENV["RUBYDEX_INDEX_MANAGER"] = "1"
+      ENV["XDG_CACHE_HOME"] = dir # keep the registry inside the tmpdir
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+      fell_back = false
+      graph.define_singleton_method(:index_all) do |*args|
+        fell_back = true
+        super(*args)
+      end
+      original = Rubydex::IndexManager.singleton_class.instance_method(:manager_binary)
+      Rubydex::IndexManager.singleton_class.define_method(:manager_binary) { File.join(dir, "no-such-manager") }
+      begin
+        graph.index_workspace
+
+        refute(fell_back, "a manager that cannot start must not fall back to the in-memory index")
+        assert_includes(graph["Foo"].members.map(&:name), "Foo#bar()", "the store-backed graph still answers")
+      ensure
+        Rubydex::IndexManager.singleton_class.define_method(:manager_binary, original)
+        ENV.delete("RUBYDEX_INDEX_MANAGER")
+        ENV.delete("XDG_CACHE_HOME")
+      end
+    end
+  end
+
+  # Outside a repository `git rev-parse HEAD` prints "fatal: not a git repository", and `capture2`
+  # only captures stdout, so that landed in the session's stderr once per freshness check.
+  def test_a_workspace_outside_git_does_not_leak_git_noise
+    Dir.mktmpdir do |dir|
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+      noise = File.join(dir, "stderr")
+      original = $stderr.dup
+      File.open(noise, "w") { |log| $stderr.reopen(log) }
+      begin
+        assert_nil(graph.send(:workspace_head), "a non-repository has no commit")
+      ensure
+        $stderr.reopen(original)
+      end
+
+      assert_empty(File.read(noise), "git's stderr must not reach the session's own stderr")
+    end
+  end
+
   def test_a_session_reopens_when_the_store_is_rebuilt_elsewhere
     with_workspace do |dir, rb|
       first = session(dir)
