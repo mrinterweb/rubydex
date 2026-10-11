@@ -30,6 +30,10 @@ begin
       # Valgrind runs with --trace-children=yes and --leak-check=full, which costs ~1000x: the
       # whole suite is hours per sanitizer. Keep the tests that exercise the native surface on
       # small workspaces; the ones that index a real workspace stay on the plain ruby_test task.
+      #
+      # The rule is "spawns a process, or boots a store in a child": those children are what valgrind
+      # instruments, and test/disk_index_surgical_refresh_test.rb joining this run unnoticed is how the
+      # memleak job went from ~2.5 to ~6 hours (94 s of plain-ruby store builds, every child traced).
       task.test_files = FileList["test/**/*_test.rb"].exclude(
         "test/integration/**/*_test.rb",
         "test/cli_test.rb",
@@ -37,6 +41,8 @@ begin
         "test/disk_index_corrupt_store_test.rb",
         "test/disk_index_manager_session_test.rb",
         "test/disk_index_live_edit_test.rb",
+        "test/disk_index_surgical_refresh_test.rb",
+        "test/disk_index_cypher_test.rb",
       )
     end
   end
