@@ -184,6 +184,11 @@ module Rubydex
     # live. The registry handle stays referenced for the process lifetime, which is what keeps the
     # session's lock held and the session listed. Sessions stay correct without the manager: this
     # is an optimization, never a dependency.
+    #
+    # A manager that cannot start (binary missing, registry not writable, no locks available) must
+    # cost the pre-warm it provides and nothing else. Letting that failure reach `index_workspace`'s
+    # rescue threw away the store that had just been built and re-indexed the workspace in memory —
+    # the footprint the store exists to avoid, caused by the optional part.
     #: (String cache) -> nil
     def register_session(cache)
       registry = File.join(platform_cache_root, "rubydex", "manager", "sessions")
@@ -199,6 +204,9 @@ module Rubydex
         registry: registry,
       )
       Rubydex::IndexManager.launch_if_absent(registry)
+    rescue StandardError => e
+      warn("rubydex: index manager unavailable (#{e.class}: #{e.message}); continuing without background refresh")
+      nil
     end
 
     # Files to re-index/delete to move this session from @applied_files to `scan`, or nil when a full
@@ -429,7 +437,10 @@ module Rubydex
     #
     # -> String?
     def workspace_head
-      sha, status = Open3.capture2("git", "-C", workspace_path, "rev-parse", "HEAD")
+      # stderr is discarded: outside a repository `git rev-parse` prints "fatal: not a git repository"
+      # and `capture2` only captures stdout, so that landed in the session's stderr once per freshness
+      # check.
+      sha, status = Open3.capture2("git", "-C", workspace_path, "rev-parse", "HEAD", err: File::NULL)
       return unless status.success?
 
       sha = sha.strip
