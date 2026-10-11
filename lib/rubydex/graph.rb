@@ -132,6 +132,9 @@ module Rubydex
     # Moves this session to the current source state, cheapest route first: a fresh marker means
     # nothing changed; else a small diff is applied into the overlay (no rebuild); else the store is
     # rebuilt once for everyone. Returns true when the session moved.
+    #
+    # Leaves the graph resolved: a surgical apply resolves, a re-attached store is already resolved,
+    # and a rebuilt store was built from a resolved graph. Callers must not resolve again.
     def refresh_if_stale
       cache = store_cache_path
       scan = source_scan
@@ -183,6 +186,18 @@ module Rubydex
       FileUtils.mv(cache, "#{cache}.corrupt", force: true)
       FileUtils.rm_f("#{cache}.hash")
       true
+    end
+
+    # What runs before every tool call is served: quarantine a store that started reporting read
+    # failures (the counter only fills once something has read, so the previous call is what
+    # notices), then move to the current source state. It resolves nothing itself —
+    # `refresh_if_stale` leaves the graph resolved, and resolving again per call is a full store
+    # scan for nothing.
+    #
+    #: -> bool
+    def prepare_for_tool_call
+      quarantine_if_untrustworthy
+      refresh_if_stale
     end
 
     # Makes this session visible to the machine-wide manager and starts the manager when none is
