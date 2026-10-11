@@ -9,6 +9,26 @@ same session drops to 73 MB, and a bare open costs about 5 MB.
 It is opt-in per workspace, and it is a cache: the store is always rebuildable from your source files,
 and deleting it is always safe.
 
+## When you would want it
+
+The disk index pays off on a larger codebase, and it pays off most when more than one process wants the
+same index:
+
+- A small fraction of the memory: 73 MB against 692 MB for the same 27,674-file corpus, and about 5 MB
+  for a session that only opens the store.
+- Starting is fast after the first build, because the work is already done — re-attaching to a store is
+  ~71 ms where building that index from scratch is tens of seconds (24.6 s on a 6,441-file workspace).
+  The first build is the slow one: it indexes everything and then writes the store.
+- Updates are usually incremental: a handful of changed files is applied in milliseconds. A large change
+  — a branch switch, a quarter of the workspace — rebuilds the store, once, for everyone.
+- Several sessions on one directory share one store and one rebuild, instead of each holding its own
+  copy of the index and each computing it.
+
+It is not faster everywhere. Reading from disk costs more than reading from the heap, and name search
+is markedly slower than the in-memory path (~100 ms/op against ~0.05 ms/op) until the store grows a
+name-keyed index. Point lookups — hover, ancestors, references — are the ones that stay sub-millisecond
+(~0.09 ms/op).
+
 ## Enabling it
 
 Commit a `rubydex.toml` with a `[disk_index]` section:
@@ -65,6 +85,39 @@ overlay holding more than a quarter of the workspace — triggers a rebuild in a
 process, whose memory is reclaimed when it exits, and every session in the directory moves to the new
 store. Rebuilding is what keeps a long-lived server from quietly accumulating the whole index in memory
 again (~12 MB per 1,000 edited files).
+
+### Building the store
+
+The build happens in a fresh child process that the session spawns and waits for. Never `fork`: the
+parent is long-lived, with a warm allocator and live threads, and a forked child that then allocates
+heavily corrupts its allocator — a fresh process starts with a clean heap. So the peak memory of a
+build belongs to a process that no longer exists, and the parent never sees it. (Waiting for the child
+is what stops it becoming a zombie; the memory isolation comes from it being a separate process at all.)
+
+The result is published by atomic rename — store first, then the manifest, then the freshness marker —
+so a session that looks mid-build sees the previous store, never a half-written one.
+
+## What spawns what
+
+```mermaid
+flowchart TD
+    client["editor / agent server"] -->|"spawns rdx mcp /repo"| session["rdx mcp session - one per workspace<br/>opens the store read-only, answers queries"]
+
+    session -->|"start one if none is running"| manager["rubydex-index-manager - one per machine<br/>filesystem events only, never indexes"]
+    session -->|"register: one locked file per session"| registry[("registry directory<br/>in the platform cache")]
+    session -->|"small change: apply into its own overlay"| overlay["session overlay<br/>in memory, never persisted"]
+    session -->|"large change: claim the rebuild lock"| builder["store_builder.rb - transient<br/>peak build memory dies with it"]
+
+    manager -->|"200 ms debounce, one indexer at a time"| indexer["index_session.rb - transient"]
+    indexer -->|"refresh, or --full rebuild"| builder
+
+    builder -->|"atomic rename: store, then manifest, then marker"| store[("index.redb + .hash + .files")]
+    store -.->|"sessions re-attach to see a new one"| session
+```
+
+Nothing here is a service a session depends on. The store is a file; the manager and the two transient
+processes are optimizations. Every arrow into them can be cut and the session still answers the same
+questions — only more slowly on the next call.
 
 ## The background manager (optional)
 
