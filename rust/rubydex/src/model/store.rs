@@ -361,8 +361,13 @@ impl RedbStore {
 
     /// Reads all `(declaration_id, FQN name)` pairs for name-based search.
     ///
+    /// Test-only: production search streams the table ([`Self::declaration_ids_matching`]) and node
+    /// enumeration takes keys ([`Self::declaration_ids`]), so nothing should materialize every name.
+    /// The test keeps it as the reference the cheaper scans are checked against.
+    ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
+    #[cfg(test)]
     pub fn search_names(&self) -> Result<Vec<(DeclarationId, String)>, redb::Error> {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(SEARCH_NAMES)?;
@@ -492,6 +497,35 @@ impl RedbStore {
         table
             .range(..=u64::MAX)?
             .map(|entry| -> Result<DefinitionId, redb::Error> { Ok(DefinitionId::new(entry?.0.value())) })
+            .collect()
+    }
+
+    /// Reads all declaration node ids for enumeration (keys only, no deserialization). Node
+    /// enumeration needs the ids and throws the names away, so materializing them was one String
+    /// allocation per declaration per query — see [`Self::declaration_ids_matching`].
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn declaration_ids(&self) -> Result<Vec<DeclarationId>, redb::Error> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(DECLARATIONS)?;
+        table
+            .range(..=u64::MAX)?
+            .map(|entry| -> Result<DeclarationId, redb::Error> { Ok(DeclarationId::new(entry?.0.value())) })
+            .collect()
+    }
+
+    /// Reads all document node ids for enumeration (keys only, no deserialization) — see
+    /// [`Self::declaration_ids`].
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn document_ids(&self) -> Result<Vec<UriId>, redb::Error> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(DOCUMENTS)?;
+        table
+            .range(..=u64::MAX)?
+            .map(|entry| -> Result<UriId, redb::Error> { Ok(UriId::new(entry?.0.value())) })
             .collect()
     }
 
@@ -940,6 +974,45 @@ mod tests {
     }
 
     #[test]
+    fn keys_only_scans_agree_with_the_materialized_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("base.redb");
+
+        let base = Graph::new();
+        let store = RedbStore::build(&path, &base).expect("build store");
+
+        // The keys-only scans exist so cypher can enumerate nodes without deserializing (or
+        // allocating a String for) every name and URI in the store. They must agree exactly.
+        let keys: std::collections::BTreeSet<u64> = store
+            .declaration_ids()
+            .expect("declaration_ids")
+            .into_iter()
+            .map(|id| id.get())
+            .collect();
+        let names: std::collections::BTreeSet<u64> = store
+            .search_names()
+            .expect("search_names")
+            .into_iter()
+            .map(|(id, _name)| id.get())
+            .collect();
+        assert_eq!(keys, names, "declaration ids must match the name table");
+
+        let doc_keys: std::collections::BTreeSet<u64> = store
+            .document_ids()
+            .expect("document_ids")
+            .into_iter()
+            .map(|id| id.get())
+            .collect();
+        let uris: std::collections::BTreeSet<u64> = store
+            .document_uris()
+            .expect("document_uris")
+            .into_iter()
+            .map(|(id, _uri)| id.get())
+            .collect();
+        assert_eq!(doc_keys, uris, "document ids must match the URI table");
+    }
+
+    #[test]
     fn materialize_declaration_pulls_store_node_into_overlay() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("base.redb");
@@ -991,7 +1064,10 @@ mod tests {
 
         assert!(!graph.is_store_backed(), "no store behind the graph");
         assert_eq!(graph.store_error_count(), 0, "the error counter is reset");
-        assert!(graph.declaration(DeclarationId::from("NothingLeft")).is_none(), "the store answers nothing");
+        assert!(
+            graph.declaration(DeclarationId::from("NothingLeft")).is_none(),
+            "the store answers nothing"
+        );
 
         // Back to a plain in-memory graph: the built-ins are there (resolution seeds itself from
         // `Object`, so without them the next resolve panics) and re-indexing resolves cleanly.

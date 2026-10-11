@@ -101,10 +101,10 @@ fn differential_on_stdlib() {
     }
 }
 
-/// All declaration ids a graph can see: in-memory map ∪ store-backed names.
+/// All declaration ids a graph can see: in-memory map ∪ store-backed ids.
 fn all_declaration_ids(graph: &Graph) -> BTreeSet<u64> {
     let mut ids: BTreeSet<u64> = graph.declarations().keys().map(rubydex::model::id::Id::get).collect();
-    for (id, _name) in graph.store_declaration_names() {
+    for id in graph.store_declaration_ids() {
         ids.insert(id.get());
     }
     ids
@@ -333,7 +333,7 @@ fn probe_documents(graph: &Graph, sample: usize, out: &mut Vec<(String, String)>
     use rubydex::model::ids::UriId;
 
     let mut uris: BTreeSet<u64> = graph.documents().keys().map(rubydex::model::id::Id::get).collect();
-    for (id, _uri) in graph.store_document_uris() {
+    for id in graph.store_document_ids() {
         uris.insert(id.get());
     }
     for raw in cap_sample(uris, sample) {
