@@ -189,6 +189,15 @@ single-threaded — redb permits one write transaction, so the shards-parallel t
 apply. The commit itself is 0.21s; compression would trade CPU for space while CPU is already the
 cost. Cold builds stay a one-time cost per workspace (freshness marker); no change made.
 
+#### Is `Durability::None` worth it? No (I3, reserv, release)
+
+Same bench on reserv (6,442 documents, 31,855 declarations, 564,362 method references, warm cache):
+inserts 574 ms in total (`method_references` alone 332 ms, 58%), **commit 27.6 ms**, drop 1.5 ms. The
+commit is 4.6% of the write path here and 4.6% on the stdlib corpus above, so making the store
+non-durable buys at most ~5% of a stage that is itself a one-time cost per workspace — against a
+torn store after power loss. Not taken. If the writer is ever optimized, the target is the
+`method_references` insert volume (58% of it), not the commit.
+
 ## Post-simplification A/B (`ea75779` -> `e0a0332`, release .so)
 
 Base = `git worktree` at `ea75779` (the commit before the simplification pass), HEAD = `e0a0332`.
