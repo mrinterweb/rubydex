@@ -177,7 +177,11 @@ module Rubydex
         workspace: workspace_path,
         store: cache,
         builder: Rubydex::IndexManager.builder_argv(workspace_path, cache),
-        docs: workspace_paths.size,
+        # The manager compares a burst of filesystem events against this to decide when a rebuild beats
+        # a surgical pass, so it has to be the manifest's file count. `workspace_paths` counts indexed
+        # *roots* (53 on reserv, whose manifest is 6,441 files), which trips that threshold about 100x
+        # too eagerly — and costs a Bundler + rbs scan per session to compute.
+        docs: @applied_files.to_h.size,
         registry: registry,
       )
       Rubydex::IndexManager.launch_if_absent(registry)
