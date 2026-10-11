@@ -122,22 +122,21 @@ manager = true          # let the machine-wide background manager keep the store
 ```
 
 `RUBYDEX_DISK_INDEX=0` turns the disk path off for one run, `RUBYDEX_CACHE_DIR`
-points the store somewhere else, and `RUBYDEX_INDEX_MANAGER=0` leaves the
-background manager out. Sessions stay correct with the manager absent, killed,
-or never started: they refresh through the git fast path and the stat walk.
+points the store somewhere else, `RUBYDEX_INDEX_MANAGER=0` leaves the background
+manager out, and `RUBYDEX_REFRESH_TTL=0` makes every query re-check the filesystem
+instead of reusing the last check. The store is a cache: rebuildable from your
+source files, and safe to delete at any moment.
 
-### Background refresh (optional)
+Sessions stay correct with the manager absent, killed, or never started. Each one
+checks the commit under the workspace (~1 ms) and, at most once every two seconds,
+the file timestamps; a small change is then applied into that session's own overlay
+and a large one moves everyone to a rebuilt store. One manager process per machine
+can do that work ahead of time for the workspaces that have a live session, so a
+session that opens later finds the store already fresh. Liveness is an OS lock, not
+a PID, so a session that was killed is noticed the moment the OS releases its lock.
 
-One manager process per machine watches the workspaces that have a live session
-(an editor, an agent server) and spawns one indexer at a time when files change,
-so a session that opens later finds the store already fresh. Liveness is an OS
-lock, not a PID: a session holds its registry file under an exclusive lock for
-its whole lifetime, so the manager learns a session died the moment the OS
-released that lock, however it died. A burst of events inside 200 ms is one
-indexer; events that arrive while an indexer runs re-arm the next one instead of
-starting a second; a burst covering a quarter of the workspace rebuilds the store
-from scratch. Measured on 3 idle sessions: 3.4 MB resident, 0.2 % CPU; a 200-file
-branch-switch storm reaches a fresh store marker 9 s later.
+See the [disk index docs](docs/disk-index.md) for where the files live, what each
+step costs, and how to recover from a store that went bad.
 
 ## Tools
 
