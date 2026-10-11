@@ -1881,6 +1881,14 @@ impl<'a> Resolver<'a> {
     /// which is why depth accounts for the parent scopes across the entire nesting, not just for the name itself.
     fn prepare_units(&mut self) -> Vec<DefinitionId> {
         let work = self.graph.take_pending_work();
+        // Nothing queued: there are no units to order, so skip ranking the document URIs — that
+        // scans every URI the store knows and sorts them, which a store-backed session would
+        // otherwise pay on every resolve (including the one after a surgical refresh, which resolves
+        // internally).
+        if work.is_empty() {
+            return Vec::new();
+        }
+
         let estimated = work.len() / 2;
         let mut definitions = Vec::with_capacity(estimated);
         let mut others = Vec::with_capacity(estimated);

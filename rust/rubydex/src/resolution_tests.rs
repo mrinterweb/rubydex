@@ -6068,3 +6068,24 @@ mod visibility_resolution_tests {
         assert_declaration_does_not_exist!(context, "Foo::<Foo>");
     }
 }
+
+mod repeated_resolve_tests {
+    use super::*;
+
+    // A resolve with nothing queued returns before ordering the units, which is what skips the
+    // document-URI ranking (a full store scan plus a sort) on a store-backed session. If that early
+    // return ever drops work a second pass relied on, the ancestors computed by the first pass would
+    // move.
+    #[test]
+    fn resolving_a_second_time_changes_nothing() {
+        let mut context = graph_test();
+        context.index_uri("file:///base.rb", "class Base; end\n");
+        context.index_uri("file:///foo.rb", "class Foo < Base; end\n");
+        context.resolve();
+
+        context.resolve();
+
+        assert_no_diagnostics!(&context);
+        assert_ancestors_eq!(context, "Foo", ["Foo", "Base", "Object", "Kernel", "BasicObject"]);
+    }
+}
