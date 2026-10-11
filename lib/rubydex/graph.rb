@@ -81,7 +81,7 @@ module Rubydex
       return index_all(workspace_paths) if quarantine_if_untrustworthy(cache)
 
       adopt_manifest(cache)
-      @session_signature = store_signature
+      @session_signature = session_state(@head_sha, source_scan)
       register_session(cache) if index_manager_enabled?
 
       []
@@ -111,7 +111,7 @@ module Rubydex
       # had just indexed, and the next session would disagree and rebuild again.
       scan = source_scan(rewalk: @head_sha != head)
       @head_sha = head
-      signature = store_signature(scan, head)
+      signature = session_state(head, scan)
       return false if @session_signature == signature
 
       marker = "#{cache}.hash"
@@ -126,7 +126,7 @@ module Rubydex
         return false unless lock
 
         begin
-          build_store_in_child(cache, scan, head)
+          build_store_in_child(cache, scan)
         ensure
           Dir.rmdir(lock) if File.exist?(lock)
         end
@@ -162,14 +162,21 @@ module Rubydex
     end
 
     # What runs before every tool call is served: quarantine a store that started reporting read
-    # failures (the counter only fills once something has read, so the previous call is what
-    # notices), then move to the current source state. It resolves nothing itself —
-    # `refresh_if_stale` leaves the graph resolved, and resolving again per call is a full store
-    # scan for nothing.
+    # failures (the counter only fills once something has read, so the previous call is what notices)
+    # and re-index in memory, then move to the current source state. Resolving is not part of it —
+    # `refresh_if_stale` leaves the graph resolved, and resolving again per call is a full store scan
+    # for nothing. Returns true when the session moved.
     #
     #: -> bool
     def prepare_for_tool_call
-      quarantine_if_untrustworthy
+      # Detaching empties the graph, and `refresh_if_stale` would then report "nothing changed" and
+      # leave the session answering with nothing, so the fallback is the same one `index_workspace`
+      # takes at boot.
+      if quarantine_if_untrustworthy
+        index_all(workspace_paths)
+        return true
+      end
+
       refresh_if_stale
     end
 
@@ -392,25 +399,33 @@ module Rubydex
     # workspace. The file signature catches source changes for workspaces without a Gemfile.lock too
     # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
     # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
-    def store_signature(scan = source_scan, head = workspace_head)
+    def store_signature(scan = source_scan)
       require "digest"
       # The layout version is part of the key so a store written by an incompatible layout is
       # invalidated instead of silently degrading against it. The gem version deliberately does not
-      # participate: a release that leaves the layout untouched must not force a full re-index. HEAD
-      # participates because it is the one freshness signal that costs no filesystem walk: a commit or
-      # branch switch changes the answer without changing any file's path (their mtimes change too, but
-      # seeing those is the walk this signature is allowed to be up to REFRESH_TTL stale about).
+      # participate: a release that leaves the layout untouched must not force a full re-index.
       Digest::SHA1.hexdigest(
-        self.class.store_format_version.to_s + head.to_s + lockfile_hash + workspace_source_signature(scan),
+        self.class.store_format_version.to_s + lockfile_hash + workspace_source_signature(scan),
       )
     rescue Errno::ENOENT
       # A file vanished mid-walk; treat the signature as unknown so the store is rebuilt.
       "unknown"
     end
 
+    # What a session is serving: the store's content plus the commit it read it at. HEAD belongs here
+    # and deliberately not in `store_signature` — a commit rewrites no files, so the shared store is
+    # still exactly right and only this session has to notice, while a marker keyed on HEAD would throw
+    # away a good store after every commit.
+    #
+    #: (String?, Hash[String, String]) -> String
+    def session_state(head, scan)
+      "#{head}#{store_signature(scan)}"
+    end
+
     # The commit this workspace is checked out to, or nil outside a repository. One `git rev-parse`
-    # (~1 ms) per freshness check, and the reason the walk can afford a TTL. Deliberately not
-    # `git status`: that stats every tracked file, which is the very cost the TTL exists to avoid.
+    # (~1 ms) per freshness check, and the reason the walk can afford a TTL: a commit or branch switch
+    # moves HEAD whether or not any file's stamp moved. Deliberately not `git status`: that stats every
+    # tracked file, which is the very cost the TTL exists to avoid.
     #
     # -> String?
     def workspace_head
@@ -513,8 +528,8 @@ module Rubydex
     # Uses spawn rather than fork: the parent is a long-lived Ruby process with a warm jemalloc
     # heap and live threads, and a forked child that then allocates heavily corrupts its allocator
     # (SIGSEGV in `tcache_bin_flush` during `index_all`). A fresh process starts with a clean heap.
-    #: (String, ?Hash[String, String], ?String?) -> void
-    def build_store_in_child(cache, scan = source_scan, head = workspace_head)
+    #: (String, ?Hash[String, String]) -> void
+    def build_store_in_child(cache, scan = source_scan)
       require "fileutils"
       require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))
@@ -541,7 +556,7 @@ module Rubydex
         # The scan is captured BEFORE the child runs, so a file edited during the build is marked
         # stale and re-diffed by the next refresh rather than wrongly served as fresh.
         File.binwrite(manifest_tmp, Marshal.dump({ "lockfile" => lockfile_hash, "files" => scan }))
-        File.write(marker_tmp, store_signature(scan, head))
+        File.write(marker_tmp, store_signature(scan))
         File.rename(tmp, cache)
         File.rename(manifest_tmp, manifest)
         File.rename(marker_tmp, marker)

@@ -140,7 +140,10 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       mod = Rubydex::IndexManager.singleton_class
       original = mod.instance_method(:register)
       original_launch = mod.instance_method(:launch_if_absent)
-      mod.define_method(:register) { |docs:, **| registered = docs; nil }
+      mod.define_method(:register) do |docs:, **|
+        registered = docs
+        nil
+      end
       mod.define_method(:launch_if_absent) { |_| nil }
       begin
         graph.send(:register_session, graph.send(:store_cache_path))
@@ -150,6 +153,32 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       end
 
       assert_equal(5, registered, "foo.rb plus four files, not a list of five roots")
+    end
+  end
+
+  # A commit rewrites no files, so the store still describes the workspace exactly: HEAD belongs to
+  # what a session is serving, not to what the shared store was built from, or every commit would
+  # throw the store away (a 24.6 s rebuild on reserv).
+  def test_a_commit_that_changes_no_files_leaves_the_store_fresh
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "tmp"))
+      File.write(File.join(dir, "foo.rb"), "class Foo\n  def bar; end\nend\n")
+      git(dir, "init", "-q")
+      git(dir, "add", "foo.rb")
+      git(dir, "commit", "-q", "-m", "first")
+
+      ENV["RUBYDEX_DISK_INDEX"] = "1"
+      begin
+        graph = Rubydex::Graph.configure_for_workspace(dir)
+        graph.index_workspace
+        cache = graph.send(:store_cache_path)
+
+        git(dir, "commit", "-q", "--allow-empty", "-m", "nothing changed")
+        assert(graph.send(:store_fresh?, cache), "the store still describes the workspace")
+        assert(graph.refresh_if_stale, "but the session knows it moved onto a new commit")
+      ensure
+        ENV.delete("RUBYDEX_DISK_INDEX")
+      end
     end
   end
 
