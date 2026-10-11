@@ -19,12 +19,12 @@ module Rubydex
     # files = 71 ms; full rebuild = 24.6 s.
     REBUILD_DIFF_RATIO = 0.25
 
-    # How stale the freshness walk may go, in seconds. The walk stats every indexable file (407 ms on
-    # reserv, about 10% of a cold boot) and runs before every tool call, so it is reused inside this
-    # window. Owner decision 2026-08-10: an edit made outside the editor (sed, a formatter, a script)
-    # may be answered up to this stale. A moved HEAD bounds the case that matters (a branch switch or a
-    # commit rewrites files in bulk) and the editor path is unaffected, because it indexes its own
-    # saves. RUBYDEX_REFRESH_TTL overrides it.
+    # How stale the freshness walk may go, in seconds. The walk stats every indexable file (~105 ms
+    # warm, ~0.9 s cold, on reserv's 6,441 files) and runs before every tool call, so it is reused
+    # inside this window. Owner decision 2026-08-10: an edit made outside the editor (sed, a formatter,
+    # a script) may be answered up to this stale. A moved HEAD bounds the case that matters (a branch
+    # switch or a commit rewrites files in bulk) and the editor path is unaffected, because it indexes
+    # its own saves. RUBYDEX_REFRESH_TTL overrides it.
     REFRESH_TTL = 2
 
     class << self
@@ -429,6 +429,11 @@ module Rubydex
 
     # The walk itself: workspace-relative path => "mtime_micros:size", excluded directories pruned
     # without descending into them.
+    #
+    # Measured on reserv (6,441 files): ~105 ms warm, ~0.8 s cold. Settling the wildcard-free
+    # built-in exclusions with a Set instead of `File.fnmatch?` per path only buys it down to ~82 ms,
+    # which is not worth a second matching rule while the TTL already limits this to one walk per
+    # window.
     #
     #: -> Hash[String, String]
     def walk_sources
