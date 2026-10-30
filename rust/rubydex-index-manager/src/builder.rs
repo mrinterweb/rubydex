@@ -55,8 +55,9 @@ impl Builder {
     pub fn start(&mut self, manifest: usize) -> Option<Vec<String>> {
         if self.child.is_some() {
             if self.pending > 0 {
+                // Keep the count: a branch switch during a build must still be able to ask for a
+                // full rebuild when the running child exits.
                 self.re_arm = true;
-                self.pending = 0;
             }
             return None;
         }
@@ -82,5 +83,31 @@ impl Builder {
         self.pending = 0;
         self.child = Some(spawned);
         Some(argv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_burst_during_a_build_keeps_its_size_for_the_next_start() {
+        let exe = std::env::current_exe().expect("test executable");
+        let mut builder = Builder::new(vec![exe.to_string_lossy().into_owned(), "--list".into()]);
+
+        builder.record(1);
+        assert!(builder.start(10).is_some(), "the first event starts a build");
+
+        // A branch switch touches nine more files while the child is still running.
+        builder.record(9);
+        assert!(builder.start(10).is_none(), "the manager never runs two indexers at once");
+        assert_eq!(builder.pending, 9, "the burst size must survive the running child");
+
+        builder.reap();
+        let argv = builder.start(10).expect("the burst re-arms a build");
+        assert!(
+            argv.iter().any(|arg| arg == FULL_FLAG),
+            "nine events is more than a quarter of a ten-file manifest"
+        );
     }
 }
