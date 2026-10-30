@@ -17,17 +17,18 @@ fn read_source(uri: &str) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-// ponytail: per-thread, unbounded memo of rebuilt LineIndexes keyed by document URI. A hover that
-// computes several locations re-reads the file and reparses it on every call without this; with it,
-// the file read + LineIndex::new happen once per URI per thread (LineIndex is Rc-based, so the
-// cache hit is a cheap clone). The cache is never invalidated and lives for the process lifetime:
-// gem/stdlib sources don't change under us, but a workspace file edited on disk outside the LSP
-// serves stale positions until the process restarts. Unbounded — fine for the opt-in disk path;
-// add an LRU bound if a workspace with many touched files ever makes it matter.
+// ponytail: per-thread, unbounded memo of rebuilt LineIndexes keyed by document URI and content
+// hash. A hover that computes several locations re-reads the file and reparses it on every call
+// without this; with it, the file read + LineIndex::new happen once per document version per thread
+// (LineIndex is Rc-based, so the cache hit is a cheap clone). The content hash is the version: after
+// a store rebuild or a live edit the document has a new hash and the old index is not served.
+// Unbounded — fine for the opt-in disk path; add an LRU bound if a workspace with many touched files
+// ever makes it matter.
 #[cfg(feature = "redb-store")]
 thread_local! {
-    static REBUILT_LINE_INDEXES: std::cell::RefCell<std::collections::HashMap<String, (LineIndex, usize)>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    static REBUILT_LINE_INDEXES: std::cell::RefCell<
+        std::collections::HashMap<(String, u64), (LineIndex, usize)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// Returns the rebuilt `(LineIndex, source_len)` for a store-loaded document, serving from the
@@ -35,14 +36,14 @@ thread_local! {
 /// not be read.
 #[cfg(feature = "redb-store")]
 fn rebuilt_line_index(document: &Document) -> Option<(LineIndex, usize)> {
-    let uri = document.uri().to_string();
-    if let Some((index, len)) = REBUILT_LINE_INDEXES.with(|cache| cache.borrow().get(&uri).cloned()) {
+    let key = (document.uri().to_string(), document.content_hash());
+    if let Some((index, len)) = REBUILT_LINE_INDEXES.with(|cache| cache.borrow().get(&key).cloned()) {
         return Some((index, len));
     }
-    let source = read_source(&uri)?;
+    let source = read_source(&key.0)?;
     let len = source.len();
     let index = LineIndex::new(&source);
-    REBUILT_LINE_INDEXES.with(|cache| cache.borrow_mut().insert(uri, (index.clone(), len)));
+    REBUILT_LINE_INDEXES.with(|cache| cache.borrow_mut().insert(key, (index.clone(), len)));
     Some((index, len))
 }
 
@@ -133,5 +134,31 @@ pub unsafe extern "C" fn rdx_location_free(ptr: *mut Location) {
         }
 
         // Box drops here, freeing the struct memory
+    }
+}
+
+#[cfg(all(test, feature = "redb-store"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuilt_line_index_tracks_the_document_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.rb");
+        let uri = url::Url::from_file_path(&path).expect("file url").to_string();
+
+        std::fs::write(&path, "class A\nend\n").expect("write");
+        let first = Document::new(uri.clone().into_boxed_str(), "class A\nend\n");
+        let (first_index, _) = rebuilt_line_index(&first).expect("first index");
+        assert_eq!(first_index.line_col(0.into()).line, 0);
+
+        std::fs::write(&path, "\n\n\nclass A\nend\n").expect("rewrite");
+        let second = Document::new(uri.into_boxed_str(), "\n\n\nclass A\nend\n");
+        let (second_index, _) = rebuilt_line_index(&second).expect("second index");
+        assert_eq!(
+            second_index.line_col(3.into()).line,
+            3,
+            "a new content hash must not reuse the index from the previous version"
+        );
     }
 }
