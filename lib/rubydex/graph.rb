@@ -172,6 +172,8 @@ module Rubydex
     #
     #: -> bool
     def prepare_for_tool_call
+      return false unless disk_index_enabled?
+
       # Detaching empties the graph, and `refresh_if_stale` would then report "nothing changed" and
       # leave the session answering with nothing, so the fallback is the same one `index_workspace`
       # takes at boot.
