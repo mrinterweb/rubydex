@@ -277,8 +277,8 @@ impl Graph {
 
     /// Switches an existing graph over to a prebuilt store: drops the in-memory node maps (their
     /// contents live in the store) and serves all subsequent reads from disk. Used by the launcher
-    /// orchestration after a forked child has built the store, so the long-lived server holds the
-    /// bulk index off-heap.
+    /// orchestration after a short-lived child has built the store, so the long-lived server holds
+    /// the bulk index off-heap.
     #[cfg(feature = "redb-store")]
     pub fn attach_store(&mut self, store: crate::model::store::RedbStore) {
         self.clear_overlay();

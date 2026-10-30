@@ -61,10 +61,10 @@ module Rubydex
     #
     # Disk-backed orchestration (runtime opt-in via RUBYDEX_DISK_INDEX=1; the store feature is
     # compiled in by default — see ext/rubydex/extconf.rb): build (or reuse) a redb store of
-    # the whole resolved graph in a FORKED child so its peak indexing memory is reclaimed when the
-    # child exits, then attach the store to this graph. The long-lived server therefore holds the
-    # bulk index off-heap and serves reads from disk. Falls back to the in-memory path if the store
-    # can't be built.
+    # the whole resolved graph in a short-lived child process (Process.spawn) so its peak indexing
+    # memory is reclaimed when the child exits, then attach the store to this graph. The long-lived
+    # server therefore holds the bulk index off-heap and serves reads from disk. Falls back to the
+    # in-memory path if the store can't be built.
     #
     # The disk-backed path now supports live edits via a materialize-on-write overlay: edits
     # flow through to the in-memory overlay, with store-backed nodes materialized before
@@ -86,8 +86,8 @@ module Rubydex
 
       []
     rescue StandardError, NotImplementedError => e
-      # NotImplementedError (from `fork`) is < ScriptError, not < StandardError, so list it
-      # explicitly — otherwise the gem raises on every call on Windows, where fork is unavailable.
+      # NotImplementedError is a ScriptError, not a StandardError; keep it here so a missing
+      # platform primitive falls back instead of escaping into the editor's tool call.
       warn("rubydex: disk-backed index unavailable (#{e.class}: #{e.message}); falling back to in-memory")
       # `index_all` is a no-op while a store is attached, so a failure after `attach_store` (a
       # corrupt manifest sidecar, an unreadable scan) has to detach before the fallback is real.

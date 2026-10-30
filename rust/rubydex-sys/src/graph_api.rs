@@ -116,8 +116,8 @@ pub unsafe extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPoint
 }
 
 /// Switches an existing graph over to a prebuilt store as its disk-backed base layer (drops the
-/// in-memory maps). Returns `true` on success. Used by the launcher after a forked child built the
-/// store, so the long-lived server holds the bulk index off-heap.
+/// in-memory maps). Returns `true` on success. Used by the launcher after a short-lived child built
+/// the store, so the long-lived server holds the bulk index off-heap.
 ///
 /// # Safety
 ///
@@ -322,12 +322,13 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
         let nesting: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(nesting, count).unwrap() };
         let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
 
-        // Store-backed (pre-resolved, static) mode: the resolver mutates gem nodes, which would
-        // panic against the disk-backed graph. Resolve directly from the pre-resolved store instead.
+        // Store-backed graphs answer from the pre-resolved snapshot instead of running the
+        // in-memory resolver, which mutates gem nodes. `materialize-on-write` covers live edits, but
+        // a full `resolve` against the store would rewrite the whole snapshot.
         // ponytail: this reimplements lexical-scope + ancestor-walk resolution separately from
         // Resolver::resolve_constant. The two will diverge if the resolver's resolution rules
-        // change. Replace with a store-aware resolver (materialize-on-write for gem nodes) when
-        // full resolution against store-backed graphs is needed.
+        // change. Replace with a store-aware resolver when full resolution against store-backed
+        // graphs is needed.
         #[cfg(feature = "redb-store")]
         if graph.is_store_backed() {
             // 1. Lexical scope: try `nesting[..depth]::name` from innermost to top level.
@@ -609,8 +610,9 @@ pub unsafe extern "C" fn rdx_index_all(
     let file_paths: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(file_paths, count).unwrap() };
 
     with_mut_graph(pointer, |graph| {
-        // Static store-backed POC mode: don't index into the in-memory layer (would require
-        // store-aware resolution to be correct). Reads are served from the prebuilt store.
+        // A store-backed graph is a pre-resolved snapshot; indexing into the overlay without
+        // re-resolving would leave it inconsistent. Callers detach the store before falling back to
+        // the in-memory index.
         #[cfg(feature = "redb-store")]
         if graph.is_store_backed() {
             unsafe { *out_error_count = 0 };
