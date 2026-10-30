@@ -24,8 +24,7 @@ module Rubydex
     @handles = {}
 
     at_exit do
-      @handles.values.each do |handle|
-        path = handle.path
+      @handles.each do |path, handle|
         handle.close
         File.delete(path) if File.exist?(path)
       end
@@ -70,10 +69,15 @@ module Rubydex
       def register(workspace:, store:, builder:, docs:, registry:)
         FileUtils.mkdir_p(registry)
         path = File.join(registry, "#{Process.pid}-#{SecureRandom.hex(4)}.json")
-        handle = File.new(path, "w")
+        # Create and lock under a non-`.json` name. The manager prunes a registry file whose lock it
+        # can take, so publishing an unlocked file would let it unlink a session that is about to
+        # lock it. Rename (with the lock already held) is the atomic publish.
+        temp = "#{path}.tmp"
+        handle = File.new(temp, "w")
         handle.flock(File::LOCK_EX)
         handle.write(JSON.generate({ workspace:, store:, builder:, docs: }))
         handle.flush
+        File.rename(temp, path)
         @handles[path] = handle
         handle
       end

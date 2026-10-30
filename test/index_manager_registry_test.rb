@@ -49,6 +49,24 @@ class IndexManagerRegistryTest < Minitest::Test
     end
   end
 
+  def test_register_publishes_the_registry_file_only_after_locking_it
+    Dir.mktmpdir("rdx-reg-") do |dir|
+      registry = File.join(dir, "sessions")
+      handle = Rubydex::IndexManager.register(
+        workspace: "/ws",
+        store: "/ws/tmp/index.redb",
+        builder: ["ruby"],
+        docs: 1,
+        registry: registry,
+      )
+
+      assert_empty(Dir.glob(File.join(registry, "*.tmp")), "the unlocked temp file must not remain")
+      assert_equal(1, Dir.glob(File.join(registry, "*.json")).size, "the locked file is published")
+      assert(handle.flock(File::LOCK_EX), "the published file is already locked by the session")
+      handle.close
+    end
+  end
+
   def test_it_prunes_a_session_killed_without_cleanup
     Dir.mktmpdir("rdx-reg-") do |dir|
       registry = File.join(dir, "sessions")
