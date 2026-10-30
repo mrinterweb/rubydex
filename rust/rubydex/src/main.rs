@@ -85,8 +85,8 @@ struct Args {
     #[cfg(feature = "redb-store")]
     #[arg(
         long = "search",
-        value_name = "PREFIX",
-        help = "Prefix-search declaration short names from the store (with --open-store)"
+        value_name = "QUERY",
+        help = "Case-sensitive substring search over declaration fully qualified names (with --open-store)"
     )]
     search: Option<String>,
 }
@@ -166,9 +166,9 @@ fn main() {
                 None => println!("{fqn} -> not found"),
             }
         }
-        if let Some(prefix) = args.search.as_deref() {
-            let ids = rubydex::query::declaration_search(&graph, &[prefix], &rubydex::query::MatchMode::Exact);
-            println!("{} match(es) for prefix {prefix:?}:", ids.len());
+        if let Some(query) = args.search.as_deref() {
+            let ids = rubydex::query::declaration_search(&graph, &[query], &rubydex::query::MatchMode::Exact);
+            println!("{} match(es) for {query:?}:", ids.len());
             for id in ids {
                 if let Some(decl) = graph.declaration(id) {
                     println!("  {}", decl.name());
