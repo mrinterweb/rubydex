@@ -46,7 +46,7 @@ module Rubydex
       # The manager binary, shipped next to the extension in the gem's lib directory.
       #: -> String
       def manager_binary
-        File.expand_path("rubydex-index-manager", __dir__)
+        File.expand_path(Gem.win_platform? ? "rubydex-index-manager.exe" : "rubydex-index-manager", __dir__)
       end
 
       # Starts the machine-wide manager when no live one holds its lock. Liveness is the same

@@ -92,6 +92,11 @@ end
 
 lib_dir = gem_dir.join("lib").join("rubydex")
 
+# `cargo build` on the workspace manifest builds the index manager too. Copy it next to the
+# extension so a source installation has the background manager, not just precompiled gems.
+manager = Gem.win_platform? ? "rubydex-index-manager.exe" : "rubydex-index-manager"
+cargo_command = "#{cargo_command}\n\t$(Q)$(COPY) #{target_dir.join(manager)} #{lib_dir}"
+
 copy_dylib_commands = if Gem.win_platform?
   ""
 elsif RUBY_PLATFORM.include?("darwin")

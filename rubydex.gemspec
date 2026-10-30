@@ -29,6 +29,8 @@ Gem::Specification.new do |spec|
 
   if ENV["RELEASE"]
     spec.files << "THIRD_PARTY_LICENSES.html"
+    manager = Gem.win_platform? ? "lib/rubydex/rubydex-index-manager.exe" : "lib/rubydex/rubydex-index-manager"
+    spec.files << manager if File.exist?(manager)
     if RUBY_PLATFORM.include?("darwin")
       spec.files << "lib/rubydex/librubydex_sys.dylib"
     elsif RUBY_PLATFORM.include?("linux")
