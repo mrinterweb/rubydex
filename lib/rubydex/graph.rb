@@ -399,10 +399,17 @@ module Rubydex
       exclude = File.join(workspace_path, ".git", "info", "exclude")
       return unless File.exist?(exclude)
 
-      entry = "#{dir.delete_prefix("#{File.expand_path(workspace_path)}/")}/"
-      return if system("git", "-C", workspace_path, "check-ignore", "-q", entry)
+      root = "#{File.expand_path(workspace_path)}/"
+      dir = File.expand_path(dir)
+      # A store outside the workspace is not ours to ignore: `git check-ignore` rejects an absolute
+      # path outside the repository, and appending it only grew `.git/info/exclude` on every build.
+      return unless dir.start_with?(root)
 
-      File.write(exclude, File.read(exclude) + "\n" + entry)
+      entry = "#{dir.delete_prefix(root)}/"
+      return if system("git", "-C", workspace_path, "check-ignore", "-q", entry, err: File::NULL)
+
+      contents = File.read(exclude)
+      File.write(exclude, "#{contents}\n#{entry}") unless contents.lines.map(&:chomp).include?(entry)
     end
 
     # Signature of everything that can change the index for this workspace: the Gemfile.lock hash

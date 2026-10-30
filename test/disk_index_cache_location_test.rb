@@ -116,4 +116,17 @@ class DiskIndexCacheLocationTest < Minitest::Test
       refute_includes(File.read(exclude), "tmp/rubydex/", "Rails already ignores tmp/: don't touch the repo")
     end
   end
+
+  def test_a_store_outside_the_workspace_is_not_added_to_exclude
+    Dir.mktmpdir do |dir|
+      system("git", "init", dir, out: File::NULL)
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+      exclude = File.join(dir, ".git", "info", "exclude")
+      before = File.read(exclude)
+
+      graph.send(:ensure_store_ignored, File.join(dir, "..", "not-this-workspace", "rubydex"))
+
+      assert_equal(before, File.read(exclude), "a global store does not belong in this repository's exclude")
+    end
+  end
 end
