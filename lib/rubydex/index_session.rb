@@ -14,8 +14,14 @@ ENV["RUBYDEX_INDEX_MANAGER"] = "0"
 
 graph = Rubydex::Graph.configure_for_workspace(workspace)
 if flags.include?("--full")
-  graph.send(:claim_rebuild, store)
-  graph.send(:build_store_in_child, store)
+  lock = graph.send(:claim_rebuild, store)
+  exit(0) unless lock
+
+  begin
+    graph.send(:build_store_in_child, store)
+  ensure
+    Dir.rmdir(lock) if File.exist?(lock)
+  end
 else
   graph.refresh_if_stale
 end

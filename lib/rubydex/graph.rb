@@ -269,6 +269,7 @@ module Rubydex
     #: (String cache) -> (String | false)
     def claim_rebuild(cache)
       lock = "#{cache}.rebuild"
+      FileUtils.mkdir_p(File.dirname(lock))
       begin
         Dir.mkdir(lock)
       rescue Errno::EEXIST

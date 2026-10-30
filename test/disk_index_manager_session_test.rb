@@ -43,4 +43,46 @@ class DiskIndexManagerSessionTest < Minitest::Test
       )
     end
   end
+
+  def test_a_full_build_removes_the_lock_it_claimed
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "foo.rb"), "class Foo; end\n")
+      store = File.join(dir, "tmp", "rubydex", "index.redb")
+      lock = "#{store}.rebuild"
+
+      assert(run_index_session(dir, store, "--full"), "the full build must succeed")
+      refute(File.exist?(lock), "the builder must release the rebuild lock")
+      assert(File.exist?(store), "the store was built")
+    end
+  end
+
+  def test_a_full_build_leaves_a_lock_it_did_not_claim_alone
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "foo.rb"), "class Foo; end\n")
+      store = File.join(dir, "tmp", "rubydex", "index.redb")
+      FileUtils.mkdir_p(File.dirname(store))
+      lock = "#{store}.rebuild"
+      Dir.mkdir(lock)
+
+      assert(run_index_session(dir, store, "--full"), "losing the lock is not a failure")
+      assert(File.exist?(lock), "another builder's lock must not be removed")
+      refute(File.exist?(store), "no store is built without the lock")
+    end
+  end
+
+  private
+
+  def run_index_session(workspace, store, *flags)
+    script = File.expand_path("../lib/rubydex/index_session.rb", __dir__)
+    system(
+      RbConfig.ruby,
+      "-I#{File.expand_path("../lib", __dir__)}",
+      script,
+      workspace,
+      store,
+      *flags,
+      out: File::NULL,
+      err: File::NULL,
+    )
+  end
 end
