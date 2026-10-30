@@ -36,4 +36,22 @@ class DiskIndexCypherTest < Minitest::Test
     assert_kind_of(Rubydex::Declaration, node)
     assert_equal("Foo", node.name)
   end
+
+  def test_a_live_edited_declaration_appears_once
+    skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
+
+    path = File.join(@tmp, "foo.rb")
+    File.write(path, "class Foo\nend\n")
+
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
+    graph.index_workspace
+    graph.resolve
+
+    uri = graph.path_to_uri(path)
+    graph.index_source(uri, "class Foo\n  def edited; end\nend\n", "ruby")
+    graph.resolve
+
+    rows = Rubydex::Query.parse("MATCH (c:Class {name: 'Foo'}) RETURN c").run(graph).rows
+    assert_equal(1, rows.length, "an overlay declaration must shadow the store copy, not be counted twice")
+  end
 end

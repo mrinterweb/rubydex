@@ -421,24 +421,28 @@ impl GraphProvider for Graph {
     }
 }
 
-/// All document ids the graph can see: in-memory map ∪ disk store.
+/// All document ids the graph can see: in-memory map ∪ disk store. Overlay entries shadow store
+/// entries; emitting both would duplicate every live-edited or materialized node.
 fn document_node_ids(graph: &Graph) -> Vec<UriId> {
-    let mut ids = graph.documents().keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_document_ids());
+    let overlay = graph.documents();
+    let mut ids = overlay.keys().copied().collect::<Vec<_>>();
+    ids.extend(graph.store_document_ids().into_iter().filter(|id| !overlay.contains_key(id)));
     ids
 }
 
-/// All definition ids the graph can see: in-memory map ∪ disk store.
+/// All definition ids the graph can see: in-memory map ∪ disk store. See [`document_node_ids`].
 fn definition_node_ids(graph: &Graph) -> Vec<DefinitionId> {
-    let mut ids = graph.definitions().keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_definition_ids());
+    let overlay = graph.definitions();
+    let mut ids = overlay.keys().copied().collect::<Vec<_>>();
+    ids.extend(graph.store_definition_ids().into_iter().filter(|id| !overlay.contains_key(id)));
     ids
 }
 
-/// All declaration ids the graph can see: in-memory map ∪ disk store.
+/// All declaration ids the graph can see: in-memory map ∪ disk store. See [`document_node_ids`].
 fn declaration_node_ids(graph: &Graph) -> Vec<DeclarationId> {
-    let mut ids = graph.declarations().keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_declaration_ids());
+    let overlay = graph.declarations();
+    let mut ids = overlay.keys().copied().collect::<Vec<_>>();
+    ids.extend(graph.store_declaration_ids().into_iter().filter(|id| !overlay.contains_key(id)));
     ids
 }
 
