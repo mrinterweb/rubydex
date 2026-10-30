@@ -82,7 +82,7 @@ impl NotifySource {
     /// Discards events under `path` (and any `.git` metadata directory). The store lives inside the
     /// workspace when `location = "tmp"`; without this, writing the store re-triggers an indexer.
     #[must_use]
-    pub fn ignore(mut self, path: PathBuf) -> NotifySource {
+    pub fn ignore(self, path: PathBuf) -> NotifySource {
         self.ignored.write().unwrap().push(path);
         self
     }

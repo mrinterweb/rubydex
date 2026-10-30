@@ -92,8 +92,7 @@ mod tests {
 
     #[test]
     fn a_burst_during_a_build_keeps_its_size_for_the_next_start() {
-        let exe = std::env::current_exe().expect("test executable");
-        let mut builder = Builder::new(vec![exe.to_string_lossy().into_owned(), "--list".into()]);
+        let mut builder = Builder::new(vec!["ruby".into(), "-e".into(), String::new(), "--".into()]);
 
         builder.record(1);
         assert!(builder.start(10).is_some(), "the first event starts a build");
