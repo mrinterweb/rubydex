@@ -84,4 +84,20 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     assert(File.exist?(cache), "a healthy store must stay on the cache path")
     refute(File.exist?("#{cache}.corrupt"), "a healthy store must not be quarantined")
   end
+
+  # A store that opens successfully but has an unreadable manifest sidecar fails after `attach_store`.
+  # The rescue must detach before `index_all`, or the "fall back to in-memory" path is a no-op against
+  # the attached store.
+  def test_a_corrupt_manifest_detaches_the_store_before_the_in_memory_fallback
+    graph, cache = write_store("foo.rb" => "class Foo; end\n")
+    File.write(File.join(@tmp, "late.rb"), "class LateToAdd; end\n")
+    File.write("#{cache}.hash", graph.send(:store_signature))
+    File.binwrite("#{cache}.files", "not a marshal dump")
+
+    graph.index_workspace
+    graph.resolve
+
+    refute_nil(graph["LateToAdd"], "the fallback must index in memory, not no-op on the attached store")
+    refute_nil(graph["Foo"], "the session must keep working after the failed manifest")
+  end
 end

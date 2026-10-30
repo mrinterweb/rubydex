@@ -89,6 +89,9 @@ module Rubydex
       # NotImplementedError (from `fork`) is < ScriptError, not < StandardError, so list it
       # explicitly — otherwise the gem raises on every call on Windows, where fork is unavailable.
       warn("rubydex: disk-backed index unavailable (#{e.class}: #{e.message}); falling back to in-memory")
+      # `index_all` is a no-op while a store is attached, so a failure after `attach_store` (a
+      # corrupt manifest sidecar, an unreadable scan) has to detach before the fallback is real.
+      detach_store if respond_to?(:detach_store)
       index_all(workspace_paths)
     end
 
