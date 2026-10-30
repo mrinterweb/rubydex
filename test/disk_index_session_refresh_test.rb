@@ -246,6 +246,44 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
+  # A session that was not the builder must re-attach to the store the builder just published. The
+  # marker is keyed on what the store holds (source scan + lockfile), not on HEAD: HEAD belongs to
+  # what the session is serving, and mixing it into the marker made this branch dead in a git repo.
+  def test_a_session_reattaches_to_a_store_another_session_rebuilt
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "tmp"))
+      8.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\n  def old; end\nend\n") }
+      git(dir, "init", "-q")
+      git(dir, "add", ".")
+      git(dir, "commit", "-q", "-m", "main")
+
+      ENV["RUBYDEX_DISK_INDEX"] = "1"
+      ENV["RUBYDEX_REFRESH_TTL"] = "0"
+      begin
+        first = session(dir)
+        builds = 0
+        first.define_singleton_method(:build_store_in_child) do |*args, **kwargs|
+          builds += 1
+          super(*args, **kwargs)
+        end
+
+        8.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\n  def new; end\nend\n") }
+        git(dir, "add", ".")
+        git(dir, "commit", "-q", "-m", "switch")
+
+        second = session(dir) # sees the large diff first and rebuilds
+        assert_includes(second["K0"].members.map(&:name), "K0#new()")
+
+        assert(first.send(:refresh_if_stale))
+        assert_equal(0, builds, "a session must re-attach to the store another session just built")
+        assert_includes(first["K0"].members.map(&:name), "K0#new()")
+      ensure
+        ENV.delete("RUBYDEX_DISK_INDEX")
+        ENV.delete("RUBYDEX_REFRESH_TTL")
+      end
+    end
+  end
+
   def test_refresh_does_nothing_when_the_store_is_already_fresh
     with_workspace do |dir, _rb|
       graph = session(dir)

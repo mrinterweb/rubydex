@@ -115,7 +115,7 @@ module Rubydex
       return false if @session_signature == signature
 
       marker = "#{cache}.hash"
-      if File.exist?(marker) && File.read(marker) == signature
+      if File.exist?(marker) && File.read(marker) == store_signature(scan)
         attach_store(cache)
         adopt_manifest(cache)
       elsif (changes = surgical_changes(scan))
