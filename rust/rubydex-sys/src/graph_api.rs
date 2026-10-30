@@ -294,8 +294,8 @@ pub unsafe extern "C" fn rdx_graph_dead_code_candidates(pointer: GraphPointer) -
         query::dead_code_candidates(graph)
             .into_iter()
             .filter_map(|id| {
-                let decl = graph.declarations().get(&id)?;
-                Some(CDeclaration::from_declaration(id, decl))
+                let decl = graph.declaration(id)?;
+                Some(CDeclaration::from_declaration(id, &decl))
             })
             .collect::<Vec<CDeclaration>>()
             .into_boxed_slice()
@@ -770,12 +770,22 @@ pub unsafe extern "C" fn rdx_graph_set_encoding(pointer: GraphPointer, encoding_
 pub unsafe extern "C" fn rdx_graph_declarations_iter_new(pointer: GraphPointer) -> *mut DeclarationsIter {
     // Snapshot the declarations at iterator creation to avoid borrowing across FFI calls
     let entries = with_graph(pointer, |graph| {
-        graph
+        let mut entries = graph
             .declarations()
             .iter()
             .map(|(id, decl)| CDeclaration::from_declaration(*id, decl))
-            .collect::<Vec<CDeclaration>>()
-            .into_boxed_slice()
+            .collect::<Vec<CDeclaration>>();
+        entries.extend(
+            graph
+                .store_declaration_ids()
+                .into_iter()
+                .filter(|id| !graph.declarations().contains_key(id))
+                .filter_map(|id| {
+                    let decl = graph.declaration(id)?;
+                    Some(CDeclaration::from_declaration(id, &decl))
+                }),
+        );
+        entries.into_boxed_slice()
     });
 
     DeclarationsIter::new(entries)
@@ -790,12 +800,15 @@ pub unsafe extern "C" fn rdx_graph_declarations_iter_new(pointer: GraphPointer) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_documents_iter_new(pointer: GraphPointer) -> *mut DocumentsIter {
     let entries = with_graph(pointer, |graph| {
-        graph
-            .documents()
-            .keys()
-            .map(|uri_id| **uri_id)
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
+        let mut ids: Vec<u64> = graph.documents().keys().map(|uri_id| **uri_id).collect();
+        ids.extend(
+            graph
+                .store_document_ids()
+                .into_iter()
+                .filter(|id| !graph.documents().contains_key(id))
+                .map(|id| *id),
+        );
+        ids.into_boxed_slice()
     });
 
     DocumentsIter::new(entries)
@@ -832,7 +845,7 @@ pub unsafe extern "C" fn rdx_graph_get_declaration(pointer: GraphPointer, name: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_constant_references_iter_new(pointer: GraphPointer) -> *mut ConstantReferencesIter {
     with_graph(pointer, |graph| {
-        let refs: Vec<_> = graph
+        let mut refs: Vec<_> = graph
             .constant_references()
             .iter()
             .map(|(id, cref)| {
@@ -851,6 +864,27 @@ pub unsafe extern "C" fn rdx_graph_constant_references_iter_new(pointer: GraphPo
             })
             .collect();
 
+        refs.extend(
+            graph
+                .store_constant_reference_ids()
+                .into_iter()
+                .filter(|id| !graph.constant_references().contains_key(id))
+                .filter_map(|id| {
+                    let cref = graph.constant_reference(id)?;
+                    let declaration_id = graph
+                        .name(*cref.name_id())
+                        .and_then(|name_ref| match &*name_ref {
+                            NameRef::Resolved(resolved) => Some(**resolved.declaration_id()),
+                            NameRef::Unresolved(_) => None,
+                        })
+                        .unwrap_or(0);
+                    Some(CConstantReference {
+                        id: *id,
+                        declaration_id,
+                    })
+                }),
+        );
+
         ConstantReferencesIter::new(refs.into_boxed_slice())
     })
 }
@@ -862,11 +896,18 @@ pub unsafe extern "C" fn rdx_graph_constant_references_iter_new(pointer: GraphPo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_method_references_iter_new(pointer: GraphPointer) -> *mut MethodReferencesIter {
     with_graph(pointer, |graph| {
-        let refs: Vec<_> = graph
+        let mut refs: Vec<_> = graph
             .method_references()
             .keys()
             .map(|id| CMethodReference { id: **id })
             .collect();
+        refs.extend(
+            graph
+                .store_method_reference_ids()
+                .into_iter()
+                .filter(|id| !graph.method_references().contains_key(id))
+                .map(|id| CMethodReference { id: *id }),
+        );
 
         MethodReferencesIter::new(refs.into_boxed_slice())
     })

@@ -60,10 +60,7 @@ module Rubydex
           File.join(@root_path, file_path)
         end
         canonical_target = File.realpath(absolute_target)
-        @graph.documents.find do |document|
-          path = file_path_for_uri(document.uri)
-          path && File.expand_path(path) == canonical_target
-        end
+        @graph.document(@graph.path_to_uri(canonical_target))
       end
 
       #: (Location) -> Hash

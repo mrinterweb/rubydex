@@ -583,6 +583,56 @@ impl Graph {
         Vec::new()
     }
 
+    /// Constant reference ids held by the disk store, excluding tombstoned references. Empty when no
+    /// store is attached.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_constant_reference_ids(&self) -> Vec<ConstantReferenceId> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        scan_store(
+            store,
+            &self.store_errors,
+            crate::model::store::RedbStore::constant_reference_ids,
+        )
+        .into_iter()
+        .filter(|id| !self.is_tombstoned(TombstoneKind::ConstantReference, id.get()))
+        .collect()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn store_constant_reference_ids(&self) -> Vec<ConstantReferenceId> {
+        Vec::new()
+    }
+
+    /// Method reference ids held by the disk store, excluding tombstoned references. Empty when no
+    /// store is attached.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_method_reference_ids(&self) -> Vec<MethodReferenceId> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        scan_store(
+            store,
+            &self.store_errors,
+            crate::model::store::RedbStore::method_reference_ids,
+        )
+        .into_iter()
+        .filter(|id| !self.is_tombstoned(TombstoneKind::MethodReference, id.get()))
+        .collect()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn store_method_reference_ids(&self) -> Vec<MethodReferenceId> {
+        Vec::new()
+    }
+
     /// `(uri_id, URI)` pairs for all documents held by the disk store. Empty when no store is
     /// attached. Used by require-path resolution and completion to cover store-backed documents.
     #[cfg(feature = "redb-store")]

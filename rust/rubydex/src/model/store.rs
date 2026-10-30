@@ -529,6 +529,38 @@ impl RedbStore {
             .collect()
     }
 
+    /// Reads all constant reference ids for enumeration (keys only, no deserialization) — see
+    /// [`Self::declaration_ids`].
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn constant_reference_ids(&self) -> Result<Vec<ConstantReferenceId>, redb::Error> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(CONSTANT_REFERENCES)?;
+        table
+            .range(..=u64::MAX)?
+            .map(|entry| -> Result<ConstantReferenceId, redb::Error> {
+                Ok(ConstantReferenceId::new(entry?.0.value()))
+            })
+            .collect()
+    }
+
+    /// Reads all method reference ids for enumeration (keys only, no deserialization) — see
+    /// [`Self::declaration_ids`].
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    pub fn method_reference_ids(&self) -> Result<Vec<MethodReferenceId>, redb::Error> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(METHOD_REFERENCES)?;
+        table
+            .range(..=u64::MAX)?
+            .map(|entry| -> Result<MethodReferenceId, redb::Error> {
+                Ok(MethodReferenceId::new(entry?.0.value()))
+            })
+            .collect()
+    }
+
     /// Reads a single definition node, if present.
     ///
     /// # Errors

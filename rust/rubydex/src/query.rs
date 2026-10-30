@@ -918,7 +918,13 @@ pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
     let num_threads = thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let declarations = graph.declarations();
 
-    let ids: Vec<DeclarationId> = declarations.keys().copied().collect();
+    let mut ids: Vec<DeclarationId> = declarations.keys().copied().collect();
+    ids.extend(
+        graph
+            .store_declaration_ids()
+            .into_iter()
+            .filter(|id| !declarations.contains_key(id)),
+    );
     let chunk_size = ids.len().div_ceil(num_threads);
 
     if chunk_size == 0 {
@@ -933,12 +939,14 @@ pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
                     chunk
                         .iter()
                         .filter(|id| {
-                            let decl = declarations.get(id).unwrap();
+                            let Some(decl) = graph.declaration(**id) else {
+                                return false;
+                            };
                             decl.constant_references()
                                 .is_some_and(<[ConstantReferenceId]>::is_empty)
-                                && !matches!(decl, Declaration::Namespace(Namespace::SingletonClass(_)))
+                                && !matches!(&*decl, Declaration::Namespace(Namespace::SingletonClass(_)))
                                 && !decl.has_no_definitions()
-                                && !is_built_in(graph, decl)
+                                && !is_built_in(graph, &decl)
                         })
                         .copied()
                         .collect::<Vec<_>>()
