@@ -259,25 +259,22 @@ pub unsafe extern "C" fn rdx_declaration_definitions_iter_new(
     })
 }
 
-/// Returns the declaration for the singleton class of the declaration
+/// Returns the declaration for the singleton class of the declaration, or NULL when the
+/// declaration does not exist, is not a namespace, or has no singleton class.
 ///
 /// # Safety
 ///
 /// Assumes pointer is valid
-///
-/// # Panics
-///
-/// Will panic if invoked on a non-existing or non-namespace declaration
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_declaration_singleton_class(pointer: GraphPointer, decl_id: u64) -> *const CDeclaration {
     with_graph(pointer, |graph| {
-        let singleton_id = graph
-            .declaration(DeclarationId::new(decl_id))
-            .unwrap()
-            .as_namespace()
-            .unwrap()
-            .singleton_class()
-            .copied();
+        let Some(declaration) = graph.declaration(DeclarationId::new(decl_id)) else {
+            return ptr::null();
+        };
+        let Some(namespace) = declaration.as_namespace() else {
+            return ptr::null();
+        };
+        let singleton_id = namespace.singleton_class().copied();
 
         if let Some(singleton_id) = singleton_id
             && let Some(singleton) = graph.declaration(singleton_id)

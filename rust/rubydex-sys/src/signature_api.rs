@@ -74,9 +74,11 @@ pub struct SignatureArray {
 pub unsafe extern "C" fn rdx_definition_signatures(pointer: GraphPointer, definition_id: u64) -> *mut SignatureArray {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let defn = graph.definition(def_id).expect("definition should exist");
+        let Some(defn) = graph.definition(def_id) else {
+            return ptr::null_mut();
+        };
         let Definition::Method(method_def) = &*defn else {
-            panic!("expected a method definition");
+            return ptr::null_mut();
         };
 
         let sig_entries = collect_method_signatures(graph, method_def);
@@ -91,7 +93,9 @@ pub unsafe extern "C" fn rdx_definition_signatures(pointer: GraphPointer, defini
 /// Helper: build signature entries from a `MethodDefinition`.
 fn collect_method_signatures(graph: &Graph, method_def: &MethodDefinition) -> Vec<SignatureEntry> {
     let uri_id = *method_def.uri_id();
-    let document = graph.document(uri_id).expect("document should exist");
+    let Some(document) = graph.document(uri_id) else {
+        return Vec::new();
+    };
 
     method_def
         .signatures()
@@ -100,18 +104,16 @@ fn collect_method_signatures(graph: &Graph, method_def: &MethodDefinition) -> Ve
         .map(|sig| {
             let param_entries: Vec<ParameterEntry> = sig
                 .iter()
-                .map(|param| {
+                .filter_map(|param| {
                     let param_struct = param.inner();
-                    let name = graph
-                        .string(*param_struct.str())
-                        .expect("parameter name string should exist");
-                    let name_str = CString::new(name.as_str()).unwrap().into_raw().cast_const();
+                    let name = graph.string(*param_struct.str())?;
+                    let name_str = CString::new(name.as_str()).ok()?.into_raw().cast_const();
 
-                    ParameterEntry {
+                    Some(ParameterEntry {
                         name: name_str,
                         kind: map_parameter_kind(param),
                         location: create_location_for_uri_and_offset(graph, &document, param_struct.offset()),
-                    }
+                    })
                 })
                 .collect();
 
@@ -158,8 +160,6 @@ pub unsafe extern "C" fn rdx_method_alias_definition_signatures(
                         sig_entries.extend(collect_method_signatures(graph, method_definition));
                     }
                 }
-            } else {
-                panic!("expected a method declaration");
             }
         }
 

@@ -20,22 +20,18 @@ pub struct CConstantReference {
 }
 
 impl CConstantReference {
-    /// Build a `CConstantReference` from a graph and reference ID. Sets `declaration_id` to 0 when the reference is
-    /// unresolved.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if there's inconsistent data in the graph
+    /// Build a `CConstantReference` from a graph and reference ID. Sets `declaration_id` to 0 when the
+    /// reference cannot be read or is unresolved.
     #[must_use]
     pub fn from_id(graph: &Graph, ref_id: ConstantReferenceId) -> Self {
-        let reference = graph.constant_reference(ref_id).expect("Constant reference not found");
-
-        let name_ref = graph.name(*reference.name_id()).expect("Name ID should exist");
-
-        let declaration_id = match &*name_ref {
-            NameRef::Resolved(resolved) => **resolved.declaration_id(),
-            NameRef::Unresolved(_) => 0,
-        };
+        let declaration_id = graph
+            .constant_reference(ref_id)
+            .and_then(|reference| graph.name(*reference.name_id()))
+            .and_then(|name_ref| match &*name_ref {
+                NameRef::Resolved(resolved) => Some(**resolved.declaration_id()),
+                NameRef::Unresolved(_) => None,
+            })
+            .unwrap_or(0);
 
         Self {
             id: *ref_id,
@@ -135,10 +131,13 @@ pub unsafe extern "C" fn rdx_constant_reference_name(pointer: GraphPointer, refe
         let Some(reference) = graph.constant_reference(ref_id) else {
             return ptr::null();
         };
-        let name = graph.name(*reference.name_id()).expect("Name ID should exist");
-
-        let name_string = graph.string(*name.str()).expect("String ID should exist").to_string();
-        CString::new(name_string).unwrap().into_raw().cast_const()
+        let Some(name) = graph.name(*reference.name_id()) else {
+            return ptr::null();
+        };
+        let Some(name_string) = graph.string(*name.str()) else {
+            return ptr::null();
+        };
+        CString::new(name_string.to_string()).map_or(ptr::null(), |s| s.into_raw().cast_const())
     })
 }
 
@@ -159,11 +158,10 @@ pub unsafe extern "C" fn rdx_method_reference_name(pointer: GraphPointer, refere
         let Some(reference) = graph.method_reference(ref_id) else {
             return OwnedString::null();
         };
-        let name = graph
-            .string(*reference.str())
-            .expect("Name ID should exist")
-            .to_string();
-        OwnedString::new(&name)
+        let Some(name) = graph.string(*reference.str()) else {
+            return OwnedString::null();
+        };
+        OwnedString::new(name)
     })
 }
 
@@ -210,13 +208,19 @@ pub unsafe extern "C" fn rdx_resolved_constant_reference_declaration(
 ) -> *const CDeclaration {
     with_graph(pointer, |graph| {
         let ref_id = ConstantReferenceId::new(reference_id);
-        let reference = graph.constant_reference(ref_id).expect("Reference not found");
-        let name_ref = graph.name(*reference.name_id()).expect("Name ID should exist");
+        let Some(reference) = graph.constant_reference(ref_id) else {
+            return ptr::null();
+        };
+        let Some(name_ref) = graph.name(*reference.name_id()) else {
+            return ptr::null();
+        };
 
         match &*name_ref {
             NameRef::Resolved(resolved) => {
                 let decl_id = *resolved.declaration_id();
-                let decl = graph.declaration(decl_id).expect("Declaration not found");
+                let Some(decl) = graph.declaration(decl_id) else {
+                    return ptr::null();
+                };
                 Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, &decl))).cast_const()
             }
             NameRef::Unresolved(_) => ptr::null(),
@@ -262,18 +266,24 @@ pub unsafe extern "C" fn rdx_method_reference_receiver_declaration(
 ) -> *const CDeclaration {
     with_graph(pointer, |graph| {
         let ref_id = MethodReferenceId::new(reference_id);
-        let reference = graph.method_reference(ref_id).expect("Reference not found");
+        let Some(reference) = graph.method_reference(ref_id) else {
+            return ptr::null();
+        };
 
         let Some(name_id) = reference.receiver() else {
             return ptr::null();
         };
 
-        let name_ref = graph.name(name_id).expect("Name ID should exist");
+        let Some(name_ref) = graph.name(name_id) else {
+            return ptr::null();
+        };
 
         match &*name_ref {
             NameRef::Resolved(resolved) => {
                 let decl_id = *resolved.declaration_id();
-                let decl = graph.declaration(decl_id).expect("Declaration not found");
+                let Some(decl) = graph.declaration(decl_id) else {
+                    return ptr::null();
+                };
                 Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, &decl))).cast_const()
             }
             NameRef::Unresolved(_) => ptr::null(),
@@ -299,7 +309,9 @@ pub unsafe extern "C" fn rdx_method_reference_location(pointer: GraphPointer, re
         let Some(reference) = graph.method_reference(ref_id) else {
             return ptr::null_mut();
         };
-        let document = graph.document(reference.uri_id()).expect("Document should exist");
+        let Some(document) = graph.document(reference.uri_id()) else {
+            return ptr::null_mut();
+        };
 
         create_location_for_uri_and_offset(graph, &document, reference.offset())
     })

@@ -109,33 +109,32 @@ pub unsafe extern "C" fn rdx_definition_name(pointer: GraphPointer, definition_i
     })
 }
 
-fn raw_name_for_name(graph: &Graph, name_id: NameId) -> String {
+fn raw_name_for_name(graph: &Graph, name_id: NameId) -> Option<String> {
     let mut raw_name = String::new();
-    append_raw_name(graph, name_id, &mut raw_name);
-    raw_name
+    append_raw_name(graph, name_id, &mut raw_name).then_some(raw_name)
 }
 
-fn append_raw_name(graph: &Graph, name_id: NameId, raw_name: &mut String) {
-    let name = graph
-        .names()
-        .get(&name_id)
-        .expect("name should exist while building raw_name");
-    let simple_name = graph
-        .strings()
-        .get(name.str())
-        .expect("string should exist while building raw_name")
-        .as_str();
+fn append_raw_name(graph: &Graph, name_id: NameId, raw_name: &mut String) -> bool {
+    let Some(name) = graph.name(name_id) else {
+        return false;
+    };
+    let Some(simple_name) = graph.string(*name.str()) else {
+        return false;
+    };
 
     match name.parent_scope() {
         ParentScope::None => {}
         ParentScope::TopLevel => raw_name.push_str("::"),
         ParentScope::Some(parent_id) | ParentScope::Attached(parent_id) => {
-            append_raw_name(graph, *parent_id, raw_name);
+            if !append_raw_name(graph, *parent_id, raw_name) {
+                return false;
+            }
             raw_name.push_str("::");
         }
     }
 
-    raw_name.push_str(simple_name);
+    raw_name.push_str(simple_name.as_str());
+    true
 }
 
 fn raw_name_id(definition: &Definition) -> Option<&NameId> {
@@ -165,12 +164,17 @@ fn raw_name_id(definition: &Definition) -> Option<&NameId> {
 pub unsafe extern "C" fn rdx_definition_raw_name(pointer: GraphPointer, definition_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let Some(name_id) = graph.definitions().get(&def_id).and_then(raw_name_id) else {
+        let Some(defn) = graph.definition(def_id) else {
+            return ptr::null();
+        };
+        let Some(name_id) = raw_name_id(&defn) else {
             return ptr::null();
         };
 
-        let name = raw_name_for_name(graph, *name_id);
-        CString::new(name).unwrap().into_raw().cast_const()
+        let Some(name) = raw_name_for_name(graph, *name_id) else {
+            return ptr::null();
+        };
+        CString::new(name).map_or(ptr::null(), |s| s.into_raw().cast_const())
     })
 }
 
@@ -239,7 +243,9 @@ pub unsafe extern "C" fn rdx_definition_comments(pointer: GraphPointer, definiti
         };
 
         let uri_id = *defn.uri_id();
-        let document = graph.document(uri_id).expect("document should exist");
+        let Some(document) = graph.document(uri_id) else {
+            return ptr::null_mut();
+        };
 
         let mut entries = defn
             .comments()
@@ -308,7 +314,9 @@ pub unsafe extern "C" fn rdx_definition_location(pointer: GraphPointer, definiti
             return ptr::null_mut();
         };
 
-        let document = graph.document(*defn.uri_id()).expect("document should exist");
+        let Some(document) = graph.document(*defn.uri_id()) else {
+            return ptr::null_mut();
+        };
         create_location_for_uri_and_offset(graph, &document, defn.offset())
     })
 }
@@ -352,7 +360,7 @@ pub unsafe extern "C" fn rdx_definition_lexical_nesting_id(pointer: GraphPointer
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
         let Some(defn) = graph.definition(def_id) else {
-            panic!("Definition not found: {definition_id:?}");
+            return ptr::null();
         };
 
         match defn.lexical_nesting_id() {
@@ -402,7 +410,9 @@ where
 pub unsafe extern "C" fn rdx_definition_is_deprecated(pointer: GraphPointer, definition_id: u64) -> bool {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let defn = graph.definition(def_id).expect("definition not found");
+        let Some(defn) = graph.definition(def_id) else {
+            return false;
+        };
         defn.is_deprecated()
     })
 }
@@ -429,7 +439,9 @@ pub unsafe extern "C" fn rdx_definition_name_location(pointer: GraphPointer, def
         let Some(name_offset) = defn.name_offset() else {
             return ptr::null_mut();
         };
-        let document = graph.document(*defn.uri_id()).expect("document should exist");
+        let Some(document) = graph.document(*defn.uri_id()) else {
+            return ptr::null_mut();
+        };
         create_location_for_uri_and_offset(graph, &document, name_offset)
     })
 }
@@ -440,9 +452,6 @@ pub unsafe extern "C" fn rdx_definition_name_location(pointer: GraphPointer, def
 /// # Safety
 /// - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
 /// - `definition_id` must be a valid definition id for a class definition.
-///
-/// # Panics
-/// This function will panic if the definition cannot be found or is not a class definition.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_class_definition_superclass(
     pointer: GraphPointer,
@@ -450,10 +459,12 @@ pub unsafe extern "C" fn rdx_class_definition_superclass(
 ) -> *const CConstantReference {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let defn = graph.definition(def_id).expect("Definition not found");
+        let Some(defn) = graph.definition(def_id) else {
+            return ptr::null();
+        };
 
         let Definition::Class(class_def) = &*defn else {
-            panic!("Definition is not a class: {definition_id}");
+            return ptr::null();
         };
 
         let Some(ref_id) = class_def.superclass_ref() else {
@@ -527,14 +538,16 @@ fn map_mixin_kind(mixin: &Mixin) -> MixinKind {
 /// - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
 /// - `definition_id` must be a valid definition id.
 ///
-/// # Panics
-/// This function will panic if the definition cannot be found.
+/// # Safety
+/// - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
+/// - `definition_id` must be a valid definition id.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_definition_mixins(pointer: GraphPointer, definition_id: u64) -> *mut MixinsIter {
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
-        let defn = graph.definition(def_id).expect("Definition not found");
-
+        let Some(defn) = graph.definition(def_id) else {
+            return ptr::null_mut();
+        };
         let mixins = match &*defn {
             Definition::Class(class_def) => class_def.mixins(),
             Definition::Module(mod_def) => mod_def.mixins(),
@@ -615,7 +628,12 @@ pub unsafe extern "C" fn rdx_method_alias_definition_target(
 
         match rubydex::query::follow_method_alias(graph, def_id) {
             Ok(target_id) => {
-                let target_decl = graph.declaration(target_id).expect("target declaration must exist");
+                let Some(target_decl) = graph.declaration(target_id) else {
+                    return CMethodAliasTargetResult {
+                        status: CMethodAliasResolution::NotFound,
+                        declaration: ptr::null(),
+                    };
+                };
                 let boxed = Box::new(CDeclaration::from_declaration(target_id, &target_decl));
 
                 CMethodAliasTargetResult {
