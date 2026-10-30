@@ -139,8 +139,7 @@ fn the_store_cache_and_git_metadata_are_ignored() {
     let root = dir.path().to_path_buf();
     let store = root.join("tmp").join("rubydex");
     std::fs::create_dir_all(store.join("nested")).expect("store dir");
-    let mut source = NotifySource::new(std::slice::from_ref(&root), Duration::from_millis(50))
-        .ignore(store.clone());
+    let mut source = NotifySource::new(std::slice::from_ref(&root), Duration::from_millis(50)).ignore(store.clone());
 
     std::fs::write(store.join("index.redb"), "store").expect("store write");
     std::fs::write(store.join("nested").join("index.redb.building"), "temp").expect("temp write");

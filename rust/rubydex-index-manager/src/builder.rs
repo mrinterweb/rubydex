@@ -99,7 +99,10 @@ mod tests {
 
         // A branch switch touches nine more files while the child is still running.
         builder.record(9);
-        assert!(builder.start(10).is_none(), "the manager never runs two indexers at once");
+        assert!(
+            builder.start(10).is_none(),
+            "the manager never runs two indexers at once"
+        );
         assert_eq!(builder.pending, 9, "the burst size must survive the running child");
 
         builder.reap();

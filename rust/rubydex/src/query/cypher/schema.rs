@@ -426,7 +426,12 @@ impl GraphProvider for Graph {
 fn document_node_ids(graph: &Graph) -> Vec<UriId> {
     let overlay = graph.documents();
     let mut ids = overlay.keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_document_ids().into_iter().filter(|id| !overlay.contains_key(id)));
+    ids.extend(
+        graph
+            .store_document_ids()
+            .into_iter()
+            .filter(|id| !overlay.contains_key(id)),
+    );
     ids
 }
 
@@ -434,7 +439,12 @@ fn document_node_ids(graph: &Graph) -> Vec<UriId> {
 fn definition_node_ids(graph: &Graph) -> Vec<DefinitionId> {
     let overlay = graph.definitions();
     let mut ids = overlay.keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_definition_ids().into_iter().filter(|id| !overlay.contains_key(id)));
+    ids.extend(
+        graph
+            .store_definition_ids()
+            .into_iter()
+            .filter(|id| !overlay.contains_key(id)),
+    );
     ids
 }
 
@@ -442,7 +452,12 @@ fn definition_node_ids(graph: &Graph) -> Vec<DefinitionId> {
 fn declaration_node_ids(graph: &Graph) -> Vec<DeclarationId> {
     let overlay = graph.declarations();
     let mut ids = overlay.keys().copied().collect::<Vec<_>>();
-    ids.extend(graph.store_declaration_ids().into_iter().filter(|id| !overlay.contains_key(id)));
+    ids.extend(
+        graph
+            .store_declaration_ids()
+            .into_iter()
+            .filter(|id| !overlay.contains_key(id)),
+    );
     ids
 }
 

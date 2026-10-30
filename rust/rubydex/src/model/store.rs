@@ -539,9 +539,7 @@ impl RedbStore {
         let table = read_txn.open_table(CONSTANT_REFERENCES)?;
         table
             .range(..=u64::MAX)?
-            .map(|entry| -> Result<ConstantReferenceId, redb::Error> {
-                Ok(ConstantReferenceId::new(entry?.0.value()))
-            })
+            .map(|entry| -> Result<ConstantReferenceId, redb::Error> { Ok(ConstantReferenceId::new(entry?.0.value())) })
             .collect()
     }
 
@@ -555,9 +553,7 @@ impl RedbStore {
         let table = read_txn.open_table(METHOD_REFERENCES)?;
         table
             .range(..=u64::MAX)?
-            .map(|entry| -> Result<MethodReferenceId, redb::Error> {
-                Ok(MethodReferenceId::new(entry?.0.value()))
-            })
+            .map(|entry| -> Result<MethodReferenceId, redb::Error> { Ok(MethodReferenceId::new(entry?.0.value())) })
             .collect()
     }
 
