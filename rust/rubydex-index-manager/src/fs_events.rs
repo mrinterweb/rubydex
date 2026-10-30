@@ -14,15 +14,32 @@ use std::time::{Duration, Instant};
 struct EventCollector {
     pending: Arc<Mutex<Vec<PathBuf>>>,
     last_event: Arc<Mutex<Instant>>,
+    ignored: Arc<std::sync::RwLock<Vec<PathBuf>>>,
 }
 
 impl EventHandler for EventCollector {
     fn handle_event(&mut self, event: Result<Event>) {
         if let Ok(change) = event {
-            self.pending.lock().unwrap().extend(change.paths);
+            let ignored = self.ignored.read().unwrap();
+            let paths: Vec<PathBuf> = change
+                .paths
+                .into_iter()
+                .filter(|path| !is_ignored(path, ignored.as_slice()))
+                .collect();
+            if paths.is_empty() {
+                return;
+            }
+            self.pending.lock().unwrap().extend(paths);
             *self.last_event.lock().unwrap() = Instant::now();
         }
     }
+}
+
+/// `.git` internals and the store's own cache directory are writes the index does not need to react
+/// to. Watching the store made every build re-arm another indexer; git metadata churns constantly.
+fn is_ignored(path: &std::path::Path, ignored: &[PathBuf]) -> bool {
+    path.components().any(|component| component.as_os_str() == ".git")
+        || ignored.iter().any(|root| path.starts_with(root))
 }
 
 /// `notify`-backed source: Linux inotify, macOS `FSEvents`, Windows
@@ -36,6 +53,8 @@ pub struct NotifySource {
     /// for minutes at a time (editors and other tools share it), so the manager keeps these to retry
     /// rather than leaving the workspace unwatched for its whole lifetime.
     unwatched: Vec<PathBuf>,
+    /// Directories whose events are discarded (the store's own cache).
+    ignored: Arc<std::sync::RwLock<Vec<PathBuf>>>,
 }
 
 impl NotifySource {
@@ -52,6 +71,7 @@ impl NotifySource {
             last_event: Arc::new(Mutex::new(Instant::now())),
             debounce,
             unwatched: Vec::new(),
+            ignored: Arc::new(std::sync::RwLock::new(Vec::new())),
         };
         for path in paths {
             source.subscribe(path.clone());
@@ -59,11 +79,20 @@ impl NotifySource {
         source
     }
 
+    /// Discards events under `path` (and any `.git` metadata directory). The store lives inside the
+    /// workspace when `location = "tmp"`; without this, writing the store re-triggers an indexer.
+    #[must_use]
+    pub fn ignore(mut self, path: PathBuf) -> NotifySource {
+        self.ignored.write().unwrap().push(path);
+        self
+    }
+
     /// Attempts to watch one root recursively, recording it as unwatched when that fails.
     fn subscribe(&mut self, path: PathBuf) {
         let collector = EventCollector {
             pending: Arc::clone(&self.pending),
             last_event: Arc::clone(&self.last_event),
+            ignored: Arc::clone(&self.ignored),
         };
         let config = Config::default()
             .with_event_kinds(EventKindMask::CREATE | EventKindMask::ALL_MODIFY | EventKindMask::REMOVE);

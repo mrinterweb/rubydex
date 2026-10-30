@@ -130,3 +130,36 @@ fn retrying_one_root_keeps_the_others_watched() {
         "the healthy root stopped delivering"
     );
 }
+
+/// The store and `.git` live inside the watched workspace; their writes must not look like source
+/// changes, or every build re-arms another indexer and every git command wakes the manager.
+#[test]
+fn the_store_cache_and_git_metadata_are_ignored() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    let store = root.join("tmp").join("rubydex");
+    std::fs::create_dir_all(store.join("nested")).expect("store dir");
+    let mut source = NotifySource::new(std::slice::from_ref(&root), Duration::from_millis(50))
+        .ignore(store.clone());
+
+    std::fs::write(store.join("index.redb"), "store").expect("store write");
+    std::fs::write(store.join("nested").join("index.redb.building"), "temp").expect("temp write");
+    let git_dir = root.join(".git");
+    std::fs::create_dir(&git_dir).expect("git dir");
+    std::fs::write(git_dir.join("index"), "git").expect("git write");
+
+    // A real source event is the control: the batch must still be delivered without the noise.
+    let file = root.join("a.rb");
+    std::fs::write(&file, "class A; end").expect("write");
+
+    let batch = source.try_next_batch(Duration::from_secs(3));
+    assert!(batch.contains(&file), "a source change must still wake the manager");
+    assert!(
+        !batch.iter().any(|path| path.starts_with(&store)),
+        "store writes must not feed back as source events: {batch:?}"
+    );
+    assert!(
+        !batch.iter().any(|path| path.starts_with(&git_dir)),
+        "git metadata must not feed back as source events: {batch:?}"
+    );
+}

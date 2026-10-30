@@ -90,11 +90,16 @@ fn retry_unwatched_roots(watches: &mut [Watch]) {
 
 #[must_use]
 pub fn watch_for(group: Group, debounce: Duration) -> Watch {
+    let mut source = NotifySource::new(group.workspaces.as_ref(), debounce);
+    if let Some(store_dir) = group.store.parent() {
+        source = source.ignore(store_dir.to_path_buf());
+    }
+
     Watch {
         store: group.store.clone(),
         workspaces: group.workspaces.clone(),
         builder: Builder::new(group.builder),
-        source: NotifySource::new(group.workspaces.as_ref(), debounce),
+        source,
         manifest: group.manifest,
         retry_at: Instant::now() + WATCH_RETRY_INTERVAL,
     }
