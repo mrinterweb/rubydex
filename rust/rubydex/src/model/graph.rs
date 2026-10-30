@@ -987,23 +987,31 @@ impl Graph {
     /// This will panic if there's inconsistent data in the graph
     #[must_use]
     pub fn definition_string_id(&self, definition: &Definition) -> StringId {
+        self.definition_string_id_opt(definition)
+            .expect("graph invariant: a definition's name is interned")
+    }
+
+    /// Fallible form of [`Self::definition_string_id`]: `None` when a store read failed or the
+    /// definition's name was removed by an overlay edit.
+    #[must_use]
+    pub fn definition_string_id_opt(&self, definition: &Definition) -> Option<StringId> {
         match definition {
-            Definition::Class(it) => *self.name(*it.name_id()).unwrap().str(),
-            Definition::SingletonClass(it) => *self.name(*it.name_id()).unwrap().str(),
-            Definition::Module(it) => *self.name(*it.name_id()).unwrap().str(),
-            Definition::Constant(it) => *self.name(*it.name_id()).unwrap().str(),
-            Definition::ConstantAlias(it) => *self.name(*it.name_id()).unwrap().str(),
-            Definition::ConstantVisibility(it) => *it.target(),
-            Definition::MethodVisibility(it) => *it.str_id(),
-            Definition::GlobalVariable(it) => *it.str_id(),
-            Definition::InstanceVariable(it) => *it.str_id(),
-            Definition::ClassVariable(it) => *it.str_id(),
-            Definition::AttrAccessor(it) => *it.str_id(),
-            Definition::AttrReader(it) => *it.str_id(),
-            Definition::AttrWriter(it) => *it.str_id(),
-            Definition::Method(it) => *it.str_id(),
-            Definition::MethodAlias(it) => *it.new_name_str_id(),
-            Definition::GlobalVariableAlias(it) => *it.new_name_str_id(),
+            Definition::Class(it) => Some(*self.name(*it.name_id())?.str()),
+            Definition::SingletonClass(it) => Some(*self.name(*it.name_id())?.str()),
+            Definition::Module(it) => Some(*self.name(*it.name_id())?.str()),
+            Definition::Constant(it) => Some(*self.name(*it.name_id())?.str()),
+            Definition::ConstantAlias(it) => Some(*self.name(*it.name_id())?.str()),
+            Definition::ConstantVisibility(it) => Some(*it.target()),
+            Definition::MethodVisibility(it) => Some(*it.str_id()),
+            Definition::GlobalVariable(it) => Some(*it.str_id()),
+            Definition::InstanceVariable(it) => Some(*it.str_id()),
+            Definition::ClassVariable(it) => Some(*it.str_id()),
+            Definition::AttrAccessor(it) => Some(*it.str_id()),
+            Definition::AttrReader(it) => Some(*it.str_id()),
+            Definition::AttrWriter(it) => Some(*it.str_id()),
+            Definition::Method(it) => Some(*it.str_id()),
+            Definition::MethodAlias(it) => Some(*it.new_name_str_id()),
+            Definition::GlobalVariableAlias(it) => Some(*it.new_name_str_id()),
         }
     }
 

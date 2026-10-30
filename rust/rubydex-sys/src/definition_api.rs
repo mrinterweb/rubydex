@@ -34,6 +34,9 @@ pub enum DefinitionKind {
     ClassVariable = 13,
     MethodAlias = 14,
     GlobalVariableAlias = 15,
+    /// The definition id is not present (a stale handle or an unreadable store entry). The C side
+    /// raises a Ruby `RuntimeError` instead of aborting the process.
+    Unknown = 16,
 }
 
 #[repr(C)]
@@ -64,15 +67,13 @@ pub(crate) fn map_definition_to_kind(defn: &Definition) -> DefinitionKind {
     }
 }
 
-/// Returns the enum kind for a definition id (e.g. Class, Module).
+/// Returns the enum kind for a definition id (e.g. Class, Module). Returns `Unknown` when the
+/// definition cannot be read, which the C side raises as a Ruby error rather than panicking across
+/// the FFI boundary.
 ///
 /// # Safety
 ///
 /// Assumes pointer is valid.
-///
-/// # Panics
-///
-/// This function will panic if the definition cannot be found.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_definition_kind(pointer: GraphPointer, definition_id: u64) -> DefinitionKind {
     with_graph(pointer, |graph| {
@@ -80,7 +81,7 @@ pub unsafe extern "C" fn rdx_definition_kind(pointer: GraphPointer, definition_i
         if let Some(defn) = graph.definition(definition_id) {
             map_definition_to_kind(&defn)
         } else {
-            panic!("Definition not found: {definition_id:?}");
+            DefinitionKind::Unknown
         }
     })
 }
@@ -96,7 +97,9 @@ pub unsafe extern "C" fn rdx_definition_name(pointer: GraphPointer, definition_i
     with_graph(pointer, |graph| {
         let def_id = DefinitionId::new(definition_id);
         if let Some(defn) = graph.definition(def_id) {
-            let string_id = graph.definition_string_id(&defn);
+            let Some(string_id) = graph.definition_string_id_opt(&defn) else {
+                return ptr::null();
+            };
 
             if let Some(name) = graph.string(string_id) {
                 OwnedString::new(name.as_str())
