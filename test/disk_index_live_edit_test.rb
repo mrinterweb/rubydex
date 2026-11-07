@@ -7,6 +7,7 @@ require "test_helper"
 class DiskIndexLiveEditTest < Minitest::Test
   def setup
     super
+    skip_unless_store_feature
     # On macOS `$TMPDIR` is `/var/folders/...`, a symlink to `/private/var/...`, and the store keys
     # documents by the real path, so a URI built from the alias would shadow a different document.
     @tmp = File.realpath(Dir.mktmpdir)

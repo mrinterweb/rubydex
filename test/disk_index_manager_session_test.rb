@@ -10,6 +10,11 @@ require "json"
 class DiskIndexManagerSessionTest < Minitest::Test
   MANAGER_BIN = File.expand_path("../lib/rubydex/rubydex-index-manager", __dir__)
 
+  def setup
+    super
+    skip_unless_store_feature
+  end
+
   def with_workspace(config)
     Dir.mktmpdir do |tmpdir|
       # The registry records the workspace as the graph resolved it (macOS `/private/var/...`), so

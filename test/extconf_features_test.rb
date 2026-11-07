@@ -9,7 +9,10 @@ require "test_helper"
 # The generated Makefile's cargo invocation is the contract for which Cargo features ship in the
 # compiled extension. This runs extconf.rb against a copy of the extension directory and reads it.
 class ExtconfFeaturesTest < Minitest::Test
+  # The no-feature CI job runs with `RUBYDEX_NO_REDB_STORE=1` set, which would otherwise decide the
+  # answer for the test that asserts the default.
   def generate_makefile(env = {})
+    env = { "RUBYDEX_NO_REDB_STORE" => nil, "RUBYDEX_JEMALLOC_DEBUG" => nil }.merge(env)
     Dir.mktmpdir do |dir|
       ext_dir = File.join(dir, "rubydex")
       FileUtils.cp_r("ext/rubydex", ext_dir)

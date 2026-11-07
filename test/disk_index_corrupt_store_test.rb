@@ -13,6 +13,7 @@ require "test_helper"
 class DiskIndexCorruptStoreTest < Minitest::Test
   def setup
     super
+    skip_unless_store_feature
     @tmp = Dir.mktmpdir
     ENV["RUBYDEX_DISK_INDEX"] = "1"
     ENV["RUBYDEX_REFRESH_TTL"] = "0" # tests edit out of band and expect the next refresh to see them

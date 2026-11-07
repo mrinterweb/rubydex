@@ -7,6 +7,7 @@ require "test_helper"
 class DiskIndexCypherTest < Minitest::Test
   def setup
     super
+    skip_unless_store_feature
     @tmp = Dir.mktmpdir
     ENV["RUBYDEX_DISK_INDEX"] = "1"
     ENV["RUBYDEX_CACHE_DIR"] = @tmp

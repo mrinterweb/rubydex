@@ -9,6 +9,11 @@ require "fileutils"
 # session to claim the rebuild lock spawns the one rebuild child, and every session re-attaches
 # (redb pins a snapshot at open, so a session must reopen to see a new store).
 class DiskIndexSessionRefreshTest < Minitest::Test
+  def setup
+    super
+    skip_unless_store_feature
+  end
+
   def with_workspace
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "tmp"))

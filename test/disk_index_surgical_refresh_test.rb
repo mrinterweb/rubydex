@@ -11,6 +11,7 @@ require "test_helper"
 class DiskIndexSurgicalRefreshTest < Minitest::Test
   def setup
     super
+    skip_unless_store_feature
     @tmp = Dir.mktmpdir
     @ws = File.join(@tmp, "ws")
     FileUtils.mkdir_p(@ws)
