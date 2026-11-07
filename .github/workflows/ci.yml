@@ -69,6 +69,9 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
         with:
+          # Pinned like the matrix, not read from `.ruby-version`: that pins the exact patch, and a
+          # runner image that predates it has no Ruby at all.
+          ruby-version: "4.0"
           bundler-cache: true
 
       - name: Lint

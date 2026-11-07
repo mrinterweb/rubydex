@@ -91,7 +91,9 @@ module Rubydex
       warn("rubydex: disk-backed index unavailable (#{e.class}: #{e.message}); falling back to in-memory")
       # `index_all` is a no-op while a store is attached, so a failure after `attach_store` (a
       # corrupt manifest sidecar, an unreadable scan) has to detach before the fallback is real.
-      detach_store if respond_to?(:detach_store)
+      # No store feature compiled in means nothing was ever attached, and `detach_store` raises
+      # rather than no-op there — which would replace the failure being recovered from.
+      detach_store if respond_to?(:detach_store) && self.class.store_format_version.positive?
       index_all(workspace_paths)
     end
 

@@ -7,7 +7,9 @@ require "test_helper"
 class DiskIndexLiveEditTest < Minitest::Test
   def setup
     super
-    @tmp = Dir.mktmpdir
+    # On macOS `$TMPDIR` is `/var/folders/...`, a symlink to `/private/var/...`, and the store keys
+    # documents by the real path, so a URI built from the alias would shadow a different document.
+    @tmp = File.realpath(Dir.mktmpdir)
     ENV["RUBYDEX_DISK_INDEX"] = "1"
     ENV["RUBYDEX_REFRESH_TTL"] = "0" # tests edit out of band and expect the next refresh to see them
     ENV["RUBYDEX_CACHE_DIR"] = @tmp

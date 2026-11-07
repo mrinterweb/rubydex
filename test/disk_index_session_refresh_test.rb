@@ -37,6 +37,8 @@ class DiskIndexSessionRefreshTest < Minitest::Test
   def git(dir, *args)
     # A developer's git config may sign commits (and a signing agent may not answer in CI).
     args = ["-c", "commit.gpgsign=false", *args] if args.first == "commit"
+    # `init.defaultBranch` is a developer setting; a runner without it still creates `master`.
+    args = ["-c", "init.defaultBranch=main", *args] if args.first == "init"
     identity = {
       "GIT_AUTHOR_NAME" => "test",
       "GIT_AUTHOR_EMAIL" => "test@example.com",

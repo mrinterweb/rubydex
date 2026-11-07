@@ -9,7 +9,10 @@ require "fileutils"
 # the platform cache directory. The store dir is named so `du` on the global root is readable.
 class DiskIndexCacheLocationTest < Minitest::Test
   def with_workspace(config: nil, tmp: false)
-    Dir.mktmpdir do |dir|
+    Dir.mktmpdir do |tmpdir|
+      # On macOS `$TMPDIR` is `/var/folders/...`, a symlink to `/private/var/...`, and the graph
+      # resolves the workspace to the real path — so compare against the real one, not the alias.
+      dir = File.realpath(tmpdir)
       File.write(File.join(dir, "rubydex.toml"), config) if config
       FileUtils.mkdir_p(File.join(dir, "tmp")) if tmp
       graph = Rubydex::Graph.configure_for_workspace(dir)
@@ -90,7 +93,8 @@ class DiskIndexCacheLocationTest < Minitest::Test
   end
 
   def test_a_store_in_an_unignored_tmp_gets_excluded_from_git
-    Dir.mktmpdir do |dir|
+    Dir.mktmpdir do |tmpdir|
+      dir = File.realpath(tmpdir)
       FileUtils.mkdir_p(File.join(dir, "tmp"))
       system("git", "init", dir, out: File::NULL)
       graph = Rubydex::Graph.configure_for_workspace(dir)

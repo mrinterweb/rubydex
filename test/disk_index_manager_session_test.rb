@@ -11,7 +11,10 @@ class DiskIndexManagerSessionTest < Minitest::Test
   MANAGER_BIN = File.expand_path("../lib/rubydex/rubydex-index-manager", __dir__)
 
   def with_workspace(config)
-    Dir.mktmpdir do |dir|
+    Dir.mktmpdir do |tmpdir|
+      # The registry records the workspace as the graph resolved it (macOS `/private/var/...`), so
+      # compare against the real path rather than `Dir.mktmpdir`'s `/var/...` alias.
+      dir = File.realpath(tmpdir)
       File.write(File.join(dir, "rubydex.toml"), config)
       FileUtils.mkdir_p(File.join(dir, "lib"))
       File.write(File.join(dir, "lib", "app.rb"), "class App\nend\n")
