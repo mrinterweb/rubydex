@@ -96,7 +96,11 @@ fn an_unwatchable_root_is_reported_and_can_recover() {
 
     std::fs::create_dir(&missing).expect("create");
     assert_eq!(source.retry_unwatched(), 0, "once it exists the retry must succeed");
-    assert!(source.unwatched().is_empty());
+    assert_eq!(
+        source.unwatched(),
+        [] as [std::path::PathBuf; 0],
+        "the retried root must no longer be listed as unwatched"
+    );
 
     let file = missing.join("a.rb");
     std::fs::write(&file, "class A; end").expect("write");

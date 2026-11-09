@@ -53,6 +53,11 @@ pub fn live_sessions(dir: &Path) -> Vec<Session> {
     alive
 }
 
+// Unix-only: byte-range locks on Windows are owned by the process, so this test's own probe
+// re-acquires the lock it just took and the file looks dead. The question the probe actually asks
+// is cross-process (a session holds, the manager checks), which `DiskIndexManagerSessionTest`
+// covers by running the real manager against a live session.
+#[cfg(unix)]
 #[test]
 fn live_sessions_lists_a_session_holding_its_lock() {
     let dir = tempfile::tempdir().expect("tempdir");
