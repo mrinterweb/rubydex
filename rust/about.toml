@@ -6,5 +6,7 @@ accepted = [
     "Unicode-3.0",
     "ISC",
     "BSL-1.0",
-    "MPL-2.0"
+    "MPL-2.0",
+    # `notify` is a public-domain dedication, and the file watcher the index manager is built on.
+    "CC0-1.0"
 ]
