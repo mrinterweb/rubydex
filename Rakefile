@@ -25,7 +25,14 @@ Rake::TestTask.new(ruby_test: :compile, &test_config)
 begin
   require "ruby_memcheck"
   namespace(:ruby_test) do
-    RubyMemcheck::TestTask.new(valgrind: :compile) do |task|
+    # Ruby 3.4+ reports every leak valgrind sees in every process it traces, and `--trace-children`
+    # is on by default: the suite starts a compiler (extconf test) and child interpreters, and their
+    # own leaks were the whole report (233 KB from `cc1` alone), with ours buried under them.
+    # Naming the extension restricts reporting to stacks that pass through it. Leaks in the Rust
+    # library still surface: whatever allocates them is called from the extension, so its frame is
+    # always below them.
+    memcheck = RubyMemcheck::Configuration.new(binary_name: "rubydex")
+    RubyMemcheck::TestTask.new(memcheck, valgrind: :compile) do |task|
       test_config.call(task)
       # Valgrind runs with --trace-children=yes and --leak-check=full, which costs ~1000x: the
       # whole suite is hours per sanitizer. Keep the tests that exercise the native surface on

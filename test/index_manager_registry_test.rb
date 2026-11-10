@@ -83,7 +83,9 @@ class IndexManagerRegistryTest < Minitest::Test
       RUBY
 
       child_pid = Process.spawn("ruby", "-I#{File.join(ROOT, "lib")}", script, registry)
-      deadline = Time.now + 5
+      # A child valgrind traces boots ~1000x slower, so its boot time is not a 5 s budget: the
+      # memleak job failed on this deadline, not on anything the registry did wrong.
+      deadline = Time.now + (ENV["RUBY_MEMCHECK_RUNNING"] ? 180 : 5)
       until Dir.glob(File.join(registry, "*.json")).size == 1
         sleep(0.05)
         raise "the child never registered" if Time.now > deadline
