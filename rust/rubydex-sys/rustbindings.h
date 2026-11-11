@@ -149,6 +149,11 @@ typedef enum DefinitionKind {
     DefinitionKind_ClassVariable = 13,
     DefinitionKind_MethodAlias = 14,
     DefinitionKind_GlobalVariableAlias = 15,
+    /**
+     * The definition id is not present (a stale handle or an unreadable store entry). The C side
+     * raises a Ruby `RuntimeError` instead of aborting the process.
+     */
+    DefinitionKind_Unknown = 16,
 } DefinitionKind;
 
 /**
@@ -879,15 +884,12 @@ struct DefinitionsIter *rdx_declaration_definitions_iter_new(GraphPointer pointe
                                                              uint64_t decl_id);
 
 /**
- * Returns the declaration for the singleton class of the declaration
+ * Returns the declaration for the singleton class of the declaration, or NULL when the
+ * declaration does not exist, is not a namespace, or has no singleton class.
  *
  * # Safety
  *
  * Assumes pointer is valid
- *
- * # Panics
- *
- * Will panic if invoked on a non-existing or non-namespace declaration
  */
 const struct CDeclaration *rdx_declaration_singleton_class(GraphPointer pointer, uint64_t decl_id);
 
@@ -993,15 +995,13 @@ struct MethodReferencesIter *rdx_declaration_method_references_iter_new(GraphPoi
                                                                         uint64_t decl_id);
 
 /**
- * Returns the enum kind for a definition id (e.g. Class, Module).
+ * Returns the enum kind for a definition id (e.g. Class, Module). Returns `Unknown` when the
+ * definition cannot be read, which the C side raises as a Ruby error rather than panicking across
+ * the FFI boundary.
  *
  * # Safety
  *
  * Assumes pointer is valid.
- *
- * # Panics
- *
- * This function will panic if the definition cannot be found.
  */
 enum DefinitionKind rdx_definition_kind(GraphPointer pointer, uint64_t definition_id);
 
@@ -1158,9 +1158,6 @@ struct Location *rdx_definition_name_location(GraphPointer pointer, uint64_t def
  * # Safety
  * - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
  * - `definition_id` must be a valid definition id for a class definition.
- *
- * # Panics
- * This function will panic if the definition cannot be found or is not a class definition.
  */
 const struct CConstantReference *rdx_class_definition_superclass(GraphPointer pointer,
                                                                  uint64_t definition_id);
@@ -1193,8 +1190,9 @@ void rdx_mixins_iter_free(struct MixinsIter *iter);
  * - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
  * - `definition_id` must be a valid definition id.
  *
- * # Panics
- * This function will panic if the definition cannot be found.
+ * # Safety
+ * - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
+ * - `definition_id` must be a valid definition id.
  */
 struct MixinsIter *rdx_definition_mixins(GraphPointer pointer, uint64_t definition_id);
 
@@ -1319,6 +1317,77 @@ GraphPointer rdx_graph_new(void);
 void rdx_graph_free(GraphPointer pointer);
 
 /**
+ * Persists the resolved graph to an on-disk redb store at `path`, returning `true` on success.
+ * Returns `false` if the path is invalid, the store cannot be built, or the `redb-store` feature
+ * was not compiled in.
+ *
+ * # Safety
+ *
+ * `path` must be a valid NUL-terminated C string.
+ */
+bool rdx_graph_build_store(GraphPointer pointer, const char *path);
+
+/**
+ * Opens a prebuilt redb store and returns a new graph that uses it as its disk-backed base layer.
+ * Returns null if the path is invalid, the store cannot be opened, or the `redb-store` feature was
+ * not compiled in.
+ *
+ * # Safety
+ *
+ * `path` must be a valid NUL-terminated C string. The caller owns the returned `GraphPointer` and
+ * must free it with the graph free function.
+ */
+GraphPointer rdx_graph_open_store(const char *path);
+
+/**
+ * Switches an existing graph over to a prebuilt store as its disk-backed base layer (drops the
+ * in-memory maps). Returns `true` on success. Used by the launcher after a short-lived child built
+ * the store, so the long-lived server holds the bulk index off-heap.
+ *
+ * # Safety
+ *
+ * `path` must be a valid NUL-terminated C string.
+ */
+bool rdx_graph_attach_store(GraphPointer pointer, const char *path);
+
+/**
+ * Drops a prebuilt store and the overlay above it, returning the graph to a plain in-memory state.
+ * Returns `true` on success, `false` when the `redb-store` feature was not compiled in. Used by the
+ * Ruby layer when a store reports read failures, so the session can index in memory instead of
+ * answering from the untrustworthy copy.
+ *
+ * # Safety
+ *
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+bool rdx_graph_detach_store(GraphPointer pointer);
+
+/**
+ * Layout version of the on-disk store. Ruby mixes this into the freshness signature so a store
+ * written by an incompatible layout is rebuilt instead of misread. The C extension always links
+ * this symbol, so the build without the store feature keeps a stub: its signature is only mixed
+ * in when the disk layer is enabled, which that build cannot do.
+ *
+ * # Safety
+ *
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+uint32_t rdx_store_format_version(void);
+
+uint32_t rdx_store_format_version(void);
+
+/**
+ * Returns the number of store reads that failed since the graph was created or last attached a
+ * store. Zero means the disk index answered everything; non-zero means it is corrupt or was
+ * written by an incompatible layout, and the Ruby layer should fall back to the in-memory index.
+ *
+ * # Safety
+ *
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+uint64_t rdx_graph_store_errors(GraphPointer pointer);
+
+/**
  * Searches the graph using exact substring matching, returning every declaration whose name matches any of the
  * queries.
  *
@@ -1408,6 +1477,36 @@ const char *const *rdx_graph_excluded_patterns(GraphPointer pointer,
                                                size_t *out_count);
 
 /**
+ * Returns whether the workspace's `[disk_index]` section enabled the disk-backed index, as
+ * configured by the file (the Ruby side layers the environment override on top).
+ *
+ * # Safety
+ *
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+uint64_t rdx_graph_disk_index_enabled(GraphPointer pointer);
+
+/**
+ * Returns whether the workspace opted into the machine-wide background manager.
+ *
+ * # Safety
+ *
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+uint64_t rdx_graph_disk_index_manager(GraphPointer pointer);
+
+/**
+ * Returns where the store lives as configured: `"tmp"`, `"global"`, an absolute directory, or an
+ * empty string when the workspace left it to the context-aware default. Caller must free with
+ * `free_c_string`.
+ *
+ * # Safety
+ *
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+const char *rdx_graph_disk_index_location(GraphPointer pointer);
+
+/**
  * Returns the workspace path as a C string. Caller must free with `free_c_string`.
  *
  * # Safety
@@ -1415,6 +1514,17 @@ const char *const *rdx_graph_excluded_patterns(GraphPointer pointer,
  * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
  */
 const char *rdx_graph_workspace_path(GraphPointer pointer);
+
+/**
+ * Converts an absolute file path into the `file://` URI the graph stores documents under, so a Ruby-side
+ * edit addresses the same document key the indexer used. Returns null when the path cannot be
+ * represented. Caller must free with `free_c_string`.
+ *
+ * # Safety
+ *
+ * `path` must be a valid NUL-terminated C string.
+ */
+const char *rdx_path_to_uri(const char *path);
 
 /**
  * Applies a parsed configuration file to the graph, which adopts the workspace it was loaded for along with the

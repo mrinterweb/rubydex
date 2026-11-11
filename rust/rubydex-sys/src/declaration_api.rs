@@ -226,7 +226,7 @@ pub unsafe extern "C" fn rdx_declaration_unqualified_name(pointer: GraphPointer,
     with_graph(pointer, |graph| {
         let name_id = DeclarationId::new(name_id);
         if let Some(decl) = graph.declaration(name_id) {
-            OwnedString::new(&decl.unqualified_name())
+            OwnedString::new(decl.unqualified_name())
         } else {
             OwnedString::null()
         }

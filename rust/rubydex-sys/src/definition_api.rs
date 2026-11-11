@@ -98,7 +98,7 @@ pub unsafe extern "C" fn rdx_definition_name(pointer: GraphPointer, definition_i
         let def_id = DefinitionId::new(definition_id);
         if let Some(defn) = graph.definition(def_id) {
             let Some(string_id) = graph.definition_string_id_opt(&defn) else {
-                return ptr::null();
+                return OwnedString::null();
             };
 
             if let Some(name) = graph.string(string_id) {

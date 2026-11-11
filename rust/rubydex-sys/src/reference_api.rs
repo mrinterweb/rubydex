@@ -161,7 +161,7 @@ pub unsafe extern "C" fn rdx_method_reference_name(pointer: GraphPointer, refere
         let Some(name) = graph.string(*reference.str()) else {
             return OwnedString::null();
         };
-        OwnedString::new(name)
+        OwnedString::new(name.as_str())
     })
 }
 
