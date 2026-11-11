@@ -29,13 +29,6 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     super
   end
 
-  def test_store_errors_is_zero_on_a_healthy_store
-    graph = Rubydex::Graph.configure_for_workspace(@tmp)
-    graph.index_workspace
-
-    assert_equal(0, graph.store_errors, "a freshly built store must report no read failures")
-  end
-
   # Writes a store without attaching it. redb holds an exclusive lock per file, so the graph that
   # builds a store must not be the graph that reads it — that is how a real session works anyway.
   def write_store(files)
@@ -77,11 +70,14 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     refute_nil(graph["Klass0"], "the session must keep working after quarantining the store")
   end
 
-  def test_a_healthy_store_is_not_quarantined
+  def test_a_healthy_store_is_read_without_quarantine
     graph, cache = write_store("foo.rb" => "class Foo; end\n")
 
     graph.index_workspace
 
+    # The read is what makes store_errors a real count rather than a trivially zero one.
+    refute_nil(graph["Foo"], "the attached store must answer")
+    assert_equal(0, graph.store_errors, "reading a healthy store must report no failures")
     assert(File.exist?(cache), "a healthy store must stay on the cache path")
     refute(File.exist?("#{cache}.corrupt"), "a healthy store must not be quarantined")
   end
