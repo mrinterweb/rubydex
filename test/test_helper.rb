@@ -15,3 +15,18 @@ module Minitest
     end
   end
 end
+
+# A hung test otherwise costs the whole job (six hours on Windows before GitHub cancels it) and
+# leaves no clue which test hung it: minitest only writes a test's name after it finishes.
+unless ENV["RUBYDEX_TEST_TRACE"].to_s.empty?
+  $stdout.sync = true
+
+  module RubydexTestTrace
+    def run
+      puts("#rubydex test: #{self.class}##{name}")
+      super
+    end
+  end
+
+  Minitest::Test.prepend(RubydexTestTrace)
+end
