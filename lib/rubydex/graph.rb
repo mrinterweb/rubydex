@@ -583,7 +583,18 @@ module Rubydex
         # stale and re-diffed by the next refresh rather than wrongly served as fresh.
         File.binwrite(manifest_tmp, Marshal.dump({ "lockfile" => lockfile_hash, "files" => scan }))
         File.write(marker_tmp, store_signature(scan))
-        File.rename(tmp, cache)
+        # Windows cannot replace a file another handle has open, and a session refreshing has this
+        # store open to serve reads. POSIX renames over it and keeps serving.
+        reopened = Gem.win_platform? && self.class.store_format_version.positive?
+        detach_store if reopened
+        begin
+          File.rename(tmp, cache)
+        rescue StandardError
+          # The old store is still there: the rename is what failed. Put the session back on it
+          # rather than leaving it with no index at all.
+          attach_store(cache) if reopened && File.exist?(cache)
+          raise
+        end
         File.rename(manifest_tmp, manifest)
         File.rename(marker_tmp, marker)
       ensure

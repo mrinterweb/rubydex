@@ -35,8 +35,10 @@ class DiskIndexCacheLocationTest < Minitest::Test
   end
 
   def test_an_absolute_location_is_used_as_written
-    with_workspace(config: "[disk_index]\nlocation = \"/var/tmp/rubydex-indexes\"\n") do |graph, _dir|
-      assert_equal("/var/tmp/rubydex-indexes/index.redb", graph.send(:store_cache_path))
+    # Absolute on every platform: a POSIX `/var/tmp` is not a path Windows accepts as absolute.
+    location = File.join(Dir.tmpdir, "rubydex-indexes")
+    with_workspace(config: "[disk_index]\nlocation = \"#{location}\"\n") do |graph, _dir|
+      assert_equal(File.join(location, "index.redb"), graph.send(:store_cache_path))
     end
   end
 

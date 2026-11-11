@@ -69,15 +69,29 @@ module Rubydex
       def register(workspace:, store:, builder:, docs:, registry:)
         FileUtils.mkdir_p(registry)
         path = File.join(registry, "#{Process.pid}-#{SecureRandom.hex(4)}.json")
-        # Create and lock under a non-`.json` name. The manager prunes a registry file whose lock it
-        # can take, so publishing an unlocked file would let it unlink a session that is about to
-        # lock it. Rename (with the lock already held) is the atomic publish.
-        temp = "#{path}.tmp"
-        handle = File.new(temp, "w")
-        handle.flock(File::LOCK_EX)
-        handle.write(JSON.generate({ workspace:, store:, builder:, docs: }))
-        handle.flush
-        File.rename(temp, path)
+        payload = JSON.generate({ workspace:, store:, builder:, docs: })
+
+        if Gem.win_platform?
+          # Windows cannot rename a file this process has open, so there is no temp to publish:
+          # claim the final name exclusively, lock it, then write. A manager probing the gap sees
+          # an unlocked file it cannot parse, and it cannot unlink one an open handle holds
+          # either, so the session lists itself on the manager's next poll.
+          handle = File.open(path, File::RDWR | File::CREAT | File::EXCL)
+          handle.flock(File::LOCK_EX)
+          handle.write(payload)
+          handle.flush
+        else
+          # Create and lock under a non-`.json` name. The manager prunes a registry file whose lock
+          # it can take, so publishing an unlocked file would let it unlink a session that is about
+          # to lock it. Rename (with the lock already held) is the atomic publish.
+          temp = "#{path}.tmp"
+          handle = File.new(temp, "w")
+          handle.flock(File::LOCK_EX)
+          handle.write(payload)
+          handle.flush
+          File.rename(temp, path)
+        end
+
         @handles[path] = handle
         handle
       end

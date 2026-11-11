@@ -130,7 +130,9 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
 
     before = File.size(path)
     source = "class C0Renamed\nend\n"
-    File.write(path, source + ("#" * (before - source.bytesize)))
+    # Binary, so the byte count is the byte count: a text-mode write rewrites every newline as
+    # CRLF on Windows and the "same size" premise stops holding.
+    File.binwrite(path, source + ("#" * (before - source.bytesize)))
     assert_equal(before, File.size(path), "the edit must not change the file size")
     File.utime(Time.at(second + 0.2), Time.at(second + 0.2), path)
 
