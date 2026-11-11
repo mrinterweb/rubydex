@@ -121,4 +121,43 @@ class IndexManagerRegistryTest < Minitest::Test
       )
     end
   end
+
+  # A live manager holds `manager.lock` for its whole lifetime, so taking it has to be a try: a
+  # blocking `flock` waits for the manager to exit, and the session that just registered blocks with
+  # it. That is what the Windows suite hung on until GitHub's six-hour limit.
+  def test_launch_returns_instead_of_waiting_for_a_live_manager
+    Dir.mktmpdir("rdx-reg-") do |dir|
+      registry = File.join(dir, "sessions")
+      FileUtils.mkdir_p(registry)
+      lock = File.join(dir, "manager.lock")
+      holder = Process.spawn(
+        RbConfig.ruby,
+        "-e",
+        "File.new(ARGV[0], 'w').flock(File::LOCK_EX); puts 'ready'; $stdout.flush; sleep 60",
+        lock,
+        out: File::NULL,
+      )
+      begin
+        deadline = Time.now + 10
+        sleep(0.05) until lock_taken?(lock) || Time.now > deadline
+        assert(lock_taken?(lock), "the holder never took the lock")
+
+        launched = Thread.new { Rubydex::IndexManager.launch_if_absent(registry) }
+        assert(launched.join(10), "launch_if_absent must not wait for a running manager")
+      ensure
+        kill_and_reap(holder)
+      end
+    end
+  end
+
+  def kill_and_reap(pid)
+    Process.kill("KILL", pid)
+    Process.wait(pid)
+  rescue Errno::ESRCH, Errno::ECHILD
+    nil
+  end
+
+  def lock_taken?(path)
+    File.open(path, "a") { |file| !file.flock(File::LOCK_EX | File::LOCK_NB) }
+  end
 end

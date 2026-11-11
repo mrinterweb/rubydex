@@ -55,7 +55,9 @@ module Rubydex
       #: (String registry) -> nil
       def launch_if_absent(registry)
         handle = File.new(File.join(File.dirname(registry), "manager.lock"), "w")
-        return unless handle.flock(File::LOCK_EX)
+        # Non-blocking is the point: a live manager holds this lock for its whole lifetime, so a
+        # blocking `flock` waits for the manager to exit and the session never launches anything.
+        return unless handle.flock(File::LOCK_EX | File::LOCK_NB)
 
         handle.close
         pid = Process.spawn(manager_binary, "--registry", registry, "--run")
@@ -77,7 +79,7 @@ module Rubydex
           # an unlocked file it cannot parse, and it cannot unlink one an open handle holds
           # either, so the session lists itself on the manager's next poll.
           handle = File.open(path, File::RDWR | File::CREAT | File::EXCL)
-          handle.flock(File::LOCK_EX)
+          handle.flock(File::LOCK_EX | File::LOCK_NB)
           handle.write(payload)
           handle.flush
         else
@@ -86,7 +88,7 @@ module Rubydex
           # to lock it. Rename (with the lock already held) is the atomic publish.
           temp = "#{path}.tmp"
           handle = File.new(temp, "w")
-          handle.flock(File::LOCK_EX)
+          handle.flock(File::LOCK_EX | File::LOCK_NB)
           handle.write(payload)
           handle.flush
           File.rename(temp, path)
