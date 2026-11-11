@@ -135,34 +135,6 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
-  # The manager decides "rebuild instead of surgical" by comparing a burst of filesystem events
-  # against the number a session registers, so it must be the manifest's file count and not the count
-  # of indexed roots.
-  def test_a_session_registers_the_manifest_size
-    with_workspace do |dir, _rb|
-      4.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\nend\n") }
-      graph = session(dir)
-
-      registered = nil
-      mod = Rubydex::IndexManager.singleton_class
-      original = mod.instance_method(:register)
-      original_launch = mod.instance_method(:launch_if_absent)
-      mod.define_method(:register) do |docs:, **|
-        registered = docs
-        nil
-      end
-      mod.define_method(:launch_if_absent) { |_| nil }
-      begin
-        graph.send(:register_session, graph.send(:store_cache_path))
-      ensure
-        mod.define_method(:register, original)
-        mod.define_method(:launch_if_absent, original_launch)
-      end
-
-      assert_equal(5, registered, "foo.rb plus four files, not a list of five roots")
-    end
-  end
-
   # A commit rewrites no files, so the store still describes the workspace exactly: HEAD belongs to
   # what a session is serving, not to what the shared store was built from, or every commit would
   # throw the store away (a 24.6 s rebuild on reserv).
@@ -235,28 +207,12 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
-  def test_a_session_reopens_when_the_store_is_rebuilt_elsewhere
-    with_workspace do |dir, rb|
-      first = session(dir)
-      assert_includes(first["Foo"].members.map(&:name), "Foo#bar()")
-
-      # The branch switch: content changes on disk, no session is told about it.
-      File.write(rb, "class Foo\n  def baz; end\nend\n")
-      second = session(dir) # a different session notices first and rebuilds
-      assert_includes(second["Foo"].members.map(&:name), "Foo#baz()")
-
-      assert(first.send(:refresh_if_stale), "the first session must be able to move to the new snapshot")
-      first.resolve
-      members = first["Foo"].members.map(&:name)
-      assert_includes(members, "Foo#baz()")
-      refute_includes(members, "Foo#bar()", "the reopened session must not still answer from the old snapshot")
-    end
-  end
-
-  # A session that was not the builder must re-attach to the store the builder just published. The
-  # marker is keyed on what the store holds (source scan + lockfile), not on HEAD: HEAD belongs to
-  # what the session is serving, and mixing it into the marker made this branch dead in a git repo.
-  def test_a_session_reattaches_to_a_store_another_session_rebuilt
+  # A session that was not the builder must re-attach to the store the builder just published rather
+  # than rebuild it again, and must stop answering from the snapshot it had pinned: redb pins one at
+  # open, so a session only sees a new store by reopening it. The marker is keyed on what the store
+  # holds (source scan + lockfile), not on HEAD: HEAD belongs to what the session is serving, and
+  # mixing it into the marker made this branch dead in a git repo.
+  def test_a_session_moves_to_the_store_another_session_rebuilt
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "tmp"))
       8.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\n  def old; end\nend\n") }
@@ -268,6 +224,7 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       ENV["RUBYDEX_REFRESH_TTL"] = "0"
       begin
         first = session(dir)
+        assert_includes(first["K0"].members.map(&:name), "K0#old()")
         builds = 0
         first.define_singleton_method(:build_store_in_child) do |*args, **kwargs|
           builds += 1
@@ -283,7 +240,10 @@ class DiskIndexSessionRefreshTest < Minitest::Test
 
         assert(first.send(:refresh_if_stale))
         assert_equal(0, builds, "a session must re-attach to the store another session just built")
-        assert_includes(first["K0"].members.map(&:name), "K0#new()")
+        first.resolve
+        members = first["K0"].members.map(&:name)
+        assert_includes(members, "K0#new()")
+        refute_includes(members, "K0#old()", "the reopened session must not still answer from the old snapshot")
       ensure
         ENV.delete("RUBYDEX_DISK_INDEX")
         ENV.delete("RUBYDEX_REFRESH_TTL")
@@ -291,25 +251,11 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
-  def test_refresh_does_nothing_when_the_store_is_already_fresh
+  def test_a_refresh_that_finds_the_store_fresh_does_nothing
     with_workspace do |dir, _rb|
       graph = session(dir)
       refute(graph.send(:refresh_if_stale), "nothing changed: no rebuild, no reopen")
       assert_includes(graph["Foo"].members.map(&:name), "Foo#bar()")
-    end
-  end
-
-  def test_a_session_can_reopen_without_being_the_builder
-    with_workspace do |dir, rb|
-      first = session(dir)
-      File.write(rb, "class Foo\n  def qux; end\nend\n")
-      builder = session(dir) # claims the lock and rebuilds
-      assert_includes(builder["Foo"].members.map(&:name), "Foo#qux()")
-
-      # The second stale session finds the marker fresh and just re-attaches.
-      assert(first.send(:refresh_if_stale))
-      first.resolve
-      assert_includes(first["Foo"].members.map(&:name), "Foo#qux()")
     end
   end
 
@@ -318,19 +264,12 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       graph = session(dir)
       cache = graph.send(:store_cache_path)
 
-      assert_kind_of(String, graph.send(:claim_rebuild, cache), "the first session gets the lock")
-      refute(graph.send(:claim_rebuild, cache), "the second session must not spawn a second rebuild")
-    end
-  end
-
-  def test_a_stale_lock_does_not_block_a_rebuild
-    with_workspace do |dir, _rb|
-      graph = session(dir)
-      cache = graph.send(:store_cache_path)
       lock = graph.send(:claim_rebuild, cache)
+      assert_kind_of(String, lock, "the first session gets the lock")
+      refute(graph.send(:claim_rebuild, cache), "the second session must not spawn a second rebuild")
+
       # A builder that crashed leaves the lock behind; it must expire, not wedge the directory.
       File.utime(Time.now - 3600, Time.now - 3600, lock)
-
       assert_kind_of(String, graph.send(:claim_rebuild, cache), "an expired lock is reclaimed")
     end
   end

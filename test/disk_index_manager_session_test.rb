@@ -29,6 +29,9 @@ class DiskIndexManagerSessionTest < Minitest::Test
     end
   end
 
+  # The manager decides "rebuild instead of surgical" by comparing a burst of filesystem events
+  # against the number a session registers, so the registered count must be the manifest's file count
+  # and not the count of indexed roots.
   def test_an_opted_in_session_gets_registered
     with_workspace("[disk_index]\nenabled = true\nmanager = true\n") do |graph, dir|
       registry = File.join(graph.send(:platform_cache_root), "rubydex", "manager", "sessions")
@@ -36,6 +39,7 @@ class DiskIndexManagerSessionTest < Minitest::Test
       mine = sessions.select { |session| session["workspace"] == dir }
 
       assert_equal(1, mine.size, "the live session must be listed exactly once")
+      assert_equal(1, mine.first["docs"], "lib/app.rb, not the roots the session walked")
     end
   end
 

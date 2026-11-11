@@ -43,13 +43,6 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     assert_nil(graph["C1"])
   end
 
-  def test_second_refresh_with_no_new_changes_is_a_noop
-    graph = booted_graph
-    write("c0.rb", "class C0\nend\n")
-    assert(graph.refresh_if_stale)
-    refute(graph.refresh_if_stale)
-  end
-
   def test_superclass_change_is_reflected_in_ancestors
     graph = booted_graph
     write("child.rb", "class Child\nend\n")
@@ -57,28 +50,22 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     refute_includes(graph["Child"].ancestors.map(&:name), "Parent")
   end
 
-  def test_large_diff_falls_back_to_a_rebuild
+  def test_large_diff_and_a_lockfile_change_both_fall_back_to_a_rebuild
     graph = booted_graph
     12.times { |i| write("c#{i}.rb", "class C#{i}\n  def big#{i}; end\nend\n") } # 12/22 > 0.25
-    rebuilt = false
+    rebuilt = 0
     graph.define_singleton_method(:build_store_in_child) do |*args|
-      rebuilt = true
+      rebuilt += 1
       super(*args)
     end
     assert(graph.refresh_if_stale)
-    assert(rebuilt, "a diff over REBUILD_DIFF_RATIO must rebuild")
-  end
+    assert_equal(1, rebuilt, "a diff over REBUILD_DIFF_RATIO must rebuild")
 
-  def test_lockfile_change_falls_back_to_a_rebuild
-    graph = booted_graph
+    # The gem closure changed, so what the store should hold is a different question: this rebuilds
+    # even though the diff since the last one is a single file.
     write("Gemfile.lock", "GEM\n  specs:\n")
-    rebuilt = false
-    graph.define_singleton_method(:build_store_in_child) do |*args|
-      rebuilt = true
-      super(*args)
-    end
-    graph.refresh_if_stale
-    assert(rebuilt, "a lockfile change must rebuild (the gem closure changed)")
+    assert(graph.refresh_if_stale)
+    assert_equal(2, rebuilt, "a lockfile change must rebuild (the gem closure changed)")
   end
 
   # Each round edits two files — well under REBUILD_DIFF_RATIO — but a surgical apply leaves them in
