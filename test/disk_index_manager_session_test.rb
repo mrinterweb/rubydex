@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# valgrind: skip — spawns the manager and a store build
+
 require "test_helper"
 require "tmpdir"
 require "fileutils"

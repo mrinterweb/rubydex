@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# valgrind: skip — spawns git and store builds
+
 require "test_helper"
 require "tmpdir"
 require "fileutils"

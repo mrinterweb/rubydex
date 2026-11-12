@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# valgrind: skip — runs extconf.rb and its compiler
+
 require "tmpdir"
 require "fileutils"
 require "rbconfig"

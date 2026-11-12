@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# valgrind: skip — spawns the gem's executable
+
 require "test_helper"
 require "helpers/cli"
 require "helpers/context"

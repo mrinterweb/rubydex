@@ -206,6 +206,21 @@ enum TombstoneKind {
     MethodReference,
 }
 
+/// A node id the store can scan for. One impl covers every `Id<T>`, which is why the generic store
+/// scans below name an id type rather than taking a `fn(&T) -> u64` accessor that could be paired
+/// with the wrong id type.
+#[cfg(feature = "redb-store")]
+trait StoredId {
+    fn raw(&self) -> u64;
+}
+
+#[cfg(feature = "redb-store")]
+impl<T> StoredId for crate::model::id::Id<T> {
+    fn raw(&self) -> u64 {
+        self.get()
+    }
+}
+
 /// A reference to a node that is either borrowed from the in-memory graph (`Mem`) or owned, having
 /// been deserialized from the disk-backed store (`Stored`). Derefs to `&T` so most call sites read
 /// identically whether the node lives in memory or on disk.
@@ -513,18 +528,17 @@ impl Graph {
     /// deserialization (node enumeration keeps the ids and throws the names away, so
     /// materializing them cost one String per node per query). Empty when no store is attached.
     #[cfg(feature = "redb-store")]
-    fn store_ids<T: Copy, E: std::fmt::Display>(
+    fn store_ids<T: StoredId, E: std::fmt::Display>(
         &self,
         kind: TombstoneKind,
         scan: impl FnOnce(&crate::model::store::RedbStore) -> Result<Vec<T>, E>,
-        raw: fn(&T) -> u64,
     ) -> Vec<T> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
         scan_store(store, &self.store_errors, scan)
             .into_iter()
-            .filter(|id| !self.is_tombstoned(kind, raw(id)))
+            .filter(|id| !self.is_tombstoned(kind, id.raw()))
             .collect()
     }
 
@@ -536,10 +550,12 @@ impl Graph {
         self.store_ids(
             TombstoneKind::Declaration,
             crate::model::store::RedbStore::declaration_ids,
-            DeclarationId::get,
         )
     }
 
+    // These five stubs are what the no-feature build calls: the store layer is compiled out, so
+    // every scan is empty. They stay one per accessor rather than collapsing into a macro because
+    // the signatures are the API the callers compile against.
     #[cfg(not(feature = "redb-store"))]
     #[must_use]
     #[allow(clippy::unused_self)]
@@ -581,11 +597,7 @@ impl Graph {
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn store_document_ids(&self) -> Vec<UriId> {
-        self.store_ids(
-            TombstoneKind::Document,
-            crate::model::store::RedbStore::document_ids,
-            UriId::get,
-        )
+        self.store_ids(TombstoneKind::Document, crate::model::store::RedbStore::document_ids)
     }
 
     #[cfg(not(feature = "redb-store"))]
@@ -602,7 +614,6 @@ impl Graph {
         self.store_ids(
             TombstoneKind::ConstantReference,
             crate::model::store::RedbStore::constant_reference_ids,
-            ConstantReferenceId::get,
         )
     }
 
@@ -620,7 +631,6 @@ impl Graph {
         self.store_ids(
             TombstoneKind::MethodReference,
             crate::model::store::RedbStore::method_reference_ids,
-            MethodReferenceId::get,
         )
     }
 
@@ -691,7 +701,6 @@ impl Graph {
         self.store_ids(
             TombstoneKind::Definition,
             crate::model::store::RedbStore::definition_ids,
-            DefinitionId::get,
         )
     }
 

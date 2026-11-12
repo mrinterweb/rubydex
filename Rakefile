@@ -34,27 +34,20 @@ begin
     memcheck = RubyMemcheck::Configuration.new(binary_name: "rubydex")
     RubyMemcheck::TestTask.new(memcheck, valgrind: :compile) do |task|
       test_config.call(task)
-      # Valgrind runs with --trace-children=yes and --leak-check=full, which costs ~1000x: the
-      # whole suite is hours per sanitizer. Keep the tests that exercise the native surface on
-      # small workspaces; the ones that index a real workspace stay on the plain ruby_test task.
+      # Valgrind runs with --trace-children=yes and --leak-check=full, which costs ~1000x, so the
+      # suite is hours per sanitizer. The rule is "a file that can spawn a child stays on the plain
+      # ruby_test task", and the file itself declares it, on its own header line:
       #
-      # The rule is "spawns a process, or boots a store in a child": those children are what valgrind
-      # instruments, and test/disk_index_surgical_refresh_test.rb joining this run unnoticed is how the
-      # memleak job went from ~2.5 to ~6 hours (94 s of plain-ruby store builds, every child traced).
-      task.test_files = FileList["test/**/*_test.rb"].exclude(
-        "test/integration/**/*_test.rb",
-        "test/cli_test.rb",
-        "test/disk_index_session_refresh_test.rb",
-        "test/disk_index_corrupt_store_test.rb",
-        "test/disk_index_manager_session_test.rb",
-        "test/disk_index_live_edit_test.rb",
-        "test/disk_index_surgical_refresh_test.rb",
-        "test/disk_index_cypher_test.rb",
-        # Spawns the manager binary and SIGKILLs a session child, and a killed valgrind child leaves a
-        # truncated XML report that ruby_memcheck then fails to parse. It also runs `cargo build`
-        # inside the trace. None of it exercises the C extension.
-        "test/index_manager_registry_test.rb",
-      )
+      #   # valgrind: skip — <why this file cannot run under the tracer>
+      #
+      # Traced children are the reason: each one is instrumented (a store build, `git`, a compiler,
+      # the manager binary), and a child killed mid-report leaves a truncated XML file that
+      # ruby_memcheck fails to parse (`Premature end of data in tag valgrindoutput`). The marker
+      # lives in the file because a central list drifted: test/disk_index_enumerators_test.rb builds
+      # a store in a child on every test and was never added to it.
+      task.test_files = FileList["test/**/*_test.rb"].exclude("test/integration/**/*_test.rb").reject do |file|
+        File.read(file, 512).include?("# valgrind: skip")
+      end
     end
   end
 rescue LoadError

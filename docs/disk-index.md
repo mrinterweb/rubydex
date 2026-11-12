@@ -160,6 +160,11 @@ or the layout version moves), re-attaching to a store someone else built ~71 ms,
 refresh ~71 ms. Cold builds happen in a child process, so the peak belongs to the child and is returned
 to the operating system when it exits.
 
+The builder runs redb with a 128 MiB page cache instead of redb's 1 GiB default, because the write path
+evicts pages it never reads back: on a 28k-file tree (1.1 GB store) that is 1245 MB peak instead of
+1609 MB, for 8.1 s instead of 7.1 s of build time. Readers keep an 8 MiB cache, since the OS already
+caches the file.
+
 ## Troubleshooting
 
 **Answers look stale.** Force a fresh look: `RUBYDEX_REFRESH_TTL=0 bundle exec rdx ...`. If it clears

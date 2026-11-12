@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# valgrind: skip — shells out to git
+
 require "test_helper"
 require "tmpdir"
 require "fileutils"

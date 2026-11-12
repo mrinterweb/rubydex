@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# valgrind: skip — index_workspace builds the store in a child
+
 require "test_helper"
 require "tmpdir"
 require "fileutils"

@@ -265,20 +265,28 @@ class MCPServerIntegrationTest < Minitest::Test
       },
     )
 
-    response = read_response_for_id(stdout, request_id)
-    JSON.parse(response.fetch("result").fetch("content")[0].fetch("text"))
+    parse_tool_result(read_response_for_id(stdout, request_id))
   end
 
   # The first `codebase_stats` call waits for the background indexer instead of answering at once.
-  def call_tool_before_the_index_is_ready(stdin, stdout, request_id)
+  # `codebase_stats` is the one call that blocks until the background indexer has run, so it is the
+  # one call that gets `INDEXING_READ_BUDGET` instead of the short budget every other read uses.
+  def call_codebase_stats_awaiting_index(stdin, stdout, request_id, budget)
     send_request(stdin, request_id, "tools/call", { name: "codebase_stats", arguments: {} })
-    response = read_response_for_id(stdout, request_id, INDEXING_READ_BUDGET)
+    parse_tool_result(read_response_for_id(stdout, request_id, budget))
+  end
+
+  def parse_tool_result(response)
     JSON.parse(response.fetch("result").fetch("content")[0].fetch("text"))
   end
 
   def wait_for_indexing_to_complete(stdin, stdout, request_id)
-    MAX_INDEXING_RETRIES.times do
-      parsed = call_tool_before_the_index_is_ready(stdin, stdout, request_id)
+    MAX_INDEXING_RETRIES.times do |attempt|
+      # Only the first answer can block on the indexer; the retries get `{"error": "indexing"}` back
+      # at once. Handing the long budget to every attempt would multiply how long a wedged server
+      # can hold the suite by the retry count.
+      budget = attempt.zero? ? INDEXING_READ_BUDGET : READ_BUDGET
+      parsed = call_codebase_stats_awaiting_index(stdin, stdout, request_id, budget)
       return [parsed, request_id] unless parsed.key?("error")
 
       assert_equal("indexing", parsed.fetch("error"))

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# valgrind: skip — spawns the manager binary and SIGKILLs a session child
+
 require "rubydex"
 require "rubydex/index_manager"
 require "tmpdir"

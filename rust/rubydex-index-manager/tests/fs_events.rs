@@ -14,11 +14,16 @@ fn batch_contains(source: &mut NotifySource, file: &Path) -> bool {
     batch.iter().any(|path| path == file)
 }
 
+/// A source watching `root` with no ignored directories.
+fn event_source(root: &Path, debounce_ms: u64) -> NotifySource {
+    NotifySource::new(&[root.to_path_buf()], Vec::new(), Duration::from_millis(debounce_ms))
+}
+
 #[test]
 fn adapter_reports_a_created_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(std::slice::from_ref(&root), Vec::new(), Duration::from_millis(50));
+    let mut source = event_source(&root, 50);
     let file = root.join("a.rb");
     std::fs::write(&file, "class A; end").expect("write");
     assert!(
@@ -31,7 +36,7 @@ fn adapter_reports_a_created_file() {
 fn adapter_reports_a_modified_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(std::slice::from_ref(&root), Vec::new(), Duration::from_millis(50));
+    let mut source = event_source(&root, 50);
     let file = root.join("a.rb");
     std::fs::write(&file, "class A; end").expect("write");
     assert!(
@@ -49,7 +54,7 @@ fn adapter_reports_a_modified_file() {
 fn adapter_reports_a_deleted_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(std::slice::from_ref(&root), Vec::new(), Duration::from_millis(50));
+    let mut source = event_source(&root, 50);
     let file = root.join("a.rb");
     std::fs::write(&file, "class A; end").expect("write");
     assert!(
@@ -67,7 +72,7 @@ fn adapter_reports_a_deleted_file() {
 fn adapter_coalesces_a_burst_into_one_batch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = NotifySource::new(std::slice::from_ref(&root), Vec::new(), Duration::from_millis(200));
+    let mut source = event_source(&root, 200);
     let files = vec![root.join("a.rb"), root.join("b.rb"), root.join("c.rb")];
     for file in &files {
         std::fs::write(file, "class A; end").expect("write");
@@ -85,7 +90,7 @@ fn adapter_coalesces_a_burst_into_one_batch() {
 fn an_unwatchable_root_is_reported_and_can_recover() {
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("not-yet");
-    let mut source = NotifySource::new(std::slice::from_ref(&missing), Vec::new(), Duration::from_millis(50));
+    let mut source = event_source(&missing, 50);
 
     assert_eq!(
         source.unwatched(),
