@@ -108,6 +108,24 @@ class MCPServerIntegrationTest < Minitest::Test
     end
   end
 
+  # `run_shutdown` has to end rather than wait: a thread that defers its own kill used to be joined
+  # without a bound, so the server never exited — the shape of the "did not exit after stdin closed"
+  # failure on a loaded runner.
+  def test_shutdown_returns_for_a_thread_that_defers_its_kill
+    with_context do |context|
+      server = Rubydex::MCPServer::Server.new(root_path: context.absolute_path)
+      stubborn = Thread.new do
+        Thread.handle_interrupt(Object => :never) { sleep(60) }
+      end
+      sleep(0.05)
+
+      # In a thread, so the version that waits forever fails the assertion instead of hanging the suite.
+      shutdown = Thread.new { server.send(:join_or_kill_all, [stubborn]) }
+
+      assert(shutdown.join(10), "shutdown must not wait for a thread that defers its kill")
+    end
+  end
+
   private
 
   def run_executable(*arguments)

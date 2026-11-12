@@ -163,8 +163,20 @@ module Rubydex
           thread.join(remaining)
         end
 
-        live_threads.select(&:alive?).each(&:kill)
-        live_threads.select(&:alive?).each(&:join)
+        # `kill` is a request, not an await: a thread parked in a blocking call, or one that defers
+        # interrupts, may not die promptly, and joining it without a bound is how the server fails to
+        # exit at all. Ruby ends the process with the thread still parked; what must not happen is
+        # waiting for it.
+        interrupted = live_threads.select(&:alive?)
+        interrupted.each(&:kill)
+
+        kill_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SHUTDOWN_JOIN_TIMEOUT
+        interrupted.each do |thread|
+          remaining = kill_deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          break if remaining <= 0
+
+          thread.join(remaining)
+        end
       end
 
       #: -> Thread
