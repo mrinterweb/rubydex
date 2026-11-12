@@ -41,7 +41,9 @@ class DiskIndexLiveEditTest < Minitest::Test
 
     # Live edit: change the method name. Store documents are keyed by `file://` URIs (from
     # index_workspace), so the edit must use the same URI to replace the store-backed document.
-    graph.index_source("file://#{rb}", "class Foo\n  def baz; end\nend\n", "ruby")
+    # `path_to_uri` is that form: hand-building `file://#{rb}` yields `file://D:/...` on Windows
+    # where the store holds `file:///D:/...`, and the edit lands on a second document.
+    graph.index_source(graph.path_to_uri(rb), "class Foo\n  def baz; end\nend\n", "ruby")
     graph.resolve
 
     # The overlay document shadows the store's, and resolution surfaces the edited members.
