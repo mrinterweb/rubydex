@@ -114,6 +114,12 @@ impl std::error::Error for StoreError {
 /// touch the layout would otherwise force every user to re-index.
 pub const STORE_FORMAT_VERSION: u32 = 1;
 
+/// Page cache the builder runs with. redb defaults to 1 GiB, which a build fills with pages it
+/// never reads back. Measured on the Ruby 4.0 gems tree (28k files, 1.1 GB store): 1 GiB = 7.1 s /
+/// 1609 MB peak, 128 MiB = 8.1 s / 1245 MB, 8 MiB = 10.8 s / 1179 MB. 128 MiB is the knee: a
+/// seventh of the peak-RSS cut for a seventh of the slowdown.
+const BUILD_CACHE_SIZE: usize = 128 * 1024 * 1024;
+
 /// Which redb handle backs a store. The writable handle exists only for the builder child, which
 /// writes and exits; readers open read-only, so multiple sessions (two editor windows on one
 /// worktree) can share one store. redb's read-write open takes an exclusive lock and answers
@@ -197,7 +203,7 @@ impl RedbStore {
         {
             return Err(StoreError::Open(redb::Error::Io(err)));
         }
-        let db = Database::create(path)?;
+        let db = Builder::new().set_cache_size(BUILD_CACHE_SIZE).create(path)?;
         {
             let write_txn = db.begin_write()?;
             // Serialize each `(id, node)` pair into the node's table. The `{{ }}` scoping drops each
@@ -402,9 +408,31 @@ impl RedbStore {
             .collect()
     }
 
-    /// Streams the `SEARCH_NAMES` table, returning the ids whose FQN passes `predicate`.
+    /// Streams `range` of the `SEARCH_NAMES` table, returning the ids whose FQN passes `predicate`.
     /// Filtering during the scan avoids materializing the full name table (hundreds of MB
     /// on large corpora) for a single search.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    fn matching_ids(
+        &self,
+        range: std::ops::RangeInclusive<u64>,
+        predicate: &dyn Fn(&DeclarationId, &str) -> bool,
+    ) -> Result<Vec<DeclarationId>, redb::Error> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(SEARCH_NAMES)?;
+        let mut ids = Vec::new();
+        for entry in table.range(range)? {
+            let (key, name) = entry?;
+            let id = DeclarationId::new(key.value());
+            if predicate(&id, &String::from_utf8_lossy(name.value())) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Streams the whole `SEARCH_NAMES` table — see [`Self::matching_ids`].
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
@@ -412,21 +440,7 @@ impl RedbStore {
         &self,
         predicate: &dyn Fn(&DeclarationId, &str) -> bool,
     ) -> Result<Vec<DeclarationId>, redb::Error> {
-        let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(SEARCH_NAMES)?;
-        let ids = table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<Option<DeclarationId>, redb::Error> {
-                let (id, name) = entry?;
-                let id = DeclarationId::new(id.value());
-                let name = String::from_utf8_lossy(name.value());
-                Ok(predicate(&id, &name).then_some(id))
-            })
-            .collect::<Result<Vec<_>, redb::Error>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        Ok(ids)
+        self.matching_ids(0..=u64::MAX, predicate)
     }
 
     /// Runs [`Self::declaration_ids_matching`] across `available_parallelism()` key ranges, each on its
@@ -458,23 +472,7 @@ impl RedbStore {
                     } else {
                         (shard as u64 + 1) * shard_width - 1
                     };
-                    scope.spawn(move || {
-                        let read_txn = self.begin_read()?;
-                        let table = read_txn.open_table(SEARCH_NAMES)?;
-                        let ids = table
-                            .range(start..=end)?
-                            .map(|entry| -> Result<Option<DeclarationId>, redb::Error> {
-                                let (id, name) = entry?;
-                                let id = DeclarationId::new(id.value());
-                                let name = String::from_utf8_lossy(name.value());
-                                Ok(predicate(&id, &name).then_some(id))
-                            })
-                            .collect::<Result<Vec<_>, redb::Error>>()?
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>();
-                        Ok::<_, redb::Error>(ids)
-                    })
+                    scope.spawn(move || self.matching_ids(start..=end, predicate))
                 })
                 .collect::<Vec<_>>();
             handles
@@ -487,74 +485,58 @@ impl RedbStore {
         Ok(ids)
     }
 
-    /// Reads all definition node ids for enumeration (keys only, no deserialization).
+    /// Every key of `table`, as ids. Enumeration needs the ids only and throws the values away, so
+    /// deserializing them was one allocation per node per query.
+    ///
+    /// # Errors
+    /// Returns an error if the redb read transaction or table iteration fails.
+    fn node_ids<T>(&self, table: TableDefinition<u64, &[u8]>, id: fn(u64) -> T) -> Result<Vec<T>, redb::Error> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(table)?;
+        table
+            .range(..=u64::MAX)?
+            .map(|entry| -> Result<T, redb::Error> { Ok(id(entry?.0.value())) })
+            .collect()
+    }
+
+    /// Reads all definition node ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn definition_ids(&self) -> Result<Vec<DefinitionId>, redb::Error> {
-        let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(DEFINITIONS)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<DefinitionId, redb::Error> { Ok(DefinitionId::new(entry?.0.value())) })
-            .collect()
+        self.node_ids(DEFINITIONS, DefinitionId::new)
     }
 
-    /// Reads all declaration node ids for enumeration (keys only, no deserialization). Node
-    /// enumeration needs the ids and throws the names away, so materializing them was one String
-    /// allocation per declaration per query — see [`Self::declaration_ids_matching`].
+    /// Reads all declaration node ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn declaration_ids(&self) -> Result<Vec<DeclarationId>, redb::Error> {
-        let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(DECLARATIONS)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<DeclarationId, redb::Error> { Ok(DeclarationId::new(entry?.0.value())) })
-            .collect()
+        self.node_ids(DECLARATIONS, DeclarationId::new)
     }
 
-    /// Reads all document node ids for enumeration (keys only, no deserialization) — see
-    /// [`Self::declaration_ids`].
+    /// Reads all document node ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn document_ids(&self) -> Result<Vec<UriId>, redb::Error> {
-        let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(DOCUMENTS)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<UriId, redb::Error> { Ok(UriId::new(entry?.0.value())) })
-            .collect()
+        self.node_ids(DOCUMENTS, UriId::new)
     }
 
-    /// Reads all constant reference ids for enumeration (keys only, no deserialization) — see
-    /// [`Self::declaration_ids`].
+    /// Reads all constant reference ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn constant_reference_ids(&self) -> Result<Vec<ConstantReferenceId>, redb::Error> {
-        let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(CONSTANT_REFERENCES)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<ConstantReferenceId, redb::Error> { Ok(ConstantReferenceId::new(entry?.0.value())) })
-            .collect()
+        self.node_ids(CONSTANT_REFERENCES, ConstantReferenceId::new)
     }
 
-    /// Reads all method reference ids for enumeration (keys only, no deserialization) — see
-    /// [`Self::declaration_ids`].
+    /// Reads all method reference ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     pub fn method_reference_ids(&self) -> Result<Vec<MethodReferenceId>, redb::Error> {
-        let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(METHOD_REFERENCES)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<MethodReferenceId, redb::Error> { Ok(MethodReferenceId::new(entry?.0.value())) })
-            .collect()
+        self.node_ids(METHOD_REFERENCES, MethodReferenceId::new)
     }
 
     /// Reads a single definition node, if present.
@@ -788,81 +770,6 @@ mod tests {
             let parallel: BTreeSet<_> = parallel.into_iter().map(|id| id.get()).collect();
             assert_eq!(serial, parallel, "scans disagree for query {query:?}");
         }
-    }
-
-    #[test]
-    #[ignore = "benchmark: needs RUBYDEX_BENCH_CORPUS"]
-    fn bench_build_write_vs_drop() {
-        use crate::indexing::{IndexerBackend, index_files};
-        use crate::listing::collect_file_paths;
-        use crate::resolution::Resolver;
-
-        let corpus = std::env::var("RUBYDEX_BENCH_CORPUS").expect("set RUBYDEX_BENCH_CORPUS");
-        let corpus = std::path::PathBuf::from(corpus);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("bench.redb");
-
-        let mut graph = Graph::new();
-        let (files, _) = collect_file_paths(vec![corpus.to_string_lossy().into_owned()], &graph.excluded_patterns());
-        let _ = index_files(&mut graph, files, IndexerBackend::RubyIndexer);
-        Resolver::new(&mut graph).resolve();
-
-        let db = Database::create(&path).expect("create");
-
-        // Time each table separately: open, insert, and the final commit, so the 4.5s Cleanup is
-        // attributable table by table.
-        let write_txn = db.begin_write().expect("begin");
-        macro_rules! timed_table {
-            ($table:expr, $map:expr, $label:literal) => {{
-                let t = std::time::Instant::now();
-                let mut table = write_txn.open_table($table).expect("open table");
-                let mut bytes = 0u64;
-                let mut count = 0u64;
-                for (id, value) in $map {
-                    let encoded = postcard::to_allocvec(value).expect("serialize");
-                    bytes += encoded.len() as u64;
-                    table.insert(id.get(), encoded.as_slice()).expect("insert");
-                    count += 1;
-                }
-                println!(
-                    "BENCH {} : {:?} ({} nodes, {} bytes)",
-                    $label,
-                    t.elapsed(),
-                    count,
-                    bytes
-                );
-            }};
-        }
-        timed_table!(DECLARATIONS, graph.declarations(), "declarations");
-        timed_table!(DEFINITIONS, graph.definitions(), "definitions");
-        timed_table!(STRINGS, graph.strings(), "strings");
-        timed_table!(NAMES, graph.names(), "names");
-        timed_table!(CONSTANT_REFERENCES, graph.constant_references(), "constant_references");
-        timed_table!(METHOD_REFERENCES, graph.method_references(), "method_references");
-        timed_table!(DOCUMENTS, graph.documents(), "documents");
-        timed_table!(NAME_DEPENDENTS, graph.name_dependents(), "name_dependents");
-        {
-            let t = std::time::Instant::now();
-            for (id, declaration) in graph.declarations() {
-                let mut table = write_txn.open_table(SEARCH_NAMES).expect("open search names");
-                table.insert(id.get(), declaration.name().as_bytes()).expect("insert");
-            }
-            println!("BENCH search_names : {:?}", t.elapsed());
-        }
-        {
-            let t = std::time::Instant::now();
-            for (id, document) in graph.documents() {
-                let mut table = write_txn.open_table(DOCUMENT_URIS).expect("open document uris");
-                table.insert(id.get(), document.uri().as_bytes()).expect("insert");
-            }
-            println!("BENCH document_uris : {:?}", t.elapsed());
-        }
-        let t_commit = std::time::Instant::now();
-        write_txn.commit().expect("commit");
-        println!("BENCH commit : {:?}", t_commit.elapsed());
-        let t2 = std::time::Instant::now();
-        drop(db);
-        println!("BENCH drop={}s", t2.elapsed().as_secs_f64());
     }
 
     #[test]

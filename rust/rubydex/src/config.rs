@@ -239,8 +239,8 @@ impl DiskIndexSettings {
     /// Where the store lives as configured: `"tmp"`, `"global"`, an absolute directory, or empty
     /// when the workspace left it to the context-aware default
     #[must_use]
-    pub fn location(&self) -> Box<str> {
-        Box::from(self.location.as_ref())
+    pub fn location(&self) -> &str {
+        &self.location
     }
 
     /// Whether the workspace opts into the machine-wide background manager

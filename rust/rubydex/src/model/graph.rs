@@ -54,10 +54,7 @@ fn read_store<T>(
             None
         }
         Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map_or("panicked inside the store", |message| *message);
-            record_store_error(errors, format_args!("corrupt store ({message})"));
+            record_store_panic(errors, &*payload);
             None
         }
     }
@@ -78,13 +75,19 @@ fn scan_store<T, E: std::fmt::Display>(
             Vec::new()
         }
         Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map_or("panicked inside the store", |message| *message);
-            record_store_error(errors, format_args!("corrupt store ({message})"));
+            record_store_panic(errors, &*payload);
             Vec::new()
         }
     }
+}
+
+/// Records a panic raised inside redb (a damaged page its B-tree code asserts on).
+#[cfg(feature = "redb-store")]
+fn record_store_panic(errors: &std::sync::atomic::AtomicUsize, payload: &(dyn std::any::Any + Send)) {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map_or("panicked inside the store", |message| *message);
+    record_store_error(errors, format_args!("corrupt store ({message})"));
 }
 
 /// An entity whose validity depends on a particular `NameId`.
@@ -192,7 +195,7 @@ assert_send_sync!(Graph);
 /// the same name collide (e.g. `StringId("Base") == DeclarationId("Base")`); a tombstone keyed by
 /// raw id alone would hide an unrelated store node and make a layered lookup return nothing.
 #[cfg(feature = "redb-store")]
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum TombstoneKind {
     Declaration,
     Definition,
@@ -506,24 +509,35 @@ impl Graph {
         None
     }
 
-    /// Declaration ids held by the disk store, excluding tombstoned declarations so a live edit's
-    /// deletion is not resurrected by enumeration. Empty when no store is attached. Keys only: node
-    /// enumeration keeps the ids and throws the names away, so deserializing every declaration cost
-    /// one String per declaration per query.
+    /// One node kind's store ids, minus the ones a live edit tombstoned: keys only, no
+    /// deserialization (node enumeration keeps the ids and throws the names away, so
+    /// materializing them cost one String per node per query). Empty when no store is attached.
     #[cfg(feature = "redb-store")]
-    #[must_use]
-    pub fn store_declaration_ids(&self) -> Vec<DeclarationId> {
+    fn store_ids<T: Copy, E: std::fmt::Display>(
+        &self,
+        kind: TombstoneKind,
+        scan: impl FnOnce(&crate::model::store::RedbStore) -> Result<Vec<T>, E>,
+        raw: fn(&T) -> u64,
+    ) -> Vec<T> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        scan_store(
-            store,
-            &self.store_errors,
+        scan_store(store, &self.store_errors, scan)
+            .into_iter()
+            .filter(|id| !self.is_tombstoned(kind, raw(id)))
+            .collect()
+    }
+
+    /// Declaration ids held by the disk store, excluding tombstoned declarations so a live edit's
+    /// deletion is not resurrected by enumeration.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_declaration_ids(&self) -> Vec<DeclarationId> {
+        self.store_ids(
+            TombstoneKind::Declaration,
             crate::model::store::RedbStore::declaration_ids,
+            DeclarationId::get,
         )
-        .into_iter()
-        .filter(|id| !self.is_tombstoned(TombstoneKind::Declaration, id.get()))
-        .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
@@ -562,43 +576,34 @@ impl Graph {
         Vec::new()
     }
 
-    /// Document ids held by the disk store, excluding tombstoned documents — keys only, see
-    /// [`Self::store_declaration_ids`]. Empty when no store is attached.
+    /// Document ids held by the disk store, excluding tombstoned documents — see
+    /// [`Self::store_declaration_ids`].
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn store_document_ids(&self) -> Vec<UriId> {
-        let Some(store) = &self.store else {
-            return Vec::new();
-        };
-        scan_store(store, &self.store_errors, crate::model::store::RedbStore::document_ids)
-            .into_iter()
-            .filter(|id| !self.is_tombstoned(TombstoneKind::Document, id.get()))
-            .collect()
-    }
-
-    #[cfg(not(feature = "redb-store"))]
-    #[must_use]
-    #[allow(clippy::unused_self)]
-    pub fn store_document_ids(&self) -> Vec<UriId> {
-        Vec::new()
-    }
-
-    /// Constant reference ids held by the disk store, excluding tombstoned references. Empty when no
-    /// store is attached.
-    #[cfg(feature = "redb-store")]
-    #[must_use]
-    pub fn store_constant_reference_ids(&self) -> Vec<ConstantReferenceId> {
-        let Some(store) = &self.store else {
-            return Vec::new();
-        };
-        scan_store(
-            store,
-            &self.store_errors,
-            crate::model::store::RedbStore::constant_reference_ids,
+        self.store_ids(
+            TombstoneKind::Document,
+            crate::model::store::RedbStore::document_ids,
+            UriId::get,
         )
-        .into_iter()
-        .filter(|id| !self.is_tombstoned(TombstoneKind::ConstantReference, id.get()))
-        .collect()
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn store_document_ids(&self) -> Vec<UriId> {
+        Vec::new()
+    }
+
+    /// Constant reference ids held by the disk store, excluding tombstoned references.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    pub fn store_constant_reference_ids(&self) -> Vec<ConstantReferenceId> {
+        self.store_ids(
+            TombstoneKind::ConstantReference,
+            crate::model::store::RedbStore::constant_reference_ids,
+            ConstantReferenceId::get,
+        )
     }
 
     #[cfg(not(feature = "redb-store"))]
@@ -608,22 +613,15 @@ impl Graph {
         Vec::new()
     }
 
-    /// Method reference ids held by the disk store, excluding tombstoned references. Empty when no
-    /// store is attached.
+    /// Method reference ids held by the disk store, excluding tombstoned references.
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn store_method_reference_ids(&self) -> Vec<MethodReferenceId> {
-        let Some(store) = &self.store else {
-            return Vec::new();
-        };
-        scan_store(
-            store,
-            &self.store_errors,
+        self.store_ids(
+            TombstoneKind::MethodReference,
             crate::model::store::RedbStore::method_reference_ids,
+            MethodReferenceId::get,
         )
-        .into_iter()
-        .filter(|id| !self.is_tombstoned(TombstoneKind::MethodReference, id.get()))
-        .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
@@ -686,21 +684,15 @@ impl Graph {
     }
 
     /// Definition ids held by the disk store, excluding tombstoned definitions so a live edit's
-    /// deletion is not resurrected by enumeration. Empty when no store is attached.
+    /// deletion is not resurrected by enumeration.
     #[cfg(feature = "redb-store")]
     #[must_use]
     pub fn store_definition_ids(&self) -> Vec<DefinitionId> {
-        let Some(store) = &self.store else {
-            return Vec::new();
-        };
-        scan_store(
-            store,
-            &self.store_errors,
+        self.store_ids(
+            TombstoneKind::Definition,
             crate::model::store::RedbStore::definition_ids,
+            DefinitionId::get,
         )
-        .into_iter()
-        .filter(|id| !self.is_tombstoned(TombstoneKind::Definition, id.get()))
-        .collect()
     }
 
     #[cfg(not(feature = "redb-store"))]
@@ -846,7 +838,7 @@ impl Graph {
     /// Returns where the store lives as configured: the literal `"tmp"`, the literal `"global"`,
     /// an absolute directory, or empty when the workspace left it to the context-aware default.
     #[must_use]
-    pub fn disk_index_location(&self) -> Box<str> {
+    pub fn disk_index_location(&self) -> &str {
         self.config.disk_index().location()
     }
 

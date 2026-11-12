@@ -88,33 +88,6 @@ pub unsafe extern "C" fn rdx_graph_build_store(pointer: GraphPointer, path: *con
     })
 }
 
-/// Opens a prebuilt redb store and returns a new graph that uses it as its disk-backed base layer.
-/// Returns null if the path is invalid, the store cannot be opened, or the `redb-store` feature was
-/// not compiled in.
-///
-/// # Safety
-///
-/// `path` must be a valid NUL-terminated C string. The caller owns the returned `GraphPointer` and
-/// must free it with the graph free function.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rdx_graph_open_store(path: *const c_char) -> GraphPointer {
-    let Ok(path) = (unsafe { utils::convert_char_ptr_to_string(path) }) else {
-        return ptr::null_mut();
-    };
-    #[cfg(feature = "redb-store")]
-    {
-        match rubydex::model::store::RedbStore::open(std::path::Path::new(&path)) {
-            Ok(store) => Box::into_raw(Box::new(RwLock::new(Graph::with_store(store)))) as GraphPointer,
-            Err(_) => ptr::null_mut(),
-        }
-    }
-    #[cfg(not(feature = "redb-store"))]
-    {
-        let _ = path;
-        ptr::null_mut()
-    }
-}
-
 /// Switches an existing graph over to a prebuilt store as its disk-backed base layer (drops the
 /// in-memory maps). Returns `true` on success. Used by the launcher after a short-lived child built
 /// the store, so the long-lived server holds the bulk index off-heap.
@@ -539,8 +512,7 @@ pub unsafe extern "C" fn rdx_graph_disk_index_manager(pointer: GraphPointer) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_disk_index_location(pointer: GraphPointer) -> *const c_char {
     with_graph(pointer, |graph| {
-        CString::new(graph.disk_index_location().as_ref())
-            .map_or(ptr::null(), |c_string| c_string.into_raw().cast_const())
+        CString::new(graph.disk_index_location()).map_or(ptr::null(), |c_string| c_string.into_raw().cast_const())
     })
 }
 

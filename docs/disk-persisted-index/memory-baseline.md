@@ -150,12 +150,12 @@ per cold store build.
 Every latency above requires the **release** `.so` (`bundle exec rake compile_release`). Measured
 against the **debug** `.so`, the same search reads 997 ms/op and hover 1.38 ms/op — a 10x
 difference from build profile alone. Always confirm which profile is installed before quoting a
-perf number. A related trap: `Graph.open_store` twice on the same path in one process fails
-(redb holds an exclusive file lock), which looks like a corrupt-store error but is not one.
+perf number. A related trap: opening the same store twice in one process fails (redb holds an
+exclusive file lock), which looks like a corrupt-store error but is not one.
 
 ### Where the store-build "Cleanup" stage goes (post-rebase attribution)
 
-`bench_build_write_vs_drop` (release, stdlib corpus, kept as an `#[ignore]`d test for C2):
+One-off measurement (release, stdlib corpus):
 
 ```
 index=494ms  resolve=828ms  write=4486ms  drop=10ms  size=1,077,940,224
@@ -167,8 +167,7 @@ not a lever. Any C2 optimization has to shrink the bytes written or make the com
 
 ### Store-build write, table by table (C2, release)
 
-`bench_build_write_vs_drop` (kept as an `#[ignore]`d test) times each table's serialize+insert
-inside the single write transaction:
+Each table's serialize+insert inside the single write transaction:
 
 ```
 method_references  1.53 s   1,818,270 nodes   51 MB

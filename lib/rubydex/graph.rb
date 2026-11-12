@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
+require "digest"
 require "fileutils"
+require "find"
 require "open3"
+require "rbconfig"
 require "rubydex/index_manager"
 
 module Rubydex
@@ -375,7 +378,6 @@ module Rubydex
     # cache root is readable, the path hash keeps distinct workspaces (and worktrees) apart.
     #: -> String
     def global_store_key
-      require "digest"
       "#{File.basename(workspace_path)}-#{Digest::SHA1.hexdigest(File.expand_path(workspace_path))[0, 8]}"
     end
 
@@ -423,7 +425,6 @@ module Rubydex
     # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
     # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
     def store_signature(scan = source_scan)
-      require "digest"
       # The layout version is part of the key so a store written by an incompatible layout is
       # invalidated instead of silently degrading against it. The gem version deliberately does not
       # participate: a release that leaves the layout untouched must not force a full re-index.
@@ -467,7 +468,6 @@ module Rubydex
     # SHA of the workspace Gemfile.lock, used to invalidate the store when dependencies change.
     #: -> String
     def lockfile_hash
-      require "digest"
       lock = File.join(workspace_path, "Gemfile.lock")
       File.exist?(lock) ? Digest::SHA1.hexdigest(File.read(lock)) : "no-lockfile"
     end
@@ -502,7 +502,6 @@ module Rubydex
     #
     #: -> Hash[String, String]
     def walk_sources
-      require "find"
       root = workspace_path
       excluded = excluded_patterns
       # Excluded patterns are absolute globs anchored at the workspace root (e.g.
@@ -529,7 +528,6 @@ module Rubydex
     # rebuild per workspace) and then hold again.
     #: (Hash[String, String]) -> String
     def workspace_source_signature(scan)
-      require "digest"
       digest = Digest::SHA1.new
       scan.each do |rel, stamp|
         mtime, size = stamp.split(":", 2)
@@ -556,8 +554,6 @@ module Rubydex
     # (SIGSEGV in `tcache_bin_flush` during `index_all`). A fresh process starts with a clean heap.
     #: (String, ?Hash[String, String]) -> void
     def build_store_in_child(cache, scan = source_scan)
-      require "fileutils"
-      require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))
       ensure_store_ignored(File.dirname(cache))
       tmp = "#{cache}.#{Process.pid}.building"

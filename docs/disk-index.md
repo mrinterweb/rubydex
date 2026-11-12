@@ -191,6 +191,6 @@ change claims the rebuild lock and builds; the others re-attach to the result. O
 
 - `docs/disk-persisted-index/memory-baseline.md` — the measurement log (resident memory and timings by
   corpus and stage) that the performance comments in the code quote. Reproduce with
-  `utils/session_profile.rb` and the `bench_build_write_vs_drop` test.
+  `utils/session_profile.rb`.
 - `docs/disk-persisted-index/fs-event-crate.md` — the decision record for the file-system event crate
   the manager uses.

@@ -771,12 +771,6 @@ class Rubydex::Graph
   sig { void }
   def detach_store; end
 
-  # Opens a prebuilt redb store at `path` and returns a new Graph that uses it as its base layer.
-  # The `redb-store` feature is compiled into the gem by default; opt out at build time with
-  # RUBYDEX_NO_REDB_STORE=1.
-  sig { params(path: String).returns(Rubydex::Graph) }
-  def self.open_store(path); end
-
   sig { params(uri: String, source: String, language_id: String).void }
   def index_source(uri, source, language_id); end
 

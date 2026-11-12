@@ -14,17 +14,16 @@ use std::time::{Duration, Instant};
 struct EventCollector {
     pending: Arc<Mutex<Vec<PathBuf>>>,
     last_event: Arc<Mutex<Instant>>,
-    ignored: Arc<std::sync::RwLock<Vec<PathBuf>>>,
+    ignored: Arc<Vec<PathBuf>>,
 }
 
 impl EventHandler for EventCollector {
     fn handle_event(&mut self, event: Result<Event>) {
         if let Ok(change) = event {
-            let ignored = self.ignored.read().unwrap();
             let paths: Vec<PathBuf> = change
                 .paths
                 .into_iter()
-                .filter(|path| !is_ignored(path, ignored.as_slice()))
+                .filter(|path| !is_ignored(path, self.ignored.as_slice()))
                 .collect();
             if paths.is_empty() {
                 return;
@@ -54,7 +53,7 @@ pub struct NotifySource {
     /// rather than leaving the workspace unwatched for its whole lifetime.
     unwatched: Vec<PathBuf>,
     /// Directories whose events are discarded (the store's own cache).
-    ignored: Arc<std::sync::RwLock<Vec<PathBuf>>>,
+    ignored: Arc<Vec<PathBuf>>,
 }
 
 impl NotifySource {
@@ -63,31 +62,24 @@ impl NotifySource {
     /// watched (a workspace that went away, or a spent inotify budget) is reported and
     /// kept in [`Self::unwatched`], never fatal: the manager keeps serving the other
     /// sessions.
+    ///
+    /// Events under `ignored` are discarded (any `.git` metadata directory is always discarded).
+    /// The store lives inside the workspace when `location = "tmp"`; without this, writing the store
+    /// re-triggers an indexer.
     #[must_use]
-    pub fn new(paths: &[PathBuf], debounce: Duration) -> NotifySource {
+    pub fn new(paths: &[PathBuf], ignored: Vec<PathBuf>, debounce: Duration) -> NotifySource {
         let mut source = NotifySource {
             watchers: Vec::new(),
             pending: Arc::new(Mutex::new(Vec::<PathBuf>::new())),
             last_event: Arc::new(Mutex::new(Instant::now())),
             debounce,
             unwatched: Vec::new(),
-            ignored: Arc::new(std::sync::RwLock::new(Vec::new())),
+            ignored: Arc::new(ignored),
         };
         for path in paths {
             source.subscribe(path.clone());
         }
         source
-    }
-
-    /// Discards events under `path` (and any `.git` metadata directory). The store lives inside the
-    /// workspace when `location = "tmp"`; without this, writing the store re-triggers an indexer.
-    ///
-    /// # Panics
-    /// Panics if the ignored-path lock is poisoned.
-    #[must_use]
-    pub fn ignore(self, path: PathBuf) -> NotifySource {
-        self.ignored.write().unwrap().push(path);
-        self
     }
 
     /// Attempts to watch one root recursively, recording it as unwatched when that fails.

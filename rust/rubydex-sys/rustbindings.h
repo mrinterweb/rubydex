@@ -1328,18 +1328,6 @@ void rdx_graph_free(GraphPointer pointer);
 bool rdx_graph_build_store(GraphPointer pointer, const char *path);
 
 /**
- * Opens a prebuilt redb store and returns a new graph that uses it as its disk-backed base layer.
- * Returns null if the path is invalid, the store cannot be opened, or the `redb-store` feature was
- * not compiled in.
- *
- * # Safety
- *
- * `path` must be a valid NUL-terminated C string. The caller owns the returned `GraphPointer` and
- * must free it with the graph free function.
- */
-GraphPointer rdx_graph_open_store(const char *path);
-
-/**
  * Switches an existing graph over to a prebuilt store as its disk-backed base layer (drops the
  * in-memory maps). Returns `true` on success. Used by the launcher after a short-lived child built
  * the store, so the long-lived server holds the bulk index off-heap.

@@ -5,7 +5,7 @@ use crate::builder::Builder;
 use crate::fs_events::NotifySource;
 use crate::registry::Session;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -90,10 +90,8 @@ fn retry_unwatched_roots(watches: &mut [Watch]) {
 
 #[must_use]
 pub fn watch_for(group: Group, debounce: Duration) -> Watch {
-    let mut source = NotifySource::new(group.workspaces.as_ref(), debounce);
-    if let Some(store_dir) = group.store.parent() {
-        source = source.ignore(store_dir.to_path_buf());
-    }
+    let ignored = group.store.parent().into_iter().map(Path::to_path_buf).collect();
+    let source = NotifySource::new(group.workspaces.as_ref(), ignored, debounce);
 
     Watch {
         store: group.store.clone(),
