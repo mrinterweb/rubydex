@@ -14,7 +14,15 @@ require "json"
 # the registry empties.
 class IndexManagerRegistryTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
-  MANAGER_BIN = File.join(ROOT, "rust", "target", "debug", "rubydex-index-manager")
+  # The `.exe` matters: without it Windows never finds the binary, every call re-runs cargo build
+  # (10-16 s each) and the spawn leans on CreateProcess appending the extension.
+  MANAGER_BIN = File.join(
+    ROOT,
+    "rust",
+    "target",
+    "debug",
+    Gem.win_platform? ? "rubydex-index-manager.exe" : "rubydex-index-manager",
+  )
 
   def manager(*args)
     unless File.exist?(MANAGER_BIN)
@@ -40,7 +48,7 @@ class IndexManagerRegistryTest < Minitest::Test
         docs: 100,
         registry: registry,
       )
-      assert(handle.flock(File::LOCK_EX), "the test process must still hold the lock")
+      assert_still_locked(handle, "the test process must still hold the lock")
 
       sessions = JSON.parse(manager("--registry", registry, "--list"))
       assert_equal(1, sessions.size, "a live session must be listed")
@@ -62,7 +70,7 @@ class IndexManagerRegistryTest < Minitest::Test
 
       assert_empty(Dir.glob(File.join(registry, "*.tmp")), "the unlocked temp file must not remain")
       assert_equal(1, Dir.glob(File.join(registry, "*.json")).size, "the locked file is published")
-      assert(handle.flock(File::LOCK_EX), "the published file is already locked by the session")
+      assert_still_locked(handle, "the published file is already locked by the session")
       handle.close
     end
   end
@@ -148,6 +156,16 @@ class IndexManagerRegistryTest < Minitest::Test
         kill_and_reap(holder)
       end
     end
+  end
+
+  # Locking the same range again on the same handle is a no-op on Unix but never granted on Windows:
+  # byte-range locks there are owned by the process, so the blocking flock waits for a lock it
+  # already owns and the test hangs. Rust's `live_sessions_lists_a_session_holding_its_lock` carries
+  # the same caveat.
+  def assert_still_locked(handle, message)
+    return if Gem.win_platform?
+
+    assert(handle.flock(File::LOCK_EX), message)
   end
 
   def kill_and_reap(pid)
