@@ -168,6 +168,12 @@ class IndexManagerRegistryTest < Minitest::Test
     assert(handle.flock(File::LOCK_EX), message)
   end
 
+  def teardown
+    # Windows cannot unlink a registry file this process still holds open.
+    Rubydex::IndexManager.release_all
+    super
+  end
+
   def kill_and_reap(pid)
     Process.kill("KILL", pid)
     Process.wait(pid)

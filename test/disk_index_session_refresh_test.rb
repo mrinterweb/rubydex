@@ -26,6 +26,9 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       begin
         yield(dir, rb)
       ensure
+        # Windows cannot unlink a file this process still holds open, and an opted-in session keeps
+        # its registry file locked until released, so the tmpdir would fail to clean up.
+        Rubydex::IndexManager.release_all
         ENV.delete("RUBYDEX_DISK_INDEX")
         ENV.delete("RUBYDEX_REFRESH_TTL")
       end

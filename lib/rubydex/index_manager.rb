@@ -23,13 +23,7 @@ module Rubydex
     # death through the lock rather than through cleanup hooks.
     @handles = {}
 
-    at_exit do
-      @handles.each do |path, handle|
-        handle.close
-        File.delete(path) if File.exist?(path)
-      end
-      @handles.clear
-    end
+    at_exit { release_all }
 
     # A burst of file-system events inside this window collapses into one indexer.
     DEBOUNCE_MS = 200
@@ -57,9 +51,12 @@ module Rubydex
         handle = File.new(File.join(File.dirname(registry), "manager.lock"), "w")
         # Non-blocking is the point: a live manager holds this lock for its whole lifetime, so a
         # blocking `flock` waits for the manager to exit and the session never launches anything.
-        return unless handle.flock(File::LOCK_EX | File::LOCK_NB)
-
+        taken = handle.flock(File::LOCK_EX | File::LOCK_NB)
+        # Closed either way: our own open handle would keep Windows from replacing the lock file,
+        # and the manager takes the lock for itself once it starts.
         handle.close
+        return unless taken
+
         pid = Process.spawn(manager_binary, "--registry", registry, "--run")
         Process.detach(pid)
         nil
@@ -96,6 +93,22 @@ module Rubydex
 
         @handles[path] = handle
         handle
+      end
+
+      # Ends every registered session: closes the handle, which releases the OS lock, and removes
+      # the registry file. `at_exit` calls this; so can a host or a test that has to release the
+      # lock before the process exits.
+      #: -> void
+      def release_all
+        @handles.each do |path, handle|
+          handle.close
+          File.delete(path) if File.exist?(path)
+        rescue SystemCallError
+          # Another process probing the registry holds the file open on Windows. The lock is
+          # already released, which is what liveness depends on, so a failed unlink must not
+          # turn shutdown into a crash.
+        end
+        @handles.clear
       end
     end
   end

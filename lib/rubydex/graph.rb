@@ -587,9 +587,17 @@ module Rubydex
         # store open to serve reads. POSIX renames over it and keeps serving.
         reopened = Gem.win_platform? && self.class.store_format_version.positive?
         detach_store if reopened
+        attempts = 0
         begin
           File.rename(tmp, cache)
         rescue StandardError
+          # A store the OS has only just finished writing can still be held by a scanner, which
+          # fails the replace with EACCES/EPERM even though no reader has the old store open.
+          # Retry before declaring the build unpublished.
+          if Gem.win_platform? && (attempts += 1) < 5
+            sleep(0.05 * attempts)
+            retry
+          end
           # The old store is still there: the rename is what failed. Put the session back on it
           # rather than leaving it with no index at all.
           attach_store(cache) if reopened && File.exist?(cache)

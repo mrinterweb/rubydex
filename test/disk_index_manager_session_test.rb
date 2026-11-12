@@ -8,7 +8,10 @@ require "json"
 # A workspace that opts into `[disk_index] manager` registers itself with the machine-wide
 # manager when it indexes, so the manager can keep the store fresh between sessions.
 class DiskIndexManagerSessionTest < Minitest::Test
-  MANAGER_BIN = File.expand_path("../lib/rubydex/rubydex-index-manager", __dir__)
+  MANAGER_BIN = File.expand_path(
+    "../lib/rubydex/#{Gem.win_platform? ? "rubydex-index-manager.exe" : "rubydex-index-manager"}",
+    __dir__,
+  )
 
   def setup
     super
@@ -25,7 +28,13 @@ class DiskIndexManagerSessionTest < Minitest::Test
       File.write(File.join(dir, "lib", "app.rb"), "class App\nend\n")
       graph = Rubydex::Graph.configure_for_workspace(dir)
       graph.index_workspace
-      yield(graph, dir)
+      begin
+        yield(graph, dir)
+      ensure
+        # The session's registry file stays locked until released, and Windows cannot unlink an open
+        # file, so the tmpdir would fail to clean up.
+        Rubydex::IndexManager.release_all
+      end
     end
   end
 
