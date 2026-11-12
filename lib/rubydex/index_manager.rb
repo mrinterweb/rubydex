@@ -70,26 +70,29 @@ module Rubydex
         path = File.join(registry, "#{Process.pid}-#{SecureRandom.hex(4)}.json")
         payload = JSON.generate({ workspace:, store:, builder:, docs: })
 
-        if Gem.win_platform?
-          # Windows cannot rename a file this process has open, so there is no temp to publish:
-          # claim the final name exclusively, lock it, then write. A manager probing the gap sees
-          # an unlocked file it cannot parse, and it cannot unlink one an open handle holds
-          # either, so the session lists itself on the manager's next poll.
-          handle = File.open(path, File::RDWR | File::CREAT | File::EXCL)
-          handle.flock(File::LOCK_EX | File::LOCK_NB)
-          handle.write(payload)
-          handle.flush
+        temp = "#{path}.tmp"
+        # Windows cannot rename a file this process has open, so there is no temp to publish: claim
+        # the final name exclusively instead. A manager probing the gap sees an unlocked file it
+        # cannot parse, and it cannot unlink one an open handle holds either, so the session lists
+        # itself on the manager's next poll.
+        handle = if Gem.win_platform?
+          File.open(path, File::RDWR | File::CREAT | File::EXCL)
         else
-          # Create and lock under a non-`.json` name. The manager prunes a registry file whose lock
-          # it can take, so publishing an unlocked file would let it unlink a session that is about
-          # to lock it. Rename (with the lock already held) is the atomic publish.
-          temp = "#{path}.tmp"
-          handle = File.new(temp, "w")
-          handle.flock(File::LOCK_EX | File::LOCK_NB)
-          handle.write(payload)
-          handle.flush
-          File.rename(temp, path)
+          File.new(temp, "w")
         end
+        # A registry file without a lock is worse than no file: the manager takes the free lock as
+        # proof of death and prunes a session that is alive, so it has to index everything twice.
+        unless handle.flock(File::LOCK_EX | File::LOCK_NB)
+          handle.close
+          FileUtils.rm_f(temp)
+          raise("could not lock the registry file #{path}")
+        end
+        handle.write(payload)
+        handle.flush
+        # The manager prunes a registry file whose lock it can take, so publishing an unlocked file
+        # would let it unlink a session that is about to lock it. Rename (with the lock already
+        # held) is the atomic publish.
+        File.rename(temp, path) unless Gem.win_platform?
 
         @handles[path] = handle
         handle

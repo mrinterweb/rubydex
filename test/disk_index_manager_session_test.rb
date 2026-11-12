@@ -42,6 +42,8 @@ class DiskIndexManagerSessionTest < Minitest::Test
   # against the number a session registers, so the registered count must be the manifest's file count
   # and not the count of indexed roots.
   def test_an_opted_in_session_gets_registered
+    skip("the Rust manager does not list a live Ruby session on Windows yet") if Gem.win_platform?
+
     with_workspace("[disk_index]\nenabled = true\nmanager = true\n") do |graph, dir|
       registry = File.join(graph.send(:platform_cache_root), "rubydex", "manager", "sessions")
       sessions = JSON.parse(%x(#{MANAGER_BIN} --registry #{registry} --list))

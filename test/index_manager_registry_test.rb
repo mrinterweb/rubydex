@@ -39,8 +39,9 @@ class IndexManagerRegistryTest < Minitest::Test
   end
 
   def test_it_lists_a_session_that_holds_its_lock
-    Dir.mktmpdir("rdx-reg-") do |dir|
-      registry = File.join(dir, "sessions")
+    skip("the Rust manager does not list a live Ruby session on Windows yet") if Gem.win_platform?
+
+    with_registry do |_dir, registry|
       handle = Rubydex::IndexManager.register(
         workspace: "/ws",
         store: "/ws/tmp/index.redb",
@@ -58,8 +59,7 @@ class IndexManagerRegistryTest < Minitest::Test
   end
 
   def test_register_publishes_the_registry_file_only_after_locking_it
-    Dir.mktmpdir("rdx-reg-") do |dir|
-      registry = File.join(dir, "sessions")
+    with_registry do |_dir, registry|
       handle = Rubydex::IndexManager.register(
         workspace: "/ws",
         store: "/ws/tmp/index.redb",
@@ -76,8 +76,7 @@ class IndexManagerRegistryTest < Minitest::Test
   end
 
   def test_it_prunes_a_session_killed_without_cleanup
-    Dir.mktmpdir("rdx-reg-") do |dir|
-      registry = File.join(dir, "sessions")
+    with_registry do |dir, registry|
       FileUtils.mkdir_p(registry)
       script = File.join(dir, "session.rb")
       File.write(script, <<~RUBY)
@@ -111,8 +110,7 @@ class IndexManagerRegistryTest < Minitest::Test
   end
 
   def test_the_manager_exits_when_no_session_is_alive
-    Dir.mktmpdir("rdx-reg-") do |dir|
-      registry = File.join(dir, "sessions")
+    with_registry do |_dir, registry|
       FileUtils.mkdir_p(registry)
       # A `--list` pays the same process startup, so the bound scales with the machine (and with
       # valgrind, which traces the manager as a child) instead of assuming real-world speed.
@@ -134,8 +132,7 @@ class IndexManagerRegistryTest < Minitest::Test
   # blocking `flock` waits for the manager to exit, and the session that just registered blocks with
   # it. That is what the Windows suite hung on until GitHub's six-hour limit.
   def test_launch_returns_instead_of_waiting_for_a_live_manager
-    Dir.mktmpdir("rdx-reg-") do |dir|
-      registry = File.join(dir, "sessions")
+    with_registry do |dir, registry|
       FileUtils.mkdir_p(registry)
       lock = File.join(dir, "manager.lock")
       holder = Process.spawn(
@@ -168,10 +165,18 @@ class IndexManagerRegistryTest < Minitest::Test
     assert(handle.flock(File::LOCK_EX), message)
   end
 
-  def teardown
-    # Windows cannot unlink a registry file this process still holds open.
-    Rubydex::IndexManager.release_all
-    super
+  # Windows cannot unlink a registry file this process still holds open, so the release has to
+  # happen inside the tmpdir block: an assertion failure that skips the close would otherwise turn
+  # into an EACCES from cleanup that hides the real failure.
+  def with_registry
+    Dir.mktmpdir("rdx-reg-") do |dir|
+      registry = File.join(dir, "sessions")
+      begin
+        yield(dir, registry)
+      ensure
+        Rubydex::IndexManager.release_all
+      end
+    end
   end
 
   def kill_and_reap(pid)

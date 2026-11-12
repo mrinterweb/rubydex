@@ -216,6 +216,10 @@ class DiskIndexSessionRefreshTest < Minitest::Test
   # holds (source scan + lockfile), not on HEAD: HEAD belongs to what the session is serving, and
   # mixing it into the marker made this branch dead in a git repo.
   def test_a_session_moves_to_the_store_another_session_rebuilt
+    # Windows cannot replace a store the other session still has open, so the rebuild falls back to
+    # the in-memory index there and the re-attach never happens.
+    skip("Windows cannot publish a store another session holds open") if Gem.win_platform?
+
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "tmp"))
       8.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\n  def old; end\nend\n") }

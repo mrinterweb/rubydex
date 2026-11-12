@@ -585,6 +585,9 @@ module Rubydex
         File.write(marker_tmp, store_signature(scan))
         # Windows cannot replace a file another handle has open, and a session refreshing has this
         # store open to serve reads. POSIX renames over it and keeps serving.
+        # shortcut: on Windows a rebuild only publishes while no other session holds the store, so
+        # that session keeps its old snapshot instead of seeing the rebuild. Publish to a new
+        # generation file when Windows has to match POSIX.
         reopened = Gem.win_platform? && self.class.store_format_version.positive?
         detach_store if reopened
         attempts = 0
