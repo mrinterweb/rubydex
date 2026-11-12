@@ -12,6 +12,12 @@ class MCPServerIntegrationTest < Minitest::Test
   include Test::Helpers::WithContext
 
   MAX_INDEXING_RETRIES = 200
+  # A read answers immediately once the server is warm, except the first `codebase_stats` call: that
+  # one waits for the background indexer, which on a debug-jemalloc or valgrind build takes minutes.
+  # A 5 s budget there failed the FFI allocator job with a bare `Timeout::Error` instead of the retry
+  # the test was written for.
+  READ_BUDGET = 5
+  INDEXING_READ_BUDGET = 240
   EXIT_BUDGET = 30
   # A runner slow enough to miss the budget still has to say how slow, or "did not exit" cannot be
   # told apart from a real hang.
@@ -190,8 +196,8 @@ class MCPServerIntegrationTest < Minitest::Test
     )
   end
 
-  def read_response(stdout)
-    Timeout.timeout(5) do
+  def read_response(stdout, budget = READ_BUDGET)
+    Timeout.timeout(budget) do
       line = stdout.gets
       flunk("Expected JSON-RPC response, got EOF") unless line
 
@@ -199,8 +205,8 @@ class MCPServerIntegrationTest < Minitest::Test
     end
   end
 
-  def read_response_for_id(stdout, expected_id)
-    response = read_response(stdout)
+  def read_response_for_id(stdout, expected_id, budget = READ_BUDGET)
+    response = read_response(stdout, budget)
     assert_equal(expected_id, response.fetch("id"))
     response
   end
@@ -263,9 +269,16 @@ class MCPServerIntegrationTest < Minitest::Test
     JSON.parse(response.fetch("result").fetch("content")[0].fetch("text"))
   end
 
+  # The first `codebase_stats` call waits for the background indexer instead of answering at once.
+  def call_tool_before_the_index_is_ready(stdin, stdout, request_id)
+    send_request(stdin, request_id, "tools/call", { name: "codebase_stats", arguments: {} })
+    response = read_response_for_id(stdout, request_id, INDEXING_READ_BUDGET)
+    JSON.parse(response.fetch("result").fetch("content")[0].fetch("text"))
+  end
+
   def wait_for_indexing_to_complete(stdin, stdout, request_id)
     MAX_INDEXING_RETRIES.times do
-      parsed = call_tool(stdin, stdout, request_id, "codebase_stats", {})
+      parsed = call_tool_before_the_index_is_ready(stdin, stdout, request_id)
       return [parsed, request_id] unless parsed.key?("error")
 
       assert_equal("indexing", parsed.fetch("error"))

@@ -50,6 +50,10 @@ begin
         "test/disk_index_live_edit_test.rb",
         "test/disk_index_surgical_refresh_test.rb",
         "test/disk_index_cypher_test.rb",
+        # Spawns the manager binary and SIGKILLs a session child, and a killed valgrind child leaves a
+        # truncated XML report that ruby_memcheck then fails to parse. It also runs `cargo build`
+        # inside the trace. None of it exercises the C extension.
+        "test/index_manager_registry_test.rb",
       )
     end
   end
