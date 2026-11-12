@@ -12,6 +12,10 @@ class MCPServerIntegrationTest < Minitest::Test
   include Test::Helpers::WithContext
 
   MAX_INDEXING_RETRIES = 200
+  EXIT_BUDGET = 30
+  # A runner slow enough to miss the budget still has to say how slow, or "did not exit" cannot be
+  # told apart from a real hang.
+  LATE_EXIT_BUDGET = 180
 
   def test_executable_prints_help
     stdout, _stderr, status = run_executable("--help")
@@ -99,11 +103,21 @@ class MCPServerIntegrationTest < Minitest::Test
         assert_equal(1, dead_code_response.fetch("candidates").length)
 
         stdin.close
-        Timeout.timeout(30) { wait_thr.value }
+        closed_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        begin
+          Timeout.timeout(EXIT_BUDGET) { wait_thr.value }
+        rescue Timeout::Error
+          blocked = thread_dump(wait_thr.pid)
+          begin
+            Timeout.timeout(LATE_EXIT_BUDGET) { wait_thr.value }
+            flunk("rdx mcp exited #{elapsed_since(closed_at).round(1)}s after stdin closed, past the " \
+              "#{EXIT_BUDGET}s budget. stderr:\n#{stderr_output}")
+          rescue Timeout::Error
+            Process.kill("TERM", wait_thr.pid)
+            flunk("rdx mcp did not exit after stdin closed. Exit threads: #{blocked} stderr:\n#{stderr_output}")
+          end
+        end
         stderr_reader.join
-      rescue Timeout::Error
-        Process.kill("TERM", wait_thr.pid)
-        flunk("rdx mcp did not exit after stdin closed. stderr:\n#{stderr_output}")
       end
     end
   end
@@ -135,6 +149,24 @@ class MCPServerIntegrationTest < Minitest::Test
       executable_path,
       *arguments,
     )
+  end
+
+  def elapsed_since(started_at)
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+  end
+
+  # "Did not exit" hides whether the child is stuck or merely slow and where, so read the kernel's
+  # view of each thread: a thread parked in wait4 is waiting on a subprocess, in futex on a Ruby-level
+  # join, in epoll_wait on input. Linux only; elsewhere this is just a process state.
+  def thread_dump(pid)
+    state = File.read("/proc/#{pid}/status")[/^State:.*$/]
+    threads = Dir.glob("/proc/#{pid}/task/*").map do |task|
+      syscall = File.read("#{task}/syscall").split.first
+      "#{File.basename(task)}:#{File.read("#{task}/comm").strip}:syscall=#{syscall}:#{File.read("#{task}/wchan").strip}"
+    end
+    "#{state} #{threads.join(" ")}"
+  rescue SystemCallError
+    "gone before the dump"
   end
 
   def executable_path
