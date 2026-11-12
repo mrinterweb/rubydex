@@ -130,7 +130,7 @@ workspace rebuilds from scratch. It exits when no session is alive.
 It watches through the [notify](https://crates.io/crates/notify) crate — inotify on Linux, FSEvents on
 macOS, `ReadDirectoryChangesW` on Windows, polling fallback where none of those exist — so it reacts to
 OS events rather than scanning your tree. Each watched root is subscribed recursively, and inotify wants
-one watch per *directory*, not per file, so that is what scales: reserv's 2,960-directory tree is 3,051
+one watch per *directory*, not per file, so that is what scales: a ~3,000-directory tree is about 3,000
 watches, one thread and ~4 MB resident for the whole manager. That count is per user
 (`fs.inotify.max_user_watches`: 8,192 on many stock distros, 524,288 on this machine), so a few large
 worktrees can exhaust a low default — in which case the manager warns, skips that one workspace, and

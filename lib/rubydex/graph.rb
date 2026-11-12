@@ -18,12 +18,12 @@ module Rubydex
     REBUILD_LOCK_TIMEOUT = 30 * 60
 
     # Above this fraction of changed files a full rebuild (one child, a fresh store shared by every
-    # session) is cheaper than growing each session's overlay. Measured on reserv-api: surgical 200
+    # session) is cheaper than growing each session's overlay. Measured: surgical 200
     # files = 71 ms; full rebuild = 24.6 s.
     REBUILD_DIFF_RATIO = 0.25
 
     # How stale the freshness walk may go, in seconds. The walk stats every indexable file (~105 ms
-    # warm, ~0.9 s cold, on reserv's 6,441 files) and runs before every tool call, so it is reused
+    # warm, ~0.9 s cold, on 6,441 files) and runs before every tool call, so it is reused
     # inside this window. Owner decision 2026-08-10: an edit made outside the editor (sed, a formatter,
     # a script) may be answered up to this stale. A moved HEAD bounds the case that matters (a branch
     # switch or a commit rewrites files in bulk) and the editor path is unaffected, because it indexes
@@ -33,7 +33,7 @@ module Rubydex
     # Once the overlay would hold this fraction of the workspace's files, a rebuild is the cheaper
     # answer. A surgical apply leaves the edited files in the overlay and only a rebuild compacts it,
     # so a session that absorbs many small branch switches converges on holding the whole index in
-    # memory: ~12 MB per 1,000 files measured on reserv, against ~5 MB for the store it opened. Same
+    # memory: ~12 MB per 1,000 files measured, against ~5 MB for the store it opened. Same
     # shape as REBUILD_DIFF_RATIO, which bounds one refresh; this one bounds the session.
     OVERLAY_COMPACTION_RATIO = 0.25
 
@@ -208,7 +208,7 @@ module Rubydex
         builder: Rubydex::IndexManager.builder_argv(workspace_path, cache),
         # The manager compares a burst of filesystem events against this to decide when a rebuild beats
         # a surgical pass, so it has to be the manifest's file count. `workspace_paths` counts indexed
-        # *roots* (53 on reserv, whose manifest is 6,441 files), which trips that threshold about 100x
+        # *roots*, which trips that threshold about 100x
         # too eagerly — and costs a Bundler + rbs scan per session to compute.
         docs: @applied_files.to_h.size,
         registry: registry,
@@ -495,7 +495,7 @@ module Rubydex
     # The walk itself: workspace-relative path => "mtime_micros:size", excluded directories pruned
     # without descending into them.
     #
-    # Measured on reserv (6,441 files): ~105 ms warm, ~0.8 s cold. Settling the wildcard-free
+    # Measured on 6,441 files: ~105 ms warm, ~0.8 s cold. Settling the wildcard-free
     # built-in exclusions with a Set instead of `File.fnmatch?` per path only buys it down to ~82 ms,
     # which is not worth a second matching rule while the TTL already limits this to one walk per
     # window.

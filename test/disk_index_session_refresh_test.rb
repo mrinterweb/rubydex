@@ -140,7 +140,7 @@ class DiskIndexSessionRefreshTest < Minitest::Test
 
   # A commit rewrites no files, so the store still describes the workspace exactly: HEAD belongs to
   # what a session is serving, not to what the shared store was built from, or every commit would
-  # throw the store away (a 24.6 s rebuild on reserv).
+  # throw the store away (a 24.6 s rebuild on large codebase).
   def test_a_commit_that_changes_no_files_leaves_the_store_fresh
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "tmp"))
