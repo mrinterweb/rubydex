@@ -42,6 +42,33 @@ We try to be on the latest version of Rust and CI always runs against the latest
 - Linting: `bundle exec rubocop`
 - Formatting: `bundle exec rubocop -a`
 
+### Tests under valgrind
+
+A separate CI job runs the suite under valgrind with `--trace-children=yes` to catch leaks
+(`bundle exec rake ruby_test:valgrind`, one job per sanitizer). A traced child process costs roughly
+1000x its normal time — a store build, `git`, a compiler, the index manager — and a child killed
+mid-report leaves a truncated XML file that `ruby_memcheck` cannot parse, which fails the job after
+hours with `Premature end of data in tag valgrindoutput` instead of naming a leak.
+
+So a test file that can spawn a child declares it in its header, within the first ten lines:
+
+```ruby
+# frozen_string_literal: true
+
+# valgrind: skip — <why this file cannot run under the tracer>
+
+require "test_helper"
+```
+
+The memleak task selects on that marker, and `test/integration/**` is skipped wholesale.
+`test/valgrind_selection_test.rb` fails when a file that can spawn a child does not declare it, which
+is what keeps a new spawn-heavy test from silently rejoining the traced run. The marker has to be a
+line of its own, starting at column 0; a mention mid-sentence does not count.
+
+One consequence worth knowing: the disk-index tests are the only ones that read a store-backed graph,
+and they all spawn store builds, so that read path has no valgrind coverage. It runs on the plain
+`ruby_test` task and under the FFI allocator-invariants job instead.
+
 ## Releasing
 
 Releases are cut by maintainers from `main`. GitHub Actions builds and publishes

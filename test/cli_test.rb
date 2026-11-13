@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
-# valgrind: skip — spawns the gem's executable
+# valgrind: skip — 48 in-process CLI runs, ~30x under the tracer for no C surface the
+# other files miss
 
 require "test_helper"
 require "helpers/cli"

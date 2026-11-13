@@ -36,7 +36,7 @@ begin
       test_config.call(task)
       # Valgrind runs with --trace-children=yes and --leak-check=full, which costs ~1000x, so the
       # suite is hours per sanitizer. The rule is "a file that can spawn a child stays on the plain
-      # ruby_test task", and the file itself declares it, on its own header line:
+      # ruby_test task", and the file itself declares it, in a header line within the first ten:
       #
       #   # valgrind: skip — <why this file cannot run under the tracer>
       #
@@ -44,9 +44,10 @@ begin
       # the manager binary), and a child killed mid-report leaves a truncated XML file that
       # ruby_memcheck fails to parse (`Premature end of data in tag valgrindoutput`). The marker
       # lives in the file because a central list drifted: test/disk_index_enumerators_test.rb builds
-      # a store in a child on every test and was never added to it.
+      # a store in a child on every test and was never added to it. CONTRIBUTING.md documents the
+      # rule and test/valgrind_selection_test.rb asserts every spawner carries the marker.
       task.test_files = FileList["test/**/*_test.rb"].exclude("test/integration/**/*_test.rb").reject do |file|
-        File.read(file, 512).include?("# valgrind: skip")
+        File.foreach(file).first(10).any? { |line| line.start_with?("# valgrind: skip") }
       end
     end
   end
