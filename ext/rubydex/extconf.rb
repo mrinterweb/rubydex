@@ -62,7 +62,11 @@ if Gem.win_platform?
   #
   # These libraries are the ones informed by `cargo rustc -- --print native-static-libs`, which displays the
   # libraries necessary for statically linking the Rust code on the current platform
-  ["kernel32", "ntdll", "userenv", "ws2_32", "dbghelp", "msvcrt"].each do |lib|
+  #
+  # `synchronization` is needed by Rust 1.100+, whose std no longer binds `WaitOnAddress` and
+  # `WakeByAddress*` to a raw-dylib import: those symbols live in `libapi-ms-win-core-synch-l1-2-0.a`,
+  # which mingw exposes as `libsynchronization.a` and `libkernel32.a` does not provide
+  ["kernel32", "ntdll", "userenv", "ws2_32", "dbghelp", "msvcrt", "synchronization"].each do |lib|
     $LDFLAGS << " -l#{lib}"
   end
 else

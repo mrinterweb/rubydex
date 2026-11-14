@@ -156,17 +156,13 @@ fn probe_declarations(graph: &Graph, sample: usize, out: &mut Vec<(String, Strin
         let singleton = decl
             .as_namespace()
             .and_then(|ns| ns.singleton_class())
-            .map(|id| declaration_fqn(graph, *id))
-            .unwrap_or_default();
+            .map_or_default(|id| declaration_fqn(graph, *id));
         let definitions: Vec<String> = decl
             .definitions()
             .iter()
             .map(|def_id| {
                 let def = graph.definition(*def_id).expect("definition present for declaration");
-                let uri = graph
-                    .document(*def.uri_id())
-                    .map(|d| d.uri().to_string())
-                    .unwrap_or_default();
+                let uri = graph.document(*def.uri_id()).map_or_default(|d| d.uri().to_string());
                 format!("{}@{}@{}", def.kind(), uri, def.offset().start())
             })
             .collect::<BTreeSet<_>>()

@@ -688,22 +688,18 @@ pub fn expand_in(graph: &Graph, node: NodeRef, rel: RelType) -> Option<Vec<NodeR
 #[must_use]
 pub fn expand_out(graph: &Graph, node: NodeRef, rel: RelType) -> Vec<NodeRef> {
     match (node, rel) {
-        (NodeRef::Document(uri_id), RelType::Defines) => graph
-            .document(uri_id)
-            .map(|document| {
-                document
-                    .definitions()
-                    .iter()
-                    .map(|id| NodeRef::Definition(*id))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        (NodeRef::Document(uri_id), RelType::Defines) => graph.document(uri_id).map_or_default(|document| {
+            document
+                .definitions()
+                .iter()
+                .map(|id| NodeRef::Definition(*id))
+                .collect()
+        }),
         (NodeRef::Document(uri_id), RelType::References) => document_references(graph, uri_id),
         (NodeRef::Definition(def_id), RelType::Declares) => graph
             .definition(def_id)
             .and_then(|definition| graph.definition_to_declaration_id(&definition))
-            .map(|decl_id| vec![NodeRef::Declaration(decl_id)])
-            .unwrap_or_default(),
+            .map_or_default(|decl_id| vec![NodeRef::Declaration(decl_id)]),
         (NodeRef::Definition(def_id), RelType::Contains) => definition_children(graph, def_id),
         (NodeRef::Declaration(decl_id), RelType::HasParent) => superclasses(graph, decl_id),
         (NodeRef::Declaration(decl_id), RelType::Includes) => mixin_targets(graph, decl_id, MixinKind::Include),
