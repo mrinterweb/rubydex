@@ -247,11 +247,26 @@ return {
   cmd = { "bundle", "exec", "ruby-lsp" },
   filetypes = { "ruby", "eruby" },
   root_markers = { "Gemfile", ".git" },
+  -- Required for the add-on to see file changes. Neovim only advertises
+  -- `dynamicRegistration` on macOS and Windows, and the add-on requires
+  -- `relativePatternSupport` as well before it registers its watcher.
+  capabilities = {
+    workspace = {
+      didChangeWatchedFiles = {
+        dynamicRegistration = true,
+        relativePatternSupport = true,
+      },
+    },
+  },
   init_options = {
-    formatter = "auto",
+    formatter = "auto", -- rubydex does not format; see 2e
   },
 }
 ```
+
+Without that `capabilities` block the client still attaches and indexes, but the add-on never
+registers its watcher, so **no diagnostics ever appear** — on Linux by default, on every platform
+when another plugin narrows the capabilities.
 
 and enable it once, in `init.lua`:
 
@@ -306,10 +321,14 @@ bundle exec rdx query "MATCH (c:Class) RETURN c.name"
 ```
 
 Diagnostics are *pushed* by the add-on (`textDocument/publishDiagnostics`, `source: "Rubydex"`,
-`code:` the rule name) rather than pulled on demand. It runs its linter when the LSP client reports a
-watched-file change — saving a file in the workspace is what typically produces them — and it can
-only register its config-file watcher if the client supports dynamic `workspace/didChangeWatchedFiles`
-registration, which Neovim does.
+`code:` the rule name) rather than pulled on demand, and only on a watched-file change: saving a Ruby
+file, or creating/changing `rubydex.toml`. A freshly opened, unmodified buffer shows none until
+something is saved, and the first batch arrives when `rubydex.toml` is touched (the add-on's own
+watcher) or any watched Ruby file is saved.
+
+What this setup does **not** give you: formatting. `Rubydex::Linter` registers a formatter id, but its
+`run_formatting` is an empty stub, so `formatter = "rubydex"` produces no edits. Leave
+`formatter = "auto"` and let another formatter (RuboCop, Syntax Tree) own formatting.
 
 ---
 
