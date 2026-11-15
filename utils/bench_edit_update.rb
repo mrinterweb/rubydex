@@ -70,7 +70,7 @@ if child_mode
     graph.index_workspace # attach (fast when the store matches)
     targets = editable_files(root).first(Integer(ENV.fetch("BENCH_FILES")))
     append_marker(targets)
-    sleep TTL
+    sleep(TTL)
     t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     moved = graph.refresh_if_stale
     ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
@@ -124,11 +124,11 @@ results["in_place_#{files}_edits_median_ms"] = times.sort[times.size / 2]
 if json_out
   puts JSON.generate(results)
 else
-  puts "workspace:                 #{root} (#{results['files']} .rb files)"
-  puts "store:                     #{store} (#{results['store_mb']} MB)"
-  puts "cold build:                #{results['cold_build_ms']} ms"
-  puts "start, store fresh:        #{results['start_warm_ms']} ms"
+  puts "workspace:                 #{root} (#{results["files"]} .rb files)"
+  puts "store:                     #{store} (#{results["store_mb"]} MB)"
+  puts "cold build:                #{results["cold_build_ms"]} ms"
+  puts "start, store fresh:        #{results["start_warm_ms"]} ms"
   puts "next session, #{files} edit(s):     #{results["next_session_after_#{files}_edits_ms"]} ms"
   puts "in place, #{files} edit(s) warmup:  #{warmup} ms"
-  puts "in place, #{files} edit(s)/round:   #{times.join(', ')} ms (median #{results["in_place_#{files}_edits_median_ms"]})"
+  puts "in place, #{files} edit(s)/round:   #{times.join(", ")} ms (median #{results["in_place_#{files}_edits_median_ms"]})"
 end
