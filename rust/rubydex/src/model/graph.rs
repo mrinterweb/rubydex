@@ -1498,10 +1498,13 @@ impl Graph {
         if let Some(old_decl_id) = self.unresolve_name(name_id) {
             #[cfg(feature = "redb-store")]
             self.materialize_declaration(old_decl_id);
-            self.declarations
-                .get_mut(&old_decl_id)
-                .expect("Tried to unresolve reference for declaration that doesn't exist in the graph")
-                .remove_constant_reference(&reference_id);
+            // The declaration can legitimately be gone: a session that deletes or re-indexes a file
+            // tombstones its declarations, and references to them from files this session never
+            // touched are cleaned up afterwards. `materialize_declaration` skips tombstones, so there
+            // is no back-edge left to remove and nothing to repair.
+            if let Some(declaration) = self.declarations.get_mut(&old_decl_id) {
+                declaration.remove_constant_reference(&reference_id);
+            }
 
             Some(old_decl_id)
         } else {

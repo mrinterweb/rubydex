@@ -746,6 +746,59 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_referenced_declaration_does_not_crash() {
+        use crate::indexing::{IndexerBackend, LanguageId, index_files, index_source};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("base.rb");
+        let a = dir.path().join("a.rb");
+        let b = dir.path().join("b.rb");
+        std::fs::write(&base, "class Base\n  def call; end\nend\n").expect("write");
+        std::fs::write(
+            &a,
+            "module M\n  class A < Base\n    def self.target; B; end\n  end\nend\n",
+        )
+        .expect("write");
+        std::fs::write(&b, "module M\n  class B < Base\n    def call; end\n  end\nend\n").expect("write");
+
+        let mut graph = Graph::new();
+        let _ = index_files(
+            &mut graph,
+            vec![base, a.clone(), b.clone()],
+            IndexerBackend::RubyIndexer,
+        );
+        Resolver::new(&mut graph).resolve();
+        let store_path = dir.path().join("index.redb");
+        RedbStore::build(&store_path, &graph).expect("build store");
+        drop(graph);
+
+        let mut graph = Graph::new();
+        graph.attach_store(RedbStore::open(&store_path).expect("open store"));
+
+        // The referrer is edited first, then the file that defines the declaration it resolved
+        // against loses that declaration. `Graph#apply_changes` does the same for a changed set.
+        index_source(
+            &mut graph,
+            url::Url::from_file_path(&a).unwrap().to_string().into(),
+            "module M\n  class A < Base\n    def self.target; B; end\n  end\nend\n# edited\n",
+            &LanguageId::Ruby,
+        );
+        index_source(
+            &mut graph,
+            url::Url::from_file_path(&b).unwrap().to_string().into(),
+            "# gone\n",
+            &LanguageId::Ruby,
+        );
+        Resolver::new(&mut graph).resolve();
+
+        assert!(
+            graph.declaration(DeclarationId::from("M::A")).is_some(),
+            "referrer survives the soak"
+        );
+    }
+
+    #[test]
     fn parallel_scan_matches_the_serial_scan() {
         use std::collections::BTreeSet;
 
