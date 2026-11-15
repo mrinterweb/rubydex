@@ -212,6 +212,39 @@ class MCPServerTest < Minitest::Test
     assert_equal([{ jsonrpc: "2.0", id: 1, result: {} }], response)
   end
 
+  def test_tool_reads_do_not_overlap_a_refresh_on_the_same_graph
+    with_context do |context|
+      context.write!("app.rb", "class Foo; end\n")
+      graph = Rubydex::Graph.configure_for_workspace(context.absolute_path)
+      graph.index_all([context.absolute_path])
+      graph.resolve
+      server = Rubydex::MCPServer::Server.new(root_path: context.absolute_path)
+      server.define_singleton_method(:graph_or_error) { graph }
+      entered = Queue.new
+      release = Queue.new
+      calls = 0
+      graph.define_singleton_method(:prepare_for_tool_call) do
+        calls += 1
+        entered << true
+        release.pop if calls == 1
+      end
+      request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "codebase_stats" } }
+      first = Thread.new { server.handle(request) }
+      Timeout.timeout(1) { entered.pop }
+      second = Thread.new { server.handle(request) }
+
+      assert_raises(Timeout::Error) { Timeout.timeout(0.05) { entered.pop } }
+      release << true
+      Timeout.timeout(1) { entered.pop }
+      assert_equal(false, first.value.fetch(:result).fetch(:isError))
+      assert_equal(false, second.value.fetch(:result).fetch(:isError))
+    ensure
+      release << true if release
+      first&.join(1)
+      second&.join(1)
+    end
+  end
+
   def test_main_loop_handles_requests_concurrently
     transport = Class.new do
       attr_reader :writes

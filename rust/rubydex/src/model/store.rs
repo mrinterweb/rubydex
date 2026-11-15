@@ -40,6 +40,7 @@ const SEARCH_NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("search_n
 /// Document URIs for require-path resolution: `uri_id -> URI string`. A compact projection so
 /// require completion can enumerate file paths without deserializing full document nodes.
 const DOCUMENT_URIS: TableDefinition<u64, &[u8]> = TableDefinition::new("document_uris");
+const STORE_METADATA: TableDefinition<u8, u32> = TableDefinition::new("store_metadata");
 
 /// Failure modes of the on-disk store.
 ///
@@ -53,6 +54,8 @@ pub enum StoreError {
     /// A node could not be encoded for writing. A programming error rather than a data condition:
     /// every persisted node type is plain owned data.
     Encode(postcard::Error),
+    /// The store was written with a different node layout.
+    IncompatibleFormat(u32),
     /// A node's bytes could not be decoded as its node type: the store is corrupt or was written
     /// by an incompatible layout.
     Corrupt {
@@ -70,6 +73,7 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::Open(error) => write!(f, "store unavailable: {error}"),
             StoreError::Encode(error) => write!(f, "failed to encode node: {error}"),
+            StoreError::IncompatibleFormat(version) => write!(f, "unsupported store format version {version}"),
             StoreError::Corrupt { table, id, source } => {
                 write!(f, "corrupt node in table `{table}` (id {id}): {source}")
             }
@@ -104,6 +108,7 @@ impl std::error::Error for StoreError {
         match self {
             StoreError::Open(error) => Some(error),
             StoreError::Encode(source) | StoreError::Corrupt { source, .. } => Some(source),
+            StoreError::IncompatibleFormat(_) => None,
         }
     }
 }
@@ -112,7 +117,7 @@ impl std::error::Error for StoreError {
 /// scheme, or the set of tables changes — anything that makes an older store unreadable or
 /// semantically stale. The gem version deliberately does NOT participate: a release that does not
 /// touch the layout would otherwise force every user to re-index.
-pub const STORE_FORMAT_VERSION: u32 = 1;
+pub const STORE_FORMAT_VERSION: u32 = 2;
 
 /// Page cache the builder runs with. redb defaults to 1 GiB, which a build fills with pages it
 /// never reads back. Measured on the Ruby 4.0 gems tree (28k files, 1.1 GB store): 1 GiB = 7.1 s /
@@ -179,9 +184,23 @@ impl RedbStore {
             Builder::new().set_cache_size(8 * 1024 * 1024).open_read_only(path)
         }));
         match opened {
-            Ok(Ok(db)) => Ok(Self {
-                db: StoreDb::ReadOnly(db),
-            }),
+            Ok(Ok(db)) => {
+                let version = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<_, StoreError> {
+                    let txn = db.begin_read()?;
+                    let table = txn.open_table(STORE_METADATA)?;
+                    Ok(table.get(0)?.map(|entry| entry.value()))
+                }))
+                .map_err(|_| StoreError::Open(redb::Error::Io(std::io::Error::other("store metadata is damaged"))))??;
+                match version {
+                    Some(STORE_FORMAT_VERSION) => Ok(Self {
+                        db: StoreDb::ReadOnly(db),
+                    }),
+                    Some(version) => Err(StoreError::IncompatibleFormat(version)),
+                    None => Err(StoreError::Open(redb::Error::Io(std::io::Error::other(
+                        "store format version missing",
+                    )))),
+                }
+            }
             Ok(Err(error)) => Err(StoreError::Open(error.into())),
             Err(_) => Err(StoreError::Open(redb::Error::Io(std::io::Error::other(
                 "redb panicked while opening the store; the file is damaged or not a rubydex store",
@@ -206,6 +225,7 @@ impl RedbStore {
         let db = Builder::new().set_cache_size(BUILD_CACHE_SIZE).create(path)?;
         {
             let write_txn = db.begin_write()?;
+            write_txn.open_table(STORE_METADATA)?.insert(0, STORE_FORMAT_VERSION)?;
             // Serialize each `(id, node)` pair into the node's table. The `{{ }}` scoping drops each
             // table guard before the next table is opened within the same transaction.
             macro_rules! write_map {
@@ -256,8 +276,12 @@ impl RedbStore {
     /// Returns an error if the database file cannot be created or opened.
     #[cfg(test)]
     pub fn create(path: &Path) -> Result<Self, redb::Error> {
+        let db = Database::create(path)?;
+        let txn = db.begin_write()?;
+        txn.open_table(STORE_METADATA)?.insert(0, STORE_FORMAT_VERSION)?;
+        txn.commit()?;
         Ok(Self {
-            db: StoreDb::Writable(Database::create(path)?),
+            db: StoreDb::Writable(db),
         })
     }
 
@@ -618,6 +642,26 @@ impl RedbStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_rejects_a_store_with_an_incompatible_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        drop(RedbStore::build(&path, &Graph::new()).expect("build store"));
+
+        let db = Database::builder().open(&path).expect("open for version change");
+        let txn = db.begin_write().expect("write transaction");
+        {
+            let mut metadata = txn
+                .open_table(TableDefinition::<u8, u32>::new("store_metadata"))
+                .expect("metadata table");
+            metadata.insert(0, STORE_FORMAT_VERSION + 1).expect("wrong version");
+        }
+        txn.commit().expect("commit version change");
+        drop(db);
+
+        assert!(RedbStore::open(&path).is_err(), "an incompatible store must not open");
+    }
 
     #[test]
     fn build_persists_full_graph() {

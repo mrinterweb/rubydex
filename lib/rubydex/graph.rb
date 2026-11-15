@@ -76,12 +76,25 @@ module Rubydex
 
       cache = store_cache_path
       @head_sha = workspace_head
-      build_store_in_child(cache) unless File.exist?(cache) && store_fresh?(cache)
-      attach_store(cache)
+      if File.exist?(cache)
+        begin
+          attach_store(cache)
+        rescue RuntimeError # no usable snapshot: wait for a new store instead of serving the old one
+          build_store_in_child(cache)
+          attach_store(cache)
+        end
+      else
+        build_store_in_child(cache)
+        attach_store(cache)
+      end
       return index_all(workspace_paths) if quarantine_if_untrustworthy(cache)
 
       adopt_manifest(cache)
-      @session_signature = session_state(@head_sha, source_scan)
+      if store_fresh?(cache)
+        @session_signature = session_state(@head_sha, source_scan)
+      else
+        refresh_if_stale
+      end
       register_session(cache) if index_manager_enabled?
 
       []
@@ -116,25 +129,53 @@ module Rubydex
       # had just indexed, and the next session would disagree and rebuild again.
       scan = source_scan(rewalk: @head_sha != head)
       @head_sha = head
-      signature = session_state(head, scan)
+      expected_marker = store_signature(scan)
+      signature = "#{head}#{expected_marker}"
       return false if @session_signature == signature
 
       marker = "#{cache}.hash"
-      if File.exist?(marker) && File.read(marker) == store_signature(scan)
+      if File.exist?(marker) && File.read(marker) == expected_marker
         attach_store(cache)
         adopt_manifest(cache)
       elsif (changes = surgical_changes(scan))
         apply_changes(changes)
         @applied_files = scan
       else
-        lock = claim_rebuild(cache)
-        return false unless lock
-
-        begin
-          build_store_in_child(cache, scan)
-        ensure
-          Dir.rmdir(lock) if File.exist?(lock)
+        if @rebuild_process && !@rebuild_process.alive?
+          status = @rebuild_process.value
+          @rebuild_process = nil
+          unless status.success?
+            warn("rubydex: store rebuild failed; falling back to in-memory")
+            detach_store
+            index_all(workspace_paths)
+            resolve
+            @session_signature = signature
+            return true
+          end
         end
+
+        if (lock = claim_rebuild(cache))
+          if Gem.win_platform?
+            # shortcut: Windows cannot replace an open store; use a generation path to serve the
+            # old snapshot during a background rebuild.
+            begin
+              build_store_in_child(cache, scan)
+            ensure
+              Dir.rmdir(lock) if File.exist?(lock)
+            end
+          else
+            launch_rebuild(cache, lock)
+          end
+        end
+
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.1
+        until File.exist?(marker) && File.read(marker) == expected_marker
+          break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+          sleep(0.02)
+        end
+        return false unless File.exist?(marker) && File.read(marker) == expected_marker
+
         attach_store(cache)
         adopt_manifest(cache)
       end
@@ -181,6 +222,7 @@ module Rubydex
       # takes at boot.
       if quarantine_if_untrustworthy
         index_all(workspace_paths)
+        resolve
         return true
       end
 
@@ -265,6 +307,15 @@ module Rubydex
     rescue Errno::ENOENT
       @manifest_files = nil
       @applied_files = nil
+    end
+
+    #: (String cache, String lock) -> void
+    def launch_rebuild(cache, lock)
+      pid = Process.spawn(*Rubydex::IndexManager.builder_argv(workspace_path, cache), "--full", "--claimed")
+      @rebuild_process = Process.detach(pid)
+    rescue StandardError
+      Dir.rmdir(lock) if File.exist?(lock)
+      raise
     end
 
     # Create-exclusive rebuild lock: `Dir.mkdir` raises `Errno::EEXIST` atomically, so N
@@ -422,13 +473,13 @@ module Rubydex
     # workspace. The file signature catches source changes for workspaces without a Gemfile.lock too
     # (which would otherwise be treated as fresh forever, since lockfile_hash returns the constant
     # "no-lockfile"). mtime+size is the standard cache heuristic — cheap, no content reads.
-    def store_signature(scan = source_scan)
+    def store_signature(scan = source_scan, lockfile = lockfile_hash)
       require "digest"
       # The layout version is part of the key so a store written by an incompatible layout is
       # invalidated instead of silently degrading against it. The gem version deliberately does not
       # participate: a release that leaves the layout untouched must not force a full re-index.
       Digest::SHA1.hexdigest(
-        self.class.store_format_version.to_s + lockfile_hash + workspace_source_signature(scan),
+        self.class.store_format_version.to_s + lockfile + workspace_source_signature(scan),
       )
     rescue Errno::ENOENT
       # A file vanished mid-walk; treat the signature as unknown so the store is rebuilt.
@@ -566,11 +617,13 @@ module Rubydex
       manifest = "#{cache}.files"
       manifest_tmp = "#{manifest}.#{Process.pid}.building"
       builder = File.expand_path("store_builder.rb", __dir__)
+      lockfile = lockfile_hash
 
       begin
         pid = Process.spawn(RbConfig.ruby, "-I#{File.expand_path("..", __dir__)}", builder, tmp, workspace_path)
         _, status = Process.wait2(pid)
         raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
+        raise "Gemfile.lock changed while building the store" unless lockfile_hash == lockfile
 
         # Publish order matters for concurrent correctness: rename the store first, then the marker.
         # Both renames are atomic on POSIX, so a concurrent reader (attach_store) never sees a
@@ -581,8 +634,8 @@ module Rubydex
         # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
         # The scan is captured BEFORE the child runs, so a file edited during the build is marked
         # stale and re-diffed by the next refresh rather than wrongly served as fresh.
-        File.binwrite(manifest_tmp, Marshal.dump({ "lockfile" => lockfile_hash, "files" => scan }))
-        File.write(marker_tmp, store_signature(scan))
+        File.binwrite(manifest_tmp, Marshal.dump({ "lockfile" => lockfile, "files" => scan }))
+        File.write(marker_tmp, store_signature(scan, lockfile))
         # Windows cannot replace a file another handle has open, and a session refreshing has this
         # store open to serve reads. POSIX renames over it and keeps serving.
         # shortcut: on Windows a rebuild only publishes while no other session holds the store, so

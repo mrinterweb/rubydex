@@ -129,8 +129,9 @@ source files, and safe to delete at any moment.
 
 Sessions stay correct with the manager absent, killed, or never started. Each one
 checks the commit under the workspace (~1 ms) and, at most once every two seconds,
-the file timestamps; a small change is then applied into that session's own overlay
-and a large one moves everyone to a rebuilt store. One manager process per machine
+the file timestamps; a small change is then applied into that session's own overlay.
+For a large change, a session with a usable index waits 100 ms for the rebuild, then
+may answer from the old snapshot until the new store is ready. One manager process per machine
 can do that work ahead of time for the workspaces that have a live session, so a
 session that opens later finds the store already fresh. Liveness is an OS lock, not
 a PID, so a session that was killed is noticed the moment the OS releases its lock.

@@ -14,7 +14,7 @@ ENV["RUBYDEX_INDEX_MANAGER"] = "0"
 
 graph = Rubydex::Graph.configure_for_workspace(workspace)
 if flags.include?("--full")
-  lock = graph.send(:claim_rebuild, store)
+  lock = flags.include?("--claimed") ? "#{store}.rebuild" : graph.send(:claim_rebuild, store)
   exit(0) unless lock
 
   begin
@@ -24,4 +24,6 @@ if flags.include?("--full")
   end
 else
   graph.refresh_if_stale
+  sleep(0.02) while Dir.exist?("#{store}.rebuild")
+  exit(1) unless graph.send(:store_fresh?, store)
 end

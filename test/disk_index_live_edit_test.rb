@@ -79,6 +79,28 @@ class DiskIndexLiveEditTest < Minitest::Test
     Process.define_singleton_method(:spawn, original_spawn) if original_spawn
   end
 
+  def test_build_does_not_publish_a_store_for_a_lockfile_changed_during_indexing
+    ws = File.join(@tmp, "ws")
+    FileUtils.mkdir_p(ws)
+    File.write(File.join(ws, "a.rb"), "class A; end\n")
+    lockfile = File.join(ws, "Gemfile.lock")
+    File.write(lockfile, "before\n")
+    graph = Rubydex::Graph.configure_for_workspace(ws)
+    cache = File.join(@tmp, "cache", "index.redb")
+
+    original_wait2 = Process.method(:wait2)
+    Process.define_singleton_method(:wait2) do |pid|
+      result = original_wait2.call(pid)
+      File.write(lockfile, "after\n")
+      result
+    end
+
+    assert_raises(RuntimeError) { graph.send(:build_store_in_child, cache) }
+    refute(File.exist?("#{cache}.hash"), "a build from the old dependency set must not be marked fresh")
+  ensure
+    Process.define_singleton_method(:wait2, original_wait2) if original_wait2
+  end
+
   def test_store_signature_tracks_layout_version_not_gem_version
     graph = Rubydex::Graph.configure_for_workspace(@tmp)
     baseline = graph.send(:store_signature)

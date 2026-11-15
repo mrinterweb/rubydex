@@ -66,8 +66,9 @@ writes a store inside your repo it adds the directory to `.git/info/exclude`, so
 
 ## How a session keeps up with your edits
 
-At boot a session builds the store if it is missing or stale, then opens it. After that, before every
-query it asks "has anything changed?" with two signals, cheap one first:
+At boot a session builds the store if it is missing or unreadable. A usable but stale store can
+answer while it refreshes. After that, before every query it asks "has anything changed?" with two
+signals, cheap one first:
 
 - **The commit under the workspace** (`git rev-parse HEAD`, ~1.3 ms). Catches commits, branch switches
   and stashes — the changes that rewrite many files at once — without touching a single file.
@@ -75,24 +76,27 @@ query it asks "has anything changed?" with two signals, cheap one first:
   at a time, so a burst of queries pays for it once. It never runs on a timer: no query, no walk.
 
 What that means in practice: edits saved through your editor are visible immediately (the editor
-indexes what it saves), a branch switch is visible on the next call, and an edit made by `sed` or a
-formatter outside the editor can be answered up to two seconds late. Set `RUBYDEX_REFRESH_TTL=0` if you
-want that window closed.
+indexes what it saves), and an edit made by `sed` or a formatter outside the editor can be answered
+up to two seconds late. Set `RUBYDEX_REFRESH_TTL=0` if you want that scan window closed. A branch
+switch forces a fresh scan, but a full rebuild may still serve the previous snapshot while it runs.
 
 When something did change, the size of the change picks the remedy. A small diff is applied into the
 session's own overlay in milliseconds (200 files: ~71 ms). A large diff — or one that would leave the
 overlay holding more than a quarter of the workspace — triggers a rebuild in a short-lived child
-process, whose memory is reclaimed when it exits, and every session in the directory moves to the new
-store. Rebuilding is what keeps a long-lived server from quietly accumulating the whole index in memory
-again (~12 MB per 1,000 edited files).
+process, whose memory is reclaimed when it exits. A session with a usable old store waits up to
+100 ms, then answers from that snapshot until a later query can attach the new store. Without a
+usable store it waits for the first build. On Windows an open store cannot be replaced, so the
+session rebuilding its own store still waits for the build. Rebuilding is what keeps a long-lived
+server from quietly accumulating the whole index in memory again (~12 MB per 1,000 edited files).
 
 ### Building the store
 
-The build happens in a fresh child process that the session spawns and waits for. Never `fork`: the
-parent is long-lived, with a warm allocator and live threads, and a forked child that then allocates
+The build happens in a fresh child process. On a cold start the session waits for it; when a valid
+store is already open it waits only 100 ms before serving the old snapshot. Never `fork`: the parent
+is long-lived, with a warm allocator and live threads, and a forked child that then allocates
 heavily corrupts its allocator — a fresh process starts with a clean heap. So the peak memory of a
-build belongs to a process that no longer exists, and the parent never sees it. (Waiting for the child
-is what stops it becoming a zombie; the memory isolation comes from it being a separate process at all.)
+build belongs to a process that no longer exists, and the parent never sees it. (A detached child
+is reaped when it exits; the memory isolation comes from it being a separate process at all.)
 
 The result is published by atomic rename — store first, then the manifest, then the freshness marker —
 so a session that looks mid-build sees the previous store, never a half-written one.
@@ -167,8 +171,9 @@ caches the file.
 
 ## Troubleshooting
 
-**Answers look stale.** Force a fresh look: `RUBYDEX_REFRESH_TTL=0 bundle exec rdx ...`. If it clears
-up, the 2-second window was the cause and you can leave it at 0 for that process.
+**Answers look stale.** Force a fresh scan: `RUBYDEX_REFRESH_TTL=0 bundle exec rdx ...`. If it clears
+up, the 2-second scan window was the cause. During a full rebuild the old snapshot can still be
+answered until the new store is published; the scan override does not bypass that wait.
 
 **You suspect the store is wrong or you just upgraded.** Delete it. `rm -rf <store dir>` — the next
 session rebuilds. Nothing else needs to be reset.
@@ -188,7 +193,8 @@ change claims the rebuild lock and builds; the others re-attach to the result. O
 
 - Live edits live in the session's memory and are never written back to the store. Another session sees
   them only once the store is rebuilt from disk.
-- Out-of-band edits can be answered up to `RUBYDEX_REFRESH_TTL` late (2 s by default).
+- Out-of-band edits can be answered up to `RUBYDEX_REFRESH_TTL` late (2 s by default), plus the
+  duration of a full rebuild when an old snapshot is available.
 - The store is a local, rebuildable cache: not shareable between machines, not worth committing, and
   safe to delete at any moment.
 

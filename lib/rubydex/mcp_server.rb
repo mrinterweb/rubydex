@@ -11,7 +11,7 @@ module Rubydex
   module MCPServer
     SERVER_INSTRUCTIONS = <<~TEXT
       Tools query a static index of workspace code, available bundle dependencies, and available Ruby core and standard-library RBS definitions.
-      The index is built at server startup; out-of-band changes (a branch switch, a terminal edit) are picked up at the next tool call, when the freshness marker shows the store is stale.
+      Out-of-band edits are checked before tool calls. A full rebuild may take longer than 100 ms; during it a usable previous snapshot can answer until a later call attaches the new store.
     TEXT
 
     class Server
@@ -23,6 +23,7 @@ module Rubydex
         @root_path = root_path
         @transport = transport
         @graph = Graph.configure_for_workspace(@root_path)
+        @graph_mutex = Mutex.new
         @index_finished = false
         @incoming_queue = Thread::Queue.new
         @outgoing_queue = Thread::Queue.new
@@ -223,15 +224,23 @@ module Rubydex
         graph = graph_or_error
         return Tool::Response.new([{ type: "text", text: JSON.generate(graph) }]).to_h if graph.is_a?(Error)
 
-        # A branch switch is a filesystem event no session owns, so the freshness marker is what
-        # notices. Reopening is per-session (redb pins a snapshot at open), so every live session in
-        # the directory converges at its own next tool call; only the first to claim the rebuild lock
-        # pays the rebuild, the rest pay the reopen. This also leaves the graph resolved — resolving
-        # again here would be a full store scan on every tool call.
-        graph.prepare_for_tool_call
+        # Refresh may keep a usable old snapshot after 100 ms; the next call rechecks the marker.
+        # Re-attached stores and surgical updates are resolved, so resolving here would rescan it.
+        @graph_mutex.synchronize do
+          graph.prepare_for_tool_call
 
-        response = tool.new(graph).call(**arguments.transform_keys(&:to_sym))
-        response.to_h
+          arguments = arguments.transform_keys(&:to_sym)
+          response = begin
+            tool.new(graph).call(**arguments)
+          rescue StandardError
+            raise unless graph.store_errors.positive?
+          end
+          if graph.store_errors.positive?
+            graph.prepare_for_tool_call # quarantine and rebuild in memory before returning a partial answer
+            response = tool.new(graph).call(**arguments)
+          end
+          response.to_h
+        end
       end
     end
 

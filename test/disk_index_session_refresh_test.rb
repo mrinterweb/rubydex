@@ -5,6 +5,7 @@
 require "test_helper"
 require "tmpdir"
 require "fileutils"
+require "timeout"
 
 # Three sessions (two editors + an agent server) share one store per directory. A branch switch
 # is a filesystem event no session owns, so the freshness marker is what notices: the first
@@ -130,7 +131,10 @@ class DiskIndexSessionRefreshTest < Minitest::Test
         assert_includes(graph["Foo"].members.map(&:name), "Foo#bar()")
 
         git(dir, "checkout", "-q", "other")
-        assert(graph.refresh_if_stale, "a moved HEAD must move the session, TTL or no TTL")
+        moved = graph.refresh_if_stale
+        refute(moved, "the old snapshot is available during a branch-switch rebuild") unless Gem.win_platform?
+        Timeout.timeout(45) { sleep(0.02) until graph.send(:store_fresh?, graph.send(:store_cache_path)) }
+        graph.refresh_if_stale
         members = graph["Foo"].members.map(&:name)
         assert_includes(members, "Foo#baz()")
         refute_includes(members, "Foo#bar()", "must not still answer from the previous branch")
@@ -244,7 +248,9 @@ class DiskIndexSessionRefreshTest < Minitest::Test
         git(dir, "add", ".")
         git(dir, "commit", "-q", "-m", "switch")
 
-        second = session(dir) # sees the large diff first and rebuilds
+        second = session(dir) # starts the large-diff rebuild
+        Timeout.timeout(45) { sleep(0.02) until second.send(:store_fresh?, second.send(:store_cache_path)) }
+        second.refresh_if_stale
         assert_includes(second["K0"].members.map(&:name), "K0#new()")
 
         assert(first.send(:refresh_if_stale))
@@ -265,6 +271,81 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       graph = session(dir)
       refute(graph.send(:refresh_if_stale), "nothing changed: no rebuild, no reopen")
       assert_includes(graph["Foo"].members.map(&:name), "Foo#bar()")
+    end
+  end
+
+  def test_boot_uses_an_existing_stale_store_while_it_refreshes
+    skip("Windows cannot publish over a store another session holds open") if Gem.win_platform?
+
+    with_workspace do |dir, rb|
+      first = session(dir)
+      cache = first.send(:store_cache_path)
+      File.write(rb, "class Foo\n  def baz; end\nend\n")
+      second = Rubydex::Graph.configure_for_workspace(dir)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      second.index_workspace
+      assert_operator(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.5)
+      assert_includes(second["Foo"].members.map(&:name), "Foo#bar()")
+      Timeout.timeout(45) { sleep(0.02) until second.send(:store_fresh?, cache) }
+      assert(second.refresh_if_stale)
+      assert_includes(second["Foo"].members.map(&:name), "Foo#baz()")
+    end
+  end
+
+  def test_a_session_waits_briefly_for_another_rebuild_before_serving_its_snapshot
+    with_workspace do |dir, rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      File.write(rb, "class Foo\n  def baz; end\nend\n")
+      lock = graph.send(:claim_rebuild, cache)
+      begin
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        refute(graph.refresh_if_stale, "the old snapshot stays available while another builder holds the lock")
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        assert_operator(elapsed, :>=, 0.08)
+        assert_operator(elapsed, :<, 0.5)
+        assert_includes(graph["Foo"].members.map(&:name), "Foo#bar()")
+      ensure
+        Dir.rmdir(lock)
+      end
+    end
+  end
+
+  def test_a_failed_background_rebuild_falls_back_to_a_fresh_in_memory_index
+    skip("Windows rebuilds synchronously") if Gem.win_platform?
+
+    with_workspace do |dir, rb|
+      graph = session(dir)
+      File.write(rb, "class Foo\n  def baz; end\nend\n")
+      graph.define_singleton_method(:launch_rebuild) do |_cache, lock|
+        @rebuild_process = Process.detach(Process.spawn(Gem.ruby, "-e", "exit 1"))
+        Dir.rmdir(lock)
+      end
+
+      graph.refresh_if_stale
+      Timeout.timeout(5) { sleep(0.02) while graph.instance_variable_get(:@rebuild_process).alive? }
+      assert(graph.refresh_if_stale)
+      assert_includes(graph["Foo"].members.map(&:name), "Foo#baz()")
+    end
+  end
+
+  def test_a_session_serves_its_snapshot_while_its_own_rebuild_runs
+    skip("Windows cannot publish over a store this session holds open") if Gem.win_platform?
+
+    with_workspace do |dir, rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      File.write(rb, "class Foo\n  def baz; end\nend\n")
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      refute(graph.refresh_if_stale, "the existing index answers while the rebuild runs")
+      assert_operator(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.5)
+      assert_includes(graph["Foo"].members.map(&:name), "Foo#bar()")
+
+      Timeout.timeout(45) { sleep(0.02) until graph.send(:store_fresh?, cache) }
+      assert(graph.refresh_if_stale)
+      assert_includes(graph["Foo"].members.map(&:name), "Foo#baz()")
     end
   end
 

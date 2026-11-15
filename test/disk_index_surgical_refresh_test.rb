@@ -4,6 +4,7 @@
 
 require "tmpdir"
 require "fileutils"
+require "timeout"
 require "test_helper"
 
 # A store-backed session moves to a new source state by re-indexing only the files that changed,
@@ -55,19 +56,12 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
   def test_large_diff_and_a_lockfile_change_both_fall_back_to_a_rebuild
     graph = booted_graph
     12.times { |i| write("c#{i}.rb", "class C#{i}\n  def big#{i}; end\nend\n") } # 12/22 > 0.25
-    rebuilt = 0
-    graph.define_singleton_method(:build_store_in_child) do |*args|
-      rebuilt += 1
-      super(*args)
-    end
-    assert(graph.refresh_if_stale)
-    assert_equal(1, rebuilt, "a diff over REBUILD_DIFF_RATIO must rebuild")
+    refresh_and_await_full_rebuild(graph)
 
     # The gem closure changed, so what the store should hold is a different question: this rebuilds
     # even though the diff since the last one is a single file.
     write("Gemfile.lock", "GEM\n  specs:\n")
-    assert(graph.refresh_if_stale)
-    assert_equal(2, rebuilt, "a lockfile change must rebuild (the gem closure changed)")
+    refresh_and_await_full_rebuild(graph)
   end
 
   # Each round edits two files — well under REBUILD_DIFF_RATIO — but a surgical apply leaves them in
@@ -75,23 +69,22 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
   # branch switches converges on holding the whole index in memory (~12 MB per 1,000 files).
   def test_enough_surgical_edits_trigger_a_rebuild
     graph = booted_graph
-    rebuilt = false
-    graph.define_singleton_method(:build_store_in_child) do |*args|
-      rebuilt = true
-      super(*args)
-    end
-
     rounds = 0
-    until rebuilt
+    loop do
       rounds += 1
       refute(rounds > 11, "no rebuild in #{rounds} rounds: the overlay ceiling never fires")
 
       write("c#{rounds * 2}.rb", "class C#{rounds * 2}\n  def r#{rounds}; end\nend\n")
       write("c#{rounds * 2 + 1}.rb", "class C#{rounds * 2 + 1}\n  def r#{rounds}; end\nend\n")
-      graph.refresh_if_stale
+      moved = graph.refresh_if_stale
+      break if Gem.win_platform? ? graph.send(:store_fresh?, graph.send(:store_cache_path)) : !moved
     end
 
     assert_equal(3, rounds, "25% of 22 files is 5, so the round that applies the 6th file rebuilds")
+    unless Gem.win_platform?
+      await_rebuild(graph)
+      assert(graph.refresh_if_stale)
+    end
   end
 
   def test_store_signature_is_unchanged_by_the_scan_refactor
@@ -142,6 +135,22 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     graph = Rubydex::Graph.configure_for_workspace(@ws)
     graph.index_workspace
     graph
+  end
+
+  def refresh_and_await_full_rebuild(graph)
+    moved = graph.refresh_if_stale
+    if Gem.win_platform?
+      assert(moved, "Windows builds synchronously")
+    else
+      refute(moved, "the old snapshot stays available during the rebuild")
+      await_rebuild(graph)
+      assert(graph.refresh_if_stale, "the session reattaches after the rebuild")
+    end
+    assert(graph.send(:store_fresh?, graph.send(:store_cache_path)), "the store was rebuilt")
+  end
+
+  def await_rebuild(graph)
+    Timeout.timeout(45) { sleep(0.02) until graph.send(:store_fresh?, graph.send(:store_cache_path)) }
   end
 
   def refute_rebuild(graph, &block)

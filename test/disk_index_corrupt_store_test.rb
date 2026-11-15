@@ -5,6 +5,7 @@
 require "tmpdir"
 require "fileutils"
 require "test_helper"
+require "rubydex/mcp_server"
 
 # A store that reports read failures must not keep answering queries with holes: the graph reports
 # the failure, and the Ruby layer quarantines the store and indexes in memory instead.
@@ -45,6 +46,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     # build_store writes the file but does not create the cache directory; index_workspace does.
     FileUtils.mkdir_p(File.dirname(cache))
     memory.build_store(cache)
+    File.write("#{cache}.hash", graph.send(:store_signature))
     [graph, cache]
   end
 
@@ -70,6 +72,39 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     graph.resolve # what MCPServer#spawn_indexer does after index_workspace
     refute_nil(graph["LateToAdd"], "the fallback must index in memory, not keep serving the store")
     refute_nil(graph["Klass0"], "the session must keep working after quarantining the store")
+  end
+
+  def test_mcp_retries_a_read_that_detects_store_corruption
+    [false, true].each do |raise_on_read|
+      graph, cache = write_store("foo.rb" => "class Foo; end\n")
+      graph.index_workspace
+      read_failed = false
+      graph.define_singleton_method(:search) do |query, &block|
+        unless read_failed
+          read_failed = true
+          raise "damaged record" if raise_on_read
+
+          next [].to_enum
+        end
+        super(query, &block)
+      end
+      graph.define_singleton_method(:store_errors) { read_failed ? 1 : 0 }
+      server = Rubydex::MCPServer::Server.new(root_path: @tmp)
+      server.define_singleton_method(:graph_or_error) { graph }
+
+      response = server.handle(
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "search_declarations", arguments: { query: "Foo", match_mode: "exact" } },
+      )
+      assert(response.key?(:result), "a detected read failure must retry, not return a tool error")
+      result = response.fetch(:result)
+      payload = JSON.parse(result.fetch(:content).fetch(0).fetch(:text))
+
+      assert_includes(payload.fetch("results").map { |entry| entry.fetch("name") }, "Foo")
+      assert(File.exist?("#{cache}.corrupt"), "the failed store is quarantined before retrying")
+    end
   end
 
   def test_a_healthy_store_is_read_without_quarantine

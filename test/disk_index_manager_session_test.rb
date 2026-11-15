@@ -6,6 +6,7 @@ require "test_helper"
 require "tmpdir"
 require "fileutils"
 require "json"
+require "timeout"
 
 # A workspace that opts into `[disk_index] manager` registers itself with the machine-wide
 # manager when it indexes, so the manager can keep the store fresh between sessions.
@@ -66,6 +67,21 @@ class DiskIndexManagerSessionTest < Minitest::Test
         sessions.select { |session| session["workspace"] == dir },
         "no opt-in means no session registered",
       )
+    end
+  end
+
+  def test_the_manager_indexer_waits_for_its_rebuild_to_publish
+    with_workspace("[disk_index]\nenabled = true\n") do |graph, dir|
+      store = graph.send(:store_cache_path)
+      previous = File.read("#{store}.hash")
+      File.write(File.join(dir, "Gemfile.lock"), "new dependency set\n")
+
+      begin
+        assert(run_index_session(dir, store), "the indexer must succeed")
+        refute_equal(previous, File.read("#{store}.hash"), "the store must be published before the indexer exits")
+      ensure
+        Timeout.timeout(45) { sleep(0.02) while Dir.exist?("#{store}.rebuild") }
+      end
     end
   end
 
