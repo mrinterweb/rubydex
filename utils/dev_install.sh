@@ -11,10 +11,16 @@
 # reinstall: a path gem loads this checkout's `lib/` directly, so the only artifact that has to be
 # rebuilt is the extension.
 #
+# The extension is built in release mode by default. A debug build of this checkout comes out of
+# `rake compile`, and it makes the disk index ~30x slower (a 2s store rebuild becomes 68s, a 90ms
+# edit becomes 330ms), which is easy to mistake for a performance regression. `--fast` keeps the
+# debug build for iterating on Rust, where the compile time matters more than the runtime.
+#
 # Environment overrides:
 #   RUBYDEX_BRANCH=other-branch     branch to check out and pull (default: current if it tracks one)
 #   RUBYDEX_SKIP_PULL=1             build what is checked out, without touching the network
 #   RUBYDEX_NO_REDB_STORE=1         compile without the disk-index/redb layer
+#   RUBYDEX_FAST_BUILD=1            same as --fast: build the extension in debug mode
 #
 set -euo pipefail
 
@@ -45,20 +51,34 @@ fi
 # 2. Dependencies of the checkout itself (no-op unless its Gemfile.lock moved)
 bundle install --quiet
 
-# 3. Native extension + index manager. Incremental: cargo and rake-compiler skip unchanged work, so a
-# pull that touched only Ruby files finishes in about a second. Quiet on success, loud on failure.
-if ! build_log="$(bundle exec rake compile 2>&1)"; then
+# 3. Native extension + index manager. Quiet on success, loud on failure.
+fast=0
+for arg in "$@"; do
+  [ "$arg" = "--fast" ] && fast=1
+done
+[ -n "${RUBYDEX_FAST_BUILD:-}" ] && fast=1
+
+if [ "$fast" = "1" ]; then
+  profile=debug
+  task=compile
+else
+  profile=release
+  task=compile_release
+fi
+
+if ! build_log="$(bundle exec rake "$task" 2>&1)"; then
   printf '%s\n' "$build_log" >&2
   exit 1
 fi
 
 # 4. Report what the project will actually load through the path gem
-bundle exec ruby -e '
+RUBYDEX_PROFILE="$profile" bundle exec ruby -e '
   require "rubydex"
   version = Gem.loaded_specs["rubydex"]
   source = $LOADED_FEATURES.grep(%r{/rubydex/version\.rb\z}).first
   puts "rubydex  #{Rubydex::VERSION}#{" (path gem #{version.full_gem_path})" if version&.full_gem_path}"
   puts "loading  #{source}"
+  puts "profile  #{ENV.fetch("RUBYDEX_PROFILE", "release")}"
   puts "manager  #{File.exist?(File.join(__dir__, "lib/rubydex/rubydex-index-manager")) ? "built" : "missing (background refresh off; sessions still work)"}"
 '
 
