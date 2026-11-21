@@ -27,6 +27,7 @@ use std::collections::{HashSet, VecDeque};
 use crate::model::declaration::Declaration;
 use crate::model::definitions::{Definition, Mixin};
 use crate::model::graph::Graph;
+use crate::model::identity_maps::IdentityHashMap;
 use crate::model::ids::{ConstantReferenceId, DeclarationId, DefinitionId, UriId};
 
 use cypher_parser::{CypherValue, GraphProvider};
@@ -421,44 +422,27 @@ impl GraphProvider for Graph {
     }
 }
 
-/// All document ids the graph can see: in-memory map ∪ disk store. Overlay entries shadow store
-/// entries; emitting both would duplicate every live-edited or materialized node.
+/// All ids of one node kind the graph can see: in-memory map ∪ disk store. Overlay entries shadow
+/// store entries; emitting both would duplicate every live-edited or materialized node.
+fn merge_ids<K: Copy + std::hash::Hash + Eq, V>(overlay: &IdentityHashMap<K, V>, store_ids: Vec<K>) -> Vec<K> {
+    let mut ids = overlay.keys().copied().collect::<Vec<_>>();
+    ids.extend(store_ids.into_iter().filter(|id| !overlay.contains_key(id)));
+    ids
+}
+
+/// All document ids the graph can see. See [`merge_ids`].
 fn document_node_ids(graph: &Graph) -> Vec<UriId> {
-    let overlay = graph.documents();
-    let mut ids = overlay.keys().copied().collect::<Vec<_>>();
-    ids.extend(
-        graph
-            .store_document_ids()
-            .into_iter()
-            .filter(|id| !overlay.contains_key(id)),
-    );
-    ids
+    merge_ids(graph.documents(), graph.store_document_ids())
 }
 
-/// All definition ids the graph can see: in-memory map ∪ disk store. See [`document_node_ids`].
+/// All definition ids the graph can see. See [`merge_ids`].
 fn definition_node_ids(graph: &Graph) -> Vec<DefinitionId> {
-    let overlay = graph.definitions();
-    let mut ids = overlay.keys().copied().collect::<Vec<_>>();
-    ids.extend(
-        graph
-            .store_definition_ids()
-            .into_iter()
-            .filter(|id| !overlay.contains_key(id)),
-    );
-    ids
+    merge_ids(graph.definitions(), graph.store_definition_ids())
 }
 
-/// All declaration ids the graph can see: in-memory map ∪ disk store. See [`document_node_ids`].
+/// All declaration ids the graph can see. See [`merge_ids`].
 fn declaration_node_ids(graph: &Graph) -> Vec<DeclarationId> {
-    let overlay = graph.declarations();
-    let mut ids = overlay.keys().copied().collect::<Vec<_>>();
-    ids.extend(
-        graph
-            .store_declaration_ids()
-            .into_iter()
-            .filter(|id| !overlay.contains_key(id)),
-    );
-    ids
+    merge_ids(graph.declarations(), graph.store_declaration_ids())
 }
 
 /// Returns all nodes matching the given labels. An empty slice matches every node; otherwise a node

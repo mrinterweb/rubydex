@@ -872,13 +872,7 @@ impl Graph {
     /// node (e.g. recording a workspace class as a descendant of a gem class).
     pub fn declaration_mut(&mut self, id: DeclarationId) -> Option<&mut Declaration> {
         #[cfg(feature = "redb-store")]
-        if !self.declarations.contains_key(&id)
-            && !self.is_tombstoned(TombstoneKind::Declaration, id.get())
-            && let Some(store) = &self.store
-            && let Some(declaration) = read_store(store, &self.store_errors, |store| store.get_declaration(id))
-        {
-            self.declarations.insert(id, declaration);
-        }
+        self.materialize_declaration(id);
         self.declarations.get_mut(&id)
     }
 

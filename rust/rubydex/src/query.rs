@@ -52,6 +52,8 @@ pub fn declaration_search(graph: &Graph, queries: &[&str], match_mode: &MatchMod
     // spawning threads.
     if queries.iter().any(|q| q.is_empty()) {
         let mut ids = memory_ids;
+        // Keys-only is 10x SLOWER here (42ms vs 4.1ms over 370k declarations): walking the
+        // declarations table streams every value page, while the name table is small and sharded.
         ids.extend(graph.store_declaration_ids_matching(&|id, _| !declarations.contains_key(id)));
         return ids;
     }

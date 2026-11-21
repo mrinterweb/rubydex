@@ -540,8 +540,13 @@ impl RedbStore {
 
     /// Streams the whole `SEARCH_NAMES` table — see [`Self::matching_ids`].
     ///
+    /// Test-only: production search always shards the keyspace
+    /// ([`Self::declaration_ids_matching_parallel`]); the single pass stays as the reference the
+    /// parallel scan is checked against.
+    ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
+    #[cfg(test)]
     pub fn declaration_ids_matching(
         &self,
         predicate: &dyn Fn(&DeclarationId, &str) -> bool,
@@ -586,9 +591,9 @@ impl RedbStore {
                 .map(|handle| handle.join().expect("search shard panicked"))
                 .collect::<Result<Vec<_>, _>>()
         });
-        let mut ids = results?.concat();
-        ids.sort_unstable();
-        Ok(ids)
+        // Each shard walks an ascending, disjoint key range and the shards are joined in order, so
+        // the concatenation is already strictly ascending: re-sorting it was a wasted full pass.
+        Ok(results?.concat())
     }
 
     /// Every key of `table`, as ids. Enumeration needs the ids only and throws the values away, so
@@ -944,6 +949,10 @@ mod tests {
                 serial.len(),
                 parallel.len(),
                 "a shard boundary must not list a node twice"
+            );
+            assert!(
+                parallel.windows(2).all(|pair| pair[0] < pair[1]),
+                "shards cover ascending disjoint key ranges, so the merge is already sorted (query {query:?})"
             );
             let serial: BTreeSet<_> = serial.into_iter().map(|id| id.get()).collect();
             let parallel: BTreeSet<_> = parallel.into_iter().map(|id| id.get()).collect();
