@@ -389,6 +389,75 @@ impl RedbStore {
         self.get_node(DECLARATIONS, "declarations", id.get())
     }
 
+    /// Streams every declaration node through `visit` in a single read transaction.
+    ///
+    /// Whole-table consumers (label scans, dead-code analysis, the FFI iterators) fetch their
+    /// nodes one id at a time through [`Self::get_declaration`], which costs one read transaction
+    /// per node.
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction or table iteration fails, or if a node's bytes do
+    /// not decode.
+    pub fn for_each_declaration(
+        &self,
+        visit: &mut dyn FnMut(DeclarationId, Declaration),
+    ) -> Result<(), StoreError> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(DECLARATIONS)?;
+        for entry in table.range(..=u64::MAX)? {
+            let (key, value) = entry?;
+            let id = key.value();
+            let declaration = postcard::from_bytes::<Declaration>(value.value()).map_err(|source| {
+                StoreError::Corrupt {
+                    table: "declarations",
+                    id,
+                    source,
+                }
+            })?;
+            visit(DeclarationId::new(id), declaration);
+        }
+        Ok(())
+    }
+
+    /// Streams every constant reference together with its name, joining `NAMES` in the same read
+    /// transaction so a whole-table consumer does not pay one transaction per reference.
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction or table iteration fails, or if a node's bytes do
+    /// not decode.
+    pub fn for_each_constant_reference_with_name(
+        &self,
+        visit: &mut dyn FnMut(ConstantReferenceId, ConstantReference, Option<NameRef>),
+    ) -> Result<(), StoreError> {
+        let read_txn = self.begin_read()?;
+        let references = read_txn.open_table(CONSTANT_REFERENCES)?;
+        let names = read_txn.open_table(NAMES)?;
+        for entry in references.range(..=u64::MAX)? {
+            let (key, value) = entry?;
+            let id = key.value();
+            let reference = postcard::from_bytes::<ConstantReference>(value.value()).map_err(|source| {
+                StoreError::Corrupt {
+                    table: "constant_references",
+                    id,
+                    source,
+                }
+            })?;
+            let name_id = reference.name_id().get();
+            let name = match names.get(name_id)? {
+                Some(guard) => Some(postcard::from_bytes::<NameRef>(guard.value()).map_err(|source| {
+                    StoreError::Corrupt {
+                        table: "names",
+                        id: name_id,
+                        source,
+                    }
+                })?),
+                None => None,
+            };
+            visit(ConstantReferenceId::new(id), reference, name);
+        }
+        Ok(())
+    }
+
     /// Reads all `(declaration_id, FQN name)` pairs for name-based search.
     ///
     /// Test-only: production search streams the table ([`Self::declaration_ids_matching`]) and node
@@ -867,6 +936,140 @@ mod tests {
             let parallel: BTreeSet<_> = parallel.into_iter().map(|id| id.get()).collect();
             assert_eq!(serial, parallel, "scans disagree for query {query:?}");
         }
+    }
+
+    #[test]
+    fn for_each_store_declaration_skips_overlay_and_tombstones() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let foo = dir.path().join("foo.rb");
+        let bar = dir.path().join("bar.rb");
+        std::fs::write(&foo, "class Foo\nend\n").expect("write foo");
+        std::fs::write(&bar, "class Bar\nend\n").expect("write bar");
+
+        let mut base = Graph::new();
+        let _ = index_files(&mut base, vec![foo, bar.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut base).resolve();
+        let store_path = dir.path().join("index.redb");
+        drop(RedbStore::build(&store_path, &base).expect("build store"));
+        drop(base);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        // Overlay: Foo was pulled into memory by a live edit.
+        graph.materialize_declaration(DeclarationId::from("Foo"));
+        // Tombstone: Bar's document was deleted by a live edit.
+        let bar_uri = url::Url::from_file_path(&bar).expect("file url").to_string();
+        assert!(graph.delete_document(&bar_uri).is_some(), "Bar's document is in the store");
+
+        let mut seen = Vec::new();
+        graph.for_each_store_declaration(|id, _declaration| seen.push(id));
+
+        assert!(
+            !seen.contains(&DeclarationId::from("Foo")),
+            "an overlay declaration must not be streamed from the store"
+        );
+        assert!(
+            !seen.contains(&DeclarationId::from("Bar")),
+            "a tombstoned declaration must not be resurrected by the scan"
+        );
+        assert!(
+            !seen.is_empty(),
+            "the scan still visits the store's remaining declarations"
+        );
+    }
+
+    #[test]
+    fn for_each_store_declaration_records_a_corrupt_node_without_panicking() {
+        let graph = Graph::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        let store = RedbStore::build(&path, &graph).expect("build store");
+        let id = store
+            .declaration_ids()
+            .expect("declaration ids")
+            .into_iter()
+            .next()
+            .expect("the built-in seed has declarations");
+        drop(store);
+
+        let db = Database::builder().open(&path).expect("open for corruption");
+        let txn = db.begin_write().expect("write transaction");
+        {
+            let mut table = txn.open_table(DECLARATIONS).expect("declarations table");
+            table
+                .insert(id.get(), &[0xff_u8, 0xff, 0xff][..])
+                .expect("corrupt node");
+        }
+        txn.commit().expect("commit corruption");
+        drop(db);
+
+        let graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        graph.for_each_store_declaration(|_, _| {});
+
+        assert!(
+            graph.store_error_count() > 0,
+            "a corrupt node must be recorded, not panicked on"
+        );
+    }
+
+    #[test]
+    fn for_each_store_constant_reference_with_name_resolves_through_the_name() {
+        use crate::indexing::{IndexerBackend, index_files};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb = dir.path().join("foo.rb");
+        std::fs::write(&rb, "class Foo\nend\nFoo\n").expect("write");
+
+        let mut base = Graph::new();
+        let _ = index_files(&mut base, vec![rb.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut base).resolve();
+        let store_path = dir.path().join("index.redb");
+        drop(RedbStore::build(&store_path, &base).expect("build store"));
+        drop(base);
+
+        let foo = DeclarationId::from("Foo");
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+
+        let mut resolves_foo = false;
+        graph.for_each_store_constant_reference_with_name(|id, cref, name_ref| {
+            assert_eq!(
+                id,
+                cref.id(),
+                "the streamed id and the node's own id must agree"
+            );
+            if name_ref.is_some_and(|name_ref| {
+                matches!(name_ref, NameRef::Resolved(resolved) if **resolved.declaration_id() == foo.get())
+            }) {
+                resolves_foo = true;
+            }
+        });
+        assert!(
+            resolves_foo,
+            "the store's name table must be joined into the streamed reference"
+        );
+
+        // A live edit's deletion tombstones the file's references; the scan must not resurrect them.
+        let uri = url::Url::from_file_path(&rb).expect("file url").to_string();
+        let uri_id = UriId::from(&uri);
+        let mut before = 0;
+        graph.for_each_store_constant_reference_with_name(|_, cref, _| {
+            if cref.uri_id() == uri_id {
+                before += 1;
+            }
+        });
+        assert!(before > 0, "the store holds the file's references");
+        assert!(graph.delete_document(&uri).is_some(), "the document is in the store");
+
+        graph.for_each_store_constant_reference_with_name(|id, cref, _| {
+            assert_ne!(
+                cref.uri_id(),
+                uri_id,
+                "a tombstoned reference must not be streamed back ({id:?})"
+            );
+        });
     }
 
     #[test]

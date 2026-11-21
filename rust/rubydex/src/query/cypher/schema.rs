@@ -493,15 +493,20 @@ fn scan_label(graph: &Graph, label: &str) -> Vec<NodeRef> {
             .into_iter()
             .map(NodeRef::Definition)
             .collect(),
-        other => declaration_node_ids(graph)
-            .into_iter()
-            .filter(|id| {
-                graph
-                    .declaration(*id)
-                    .is_some_and(|declaration| declaration_matches_label(&declaration, other))
-            })
-            .map(NodeRef::Declaration)
-            .collect(),
+        other => {
+            let mut nodes: Vec<NodeRef> = graph
+                .declarations()
+                .iter()
+                .filter(|(_, declaration)| declaration_matches_label(declaration, other))
+                .map(|(id, _)| NodeRef::Declaration(*id))
+                .collect();
+            graph.for_each_store_declaration(|id, declaration| {
+                if declaration_matches_label(&declaration, other) {
+                    nodes.push(NodeRef::Declaration(id));
+                }
+            });
+            nodes
+        }
     }
 }
 

@@ -918,13 +918,23 @@ pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
     let num_threads = thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let declarations = graph.declarations();
 
-    let mut ids: Vec<DeclarationId> = declarations.keys().copied().collect();
-    ids.extend(
-        graph
-            .store_declaration_ids()
-            .into_iter()
-            .filter(|id| !declarations.contains_key(id)),
-    );
+    // A store-backed graph streams its declarations in one read transaction, so only the (small)
+    // overlay is evaluated here; the in-memory graph keeps the parallel split of the whole set.
+    if graph.is_store_backed() {
+        let mut candidates: Vec<DeclarationId> = declarations
+            .iter()
+            .filter(|(_, declaration)| is_dead_code_candidate(graph, declaration))
+            .map(|(id, _)| *id)
+            .collect();
+        graph.for_each_store_declaration(|id, declaration| {
+            if is_dead_code_candidate(graph, &declaration) {
+                candidates.push(id);
+            }
+        });
+        return candidates;
+    }
+
+    let ids: Vec<DeclarationId> = declarations.keys().copied().collect();
     let chunk_size = ids.len().div_ceil(num_threads);
 
     if chunk_size == 0 {
@@ -939,14 +949,9 @@ pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
                     chunk
                         .iter()
                         .filter(|id| {
-                            let Some(decl) = graph.declaration(**id) else {
-                                return false;
-                            };
-                            decl.constant_references()
-                                .is_some_and(<[ConstantReferenceId]>::is_empty)
-                                && !matches!(&*decl, Declaration::Namespace(Namespace::SingletonClass(_)))
-                                && !decl.has_no_definitions()
-                                && !is_built_in(graph, &decl)
+                            declarations
+                                .get(id)
+                                .is_some_and(|declaration| is_dead_code_candidate(graph, declaration))
                         })
                         .copied()
                         .collect::<Vec<_>>()
@@ -956,6 +961,16 @@ pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
 
         handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
     })
+}
+
+/// A constant nothing refers to and no definitions own is dead code.
+fn is_dead_code_candidate(graph: &Graph, declaration: &Declaration) -> bool {
+    declaration
+        .constant_references()
+        .is_some_and(<[ConstantReferenceId]>::is_empty)
+        && !matches!(declaration, Declaration::Namespace(Namespace::SingletonClass(_)))
+        && !declaration.has_no_definitions()
+        && !is_built_in(graph, declaration)
 }
 
 #[cfg(test)]

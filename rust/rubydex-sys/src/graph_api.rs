@@ -770,16 +770,9 @@ pub unsafe extern "C" fn rdx_graph_declarations_iter_new(pointer: GraphPointer) 
             .iter()
             .map(|(id, decl)| CDeclaration::from_declaration(*id, decl))
             .collect::<Vec<CDeclaration>>();
-        entries.extend(
-            graph
-                .store_declaration_ids()
-                .into_iter()
-                .filter(|id| !graph.declarations().contains_key(id))
-                .filter_map(|id| {
-                    let decl = graph.declaration(id)?;
-                    Some(CDeclaration::from_declaration(id, &decl))
-                }),
-        );
+        graph.for_each_store_declaration(|id, declaration| {
+            entries.push(CDeclaration::from_declaration(id, &declaration));
+        });
         entries.into_boxed_slice()
     });
 
@@ -859,26 +852,18 @@ pub unsafe extern "C" fn rdx_graph_constant_references_iter_new(pointer: GraphPo
             })
             .collect();
 
-        refs.extend(
-            graph
-                .store_constant_reference_ids()
-                .into_iter()
-                .filter(|id| !graph.constant_references().contains_key(id))
-                .filter_map(|id| {
-                    let cref = graph.constant_reference(id)?;
-                    let declaration_id = graph
-                        .name(*cref.name_id())
-                        .and_then(|name_ref| match &*name_ref {
-                            NameRef::Resolved(resolved) => Some(**resolved.declaration_id()),
-                            NameRef::Unresolved(_) => None,
-                        })
-                        .unwrap_or(0);
-                    Some(CConstantReference {
-                        id: *id,
-                        declaration_id,
-                    })
-                }),
-        );
+        graph.for_each_store_constant_reference_with_name(|id, _cref, name_ref| {
+            let declaration_id = name_ref
+                .and_then(|name_ref| match name_ref {
+                    NameRef::Resolved(resolved) => Some(**resolved.declaration_id()),
+                    NameRef::Unresolved(_) => None,
+                })
+                .unwrap_or(0);
+            refs.push(CConstantReference {
+                id: id.get(),
+                declaration_id,
+            });
+        });
 
         ConstantReferencesIter::new(refs.into_boxed_slice())
     })

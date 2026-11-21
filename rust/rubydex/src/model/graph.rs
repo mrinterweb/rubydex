@@ -342,6 +342,13 @@ impl Graph {
         self.store.is_some()
     }
 
+    #[cfg(not(feature = "redb-store"))]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn is_store_backed(&self) -> bool {
+        false
+    }
+
     /// Marks a node's raw ID as removed, so the layered accessors and materialize paths stop
     /// serving the store's stale copy of it.
     #[cfg(feature = "redb-store")]
@@ -561,6 +568,75 @@ impl Graph {
     #[allow(clippy::unused_self)]
     pub fn store_declaration_ids(&self) -> Vec<DeclarationId> {
         Vec::new()
+    }
+
+    /// Streams every declaration the graph can see from the store in a single read transaction,
+    /// skipping overlay declarations and tombstones so each node appears once, in its live state.
+    /// A redb failure or panic is recorded and ends the scan instead of aborting the host.
+    #[cfg(feature = "redb-store")]
+    pub fn for_each_store_declaration(&self, mut visit: impl FnMut(DeclarationId, Declaration)) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let scan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.for_each_declaration(&mut |id, declaration| {
+                if self.declarations.contains_key(&id) || self.is_tombstoned(TombstoneKind::Declaration, id.get()) {
+                    return;
+                }
+                visit(id, declaration);
+            })
+        }));
+        match scan {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => record_store_error(&self.store_errors, error),
+            Err(payload) => record_store_panic(&self.store_errors, &*payload),
+        }
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[allow(clippy::unused_self)]
+    pub fn for_each_store_declaration(&self, _visit: impl FnMut(DeclarationId, Declaration)) {}
+
+    /// Streams every constant reference the graph can see from the store, joined with its name in
+    /// the same read transaction — see [`Self::for_each_store_declaration`]. The overlay's copy of
+    /// the name wins: a live edit may have re-resolved or dropped it.
+    #[cfg(feature = "redb-store")]
+    pub fn for_each_store_constant_reference_with_name(
+        &self,
+        mut visit: impl FnMut(ConstantReferenceId, ConstantReference, Option<&NameRef>),
+    ) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let scan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.for_each_constant_reference_with_name(&mut |id, reference, stored_name| {
+                if self.constant_references.contains_key(&id)
+                    || self.is_tombstoned(TombstoneKind::ConstantReference, id.get())
+                {
+                    return;
+                }
+                let name_id = *reference.name_id();
+                let name = match self.names.get(&name_id) {
+                    Some(name_ref) => Some(name_ref),
+                    None if self.is_tombstoned(TombstoneKind::Name, name_id.get()) => None,
+                    None => stored_name.as_ref(),
+                };
+                visit(id, reference, name);
+            })
+        }));
+        match scan {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => record_store_error(&self.store_errors, error),
+            Err(payload) => record_store_panic(&self.store_errors, &*payload),
+        }
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[allow(clippy::unused_self)]
+    pub fn for_each_store_constant_reference_with_name(
+        &self,
+        _visit: impl FnMut(ConstantReferenceId, ConstantReference, Option<&NameRef>),
+    ) {
     }
 
     /// Store-backed declaration ids whose FQN passes `predicate`, streamed from the store
