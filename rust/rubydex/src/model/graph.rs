@@ -572,7 +572,11 @@ impl Graph {
 
     /// Streams every declaration the graph can see from the store in a single read transaction,
     /// skipping overlay declarations and tombstones so each node appears once, in its live state.
-    /// A redb failure or panic is recorded and ends the scan instead of aborting the host.
+    ///
+    /// A failure ends the scan rather than aborting the host, which also means one damaged node
+    /// hides the nodes after it, and a panic raised by `visit` itself is indistinguishable from one
+    /// raised inside redb. Both are recorded in `store_error_count`, and a non-zero count is what
+    /// tells the Ruby layer to fall back to the in-memory index instead of trusting the answer.
     #[cfg(feature = "redb-store")]
     pub fn for_each_store_declaration(&self, mut visit: impl FnMut(DeclarationId, Declaration)) {
         let Some(store) = &self.store else {
