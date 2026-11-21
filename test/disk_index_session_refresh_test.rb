@@ -410,6 +410,26 @@ class DiskIndexSessionRefreshTest < Minitest::Test
 
   # The lock directory is removed by the detached builder's `ensure`; a builder killed before it runs
   # one must degrade the indexer to "not fresh" instead of spinning until the lock's mtime expiry.
+  def test_waiting_for_a_lost_builder_is_bounded
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      lock = "#{cache}.rebuild"
+      Dir.mkdir(lock)
+      begin
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        refute(graph.send(:wait_for_rebuild, cache, 0.1), "a lock that outlives the timeout is abandoned")
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        assert_operator(elapsed, :>=, 0.09)
+        assert_operator(elapsed, :<, 5, "the wait is bounded, it does not run to the lock's mtime expiry")
+      ensure
+        Dir.rmdir(lock)
+      end
+
+      assert(graph.send(:wait_for_rebuild, cache, 0.1), "no lock means nothing to wait for")
+    end
+  end
+
   # The freshness check is the whole cost of a warm boot on a large workspace: the walk (~105 ms on
   # 6,441 files) and the digest over it. Re-reading the sidecar and re-signing the same scan doubled
   # that for nothing, and a sidecar is parsed data, so the second parse was pure spend.
@@ -434,8 +454,15 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       assert_equal(1, counts[:manifest], "a warm boot must parse the manifest sidecar once")
       assert_equal(1, counts[:signature], "a warm boot must sign the source scan once")
 
+      # `store_fresh?` must still reject a store whose manifest sidecar is missing, even with a matching marker.
+      cache = warm.send(:store_cache_path)
+      manifest_backup = File.read("#{cache}.files")
+      FileUtils.rm_f("#{cache}.files")
+      refute(warm.send(:store_fresh?, cache), "a matching marker without a manifest is not fresh")
+      File.write("#{cache}.files", manifest_backup)
+
       # A store whose marker is gone is attached but unproven, so it still has to refresh.
-      FileUtils.rm_f("#{warm.send(:store_cache_path)}.hash")
+      FileUtils.rm_f("#{cache}.hash")
       refreshed = false
       stale = Rubydex::Graph.configure_for_workspace(dir)
       stale.singleton_class.prepend(Module.new do
@@ -447,26 +474,6 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       stale.index_workspace
 
       assert(refreshed, "a missing marker must refresh instead of trusting the attached store")
-    end
-  end
-
-  def test_waiting_for_a_lost_builder_is_bounded
-    with_workspace do |dir, _rb|
-      graph = session(dir)
-      cache = graph.send(:store_cache_path)
-      lock = "#{cache}.rebuild"
-      Dir.mkdir(lock)
-      begin
-        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        refute(graph.send(:wait_for_rebuild, cache, 0.1), "a lock that outlives the timeout is abandoned")
-        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-        assert_operator(elapsed, :>=, 0.09)
-        assert_operator(elapsed, :<, 5, "the wait is bounded, it does not run to the lock's mtime expiry")
-      ensure
-        Dir.rmdir(lock)
-      end
-
-      assert(graph.send(:wait_for_rebuild, cache, 0.1), "no lock means nothing to wait for")
     end
   end
 end

@@ -554,7 +554,7 @@ impl RedbStore {
         self.matching_ids(0..=u64::MAX, predicate)
     }
 
-    /// Runs [`Self::declaration_ids_matching`] across `available_parallelism()` key ranges, each on its
+    /// Streams `SEARCH_NAMES` across `available_parallelism()` key ranges, each on its
     /// own read transaction and thread, and merges the results.
     ///
     /// Search walks every row of `SEARCH_NAMES` whatever the query is (`Exact` is a substring test,
@@ -1091,6 +1091,71 @@ mod tests {
                 "a tombstoned reference must not be streamed back ({id:?})"
             );
         });
+    }
+
+    #[test]
+    fn for_each_store_constant_reference_with_name_prefers_overlay_name() {
+        use crate::indexing::{IndexerBackend, LanguageId, index_files, index_source};
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ref_file = dir.path().join("ref.rb");
+        std::fs::write(&ref_file, "LaterDefined\n").expect("write");
+
+        let mut base = Graph::new();
+        let _ = index_files(&mut base, vec![ref_file.clone()], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut base).resolve();
+        let store_path = dir.path().join("index.redb");
+        drop(RedbStore::build(&store_path, &base).expect("build store"));
+        drop(base);
+
+        let ref_uri_id = UriId::from(&url::Url::from_file_path(&ref_file).expect("url").to_string());
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+
+        // Before the live edit, the store holds an unresolved name for `LaterDefined`.
+        let mut saw_unresolved = false;
+        graph.for_each_store_constant_reference_with_name(|_, cref, name_ref| {
+            if cref.uri_id() == ref_uri_id {
+                assert!(
+                    matches!(name_ref, Some(NameRef::Unresolved(_))),
+                    "store copy should start unresolved, got {name_ref:?}"
+                );
+                saw_unresolved = true;
+            }
+        });
+        assert!(saw_unresolved, "the store holds the reference from ref.rb");
+
+        // A live edit adds `class LaterDefined; end` in another file: the reference stays in the
+        // store, while its `NameRef` resolves in the overlay `graph.names`.
+        let def_uri = url::Url::from_file_path(dir.path().join("def.rb"))
+            .expect("url")
+            .to_string();
+        index_source(
+            &mut graph,
+            def_uri.into(),
+            "class LaterDefined; end\n",
+            &LanguageId::Ruby,
+        );
+        Resolver::new(&mut graph).resolve();
+
+        let target = DeclarationId::from("LaterDefined");
+        let mut saw_resolved = false;
+        graph.for_each_store_constant_reference_with_name(|_, cref, name_ref| {
+            if cref.uri_id() == ref_uri_id {
+                assert!(
+                    matches!(
+                        name_ref,
+                        Some(NameRef::Resolved(resolved)) if **resolved.declaration_id() == target.get()
+                    ),
+                    "overlay resolution must win over the stale store name, got {name_ref:?}"
+                );
+                saw_resolved = true;
+            }
+        });
+        assert!(
+            saw_resolved,
+            "the store reference must still be streamed with its overlay name"
+        );
     }
 
     #[test]

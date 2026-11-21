@@ -107,7 +107,8 @@ module Rubydex
         # session would publish, and `adopt_manifest` already parsed the sidecar that
         # `store_published?` would parse again.
         expected_marker = store_signature
-        if store_fresh?(cache, expected_marker)
+        marker = "#{cache}.hash"
+        if File.exist?(marker) && File.read(marker) == expected_marker
           # What this session is serving: the store's content plus the commit it read it at. HEAD
           # belongs here and deliberately not in `store_signature` — a commit rewrites no files, so
           # the shared store is still exactly right and only this session has to notice, while a
@@ -706,13 +707,10 @@ module Rubydex
       digest.hexdigest
     end
 
-    # Whether `cache` holds the store built from `expected_marker` (the current source signature).
-    # The marker is published last, after the store and its manifest sidecar, so a matching marker
-    # implies both are there — which is why this check does not parse the manifest to re-prove it.
-    #: (String, ?String) -> bool
-    def store_fresh?(cache, expected_marker = store_signature)
+    #: (String) -> bool
+    def store_fresh?(cache)
       marker = "#{cache}.hash"
-      File.exist?(marker) && File.read(marker) == expected_marker
+      store_published?(marker, store_signature, cache)
     end
 
     # Whether `cache` holds the store this session asked for: the marker says it was built from this

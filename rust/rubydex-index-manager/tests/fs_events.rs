@@ -45,8 +45,21 @@ fn take_ready_batch_does_not_block_and_waits_out_the_debounce() {
         "a burst inside the debounce window is not ready"
     );
 
-    std::thread::sleep(Duration::from_millis(250));
-    assert_eq!(source.take_ready_batch(), vec![file], "the settled burst is the batch");
+    // Poll until the OS delivers the event and the debounce window elapses (macOS FSEvents and
+    // busy CI runners can take well over 50ms just to deliver the write, and may report parent
+    // directory paths alongside the file).
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let batch = loop {
+        let ready = source.take_ready_batch();
+        if !ready.is_empty() || Instant::now() >= deadline {
+            break ready;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        batch.contains(&file),
+        "the settled burst must contain {file:?}, got {batch:?}"
+    );
     assert!(
         source.take_ready_batch().is_empty(),
         "a drained batch is not served twice"

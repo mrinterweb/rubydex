@@ -11,7 +11,7 @@ use serde_json::to_string;
 
 use std::path::PathBuf;
 use std::process::exit;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rubydex_index_manager::watches::Watch;
 use rubydex_index_manager::watches::groups;
@@ -70,14 +70,20 @@ fn main() {
 
         let debounce = Duration::from_millis(args.debounce_ms.into());
         let mut watches: Vec<Watch> = Vec::<Watch>::new();
+        let mut last_sync: Option<Instant> = None;
 
         loop {
-            let sessions = rubydex_index_manager::registry::live_sessions(&args.registry);
-            if sessions.is_empty() {
-                exit(0);
-            }
+            // Re-scan the registry on the debounce cadence instead of every 20ms idle tick, so an
+            // idle daemon does not open, flock and parse every session file 50 times a second.
+            if last_sync.is_none_or(|at| at.elapsed() >= debounce) {
+                let sessions = rubydex_index_manager::registry::live_sessions(&args.registry);
+                if sessions.is_empty() {
+                    exit(0);
+                }
 
-            sync(&mut watches, groups(&sessions), debounce);
+                sync(&mut watches, groups(&sessions), debounce);
+                last_sync = Some(Instant::now());
+            }
 
             // One pass drains every workspace without blocking, and the pass sleeps once when
             // nothing happened. Waiting on each workspace's debounce in turn made one pass cost N

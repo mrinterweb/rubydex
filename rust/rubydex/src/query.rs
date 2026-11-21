@@ -901,8 +901,7 @@ pub fn follow_method_alias(graph: &Graph, alias_id: DefinitionId) -> Result<Decl
 fn is_built_in(graph: &Graph, declaration: &Declaration) -> bool {
     declaration.definitions().iter().any(|definition_id| {
         graph
-            .definitions()
-            .get(definition_id)
+            .definition(*definition_id)
             .is_some_and(|definition| definition.uri_id() == &*BUILT_IN_URI_ID)
     })
 }
@@ -4256,5 +4255,39 @@ mod tests {
         context.resolve();
 
         assert_dead_code_candidates!(context, ["Unused"]);
+    }
+
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn dead_code_candidates_works_on_a_store_backed_graph() {
+        use crate::indexing::{IndexerBackend, LanguageId, index_files, index_source};
+        use crate::model::store::RedbStore;
+        use crate::resolution::Resolver;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rb = dir.path().join("app.rb");
+        std::fs::write(&rb, "class Used; end\nclass Unused; end\nUsed\n").expect("write");
+
+        let mut base = Graph::new();
+        let _ = index_files(&mut base, vec![rb], IndexerBackend::RubyIndexer);
+        Resolver::new(&mut base).resolve();
+        let store_path = dir.path().join("index.redb");
+        drop(RedbStore::build(&store_path, &base).expect("build store"));
+        drop(base);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        let extra = url::Url::from_file_path(dir.path().join("live.rb"))
+            .expect("url")
+            .to_string();
+        index_source(&mut graph, extra.into(), "class LiveUnused; end\n", &LanguageId::Ruby);
+        Resolver::new(&mut graph).resolve();
+
+        let mut names: Vec<String> = dead_code_candidates(&graph)
+            .into_iter()
+            .filter_map(|id| graph.declaration(id).map(|decl| decl.name().to_string()))
+            .collect();
+        names.sort();
+
+        assert_eq!(names, vec!["LiveUnused".to_string(), "Unused".to_string()]);
     }
 }
