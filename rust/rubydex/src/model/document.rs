@@ -28,6 +28,30 @@ pub struct Document {
 fn empty_line_index() -> LineIndex {
     LineIndex::new("")
 }
+
+// shortcut: per-thread, unbounded memo of rebuilt LineIndexes keyed by document URI and content
+// hash. Hover and Cypher queries that resolve many locations in the same store-loaded document
+// would otherwise re-read and re-index the file on every call; add an LRU bound if a long-lived
+// session touching many files makes memory growth matter.
+#[cfg(feature = "redb-store")]
+thread_local! {
+    static REBUILT_LINE_INDEXES: std::cell::RefCell<
+        std::collections::HashMap<(String, u64), LineIndex>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(feature = "redb-store")]
+fn rebuilt_line_index(document: &Document) -> Option<LineIndex> {
+    let key = (document.uri().to_string(), document.content_hash());
+    if let Some(index) = REBUILT_LINE_INDEXES.with(|cache| cache.borrow().get(&key).cloned()) {
+        return Some(index);
+    }
+    let path = document.file_path()?;
+    let source = std::fs::read_to_string(path).ok()?;
+    let index = LineIndex::new(&source);
+    REBUILT_LINE_INDEXES.with(|cache| cache.borrow_mut().insert(key, index.clone()));
+    Some(index)
+}
 assert_mem_size!(Document, 176);
 
 impl Document {
@@ -70,10 +94,9 @@ impl Document {
     pub fn line_index_for_positions(&self) -> Cow<'_, LineIndex> {
         #[cfg(feature = "redb-store")]
         if u32::from(self.line_index.len()) == 0
-            && let Some(path) = self.file_path()
-            && let Ok(source) = std::fs::read_to_string(path)
+            && let Some(index) = rebuilt_line_index(self)
         {
-            return Cow::Owned(LineIndex::new(&source));
+            return Cow::Owned(index);
         }
         Cow::Borrowed(&self.line_index)
     }
@@ -315,6 +338,37 @@ mod tests {
         assert_eq!(
             Some(("space foo/bar".to_string(), 0)),
             document.require_path(&load_paths)
+        );
+    }
+
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn line_index_for_positions_caches_per_document_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.rb");
+        let uri = Url::from_file_path(&path).expect("file url").to_string();
+
+        std::fs::write(&path, "class A\nend\n").expect("write");
+        let mut first = Document::new(uri.clone().into_boxed_str(), "class A\nend\n");
+        first.line_index = empty_line_index();
+        assert_eq!(first.line_index_for_positions().line_col(0.into()).line, 0);
+
+        // Removing the file after the first lookup proves the second call hits the memo instead of
+        // re-reading disk on every location lookup in the same document version.
+        std::fs::remove_file(&path).expect("remove");
+        assert_eq!(
+            first.line_index_for_positions().line_col(8.into()).line,
+            1,
+            "repeated lookups for the same version must hit the memo"
+        );
+
+        std::fs::write(&path, "\n\n\nclass A\nend\n").expect("rewrite");
+        let mut second = Document::new(uri.into_boxed_str(), "\n\n\nclass A\nend\n");
+        second.line_index = empty_line_index();
+        assert_eq!(
+            second.line_index_for_positions().line_col(3.into()).line,
+            3,
+            "a new content hash must not reuse the index from the previous version"
         );
     }
 }

@@ -50,15 +50,26 @@ class DiskIndexCacheLocationTest < Minitest::Test
     end
   end
 
-  def test_an_absolute_location_inside_the_cache_root_is_used_as_written
+  def test_an_absolute_location_inside_the_workspace_cache_dir_is_used_as_written
     with_workspace do |graph, dir|
-      # The platform cache root is this machine's own directory, so a store there is not shared with
-      # anything the workspace controls.
-      location = File.join(graph.send(:platform_cache_root), "rubydex-indexes")
+      location = File.join(graph.send(:platform_store_dir), "custom")
       File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"#{location}\"\n")
       graph = Rubydex::Graph.configure_for_workspace(dir)
 
       assert_equal(File.join(location, "index.redb"), graph.send(:store_cache_path))
+    end
+  end
+
+  def test_an_absolute_location_in_another_projects_cache_dir_is_ignored
+    with_workspace do |graph, dir|
+      other_project = File.join(graph.send(:platform_cache_root), "rubydex", "other-project-00000000")
+      File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"#{other_project}\"\n")
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+
+      refute(
+        graph.send(:store_cache_path).start_with?(other_project),
+        "a committed config must not target another project's store under the shared cache root",
+      )
     end
   end
 

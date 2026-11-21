@@ -37,7 +37,7 @@ Commit a `rubydex.toml` with a `[disk_index]` section:
 [disk_index]
 enabled = true          # keep the bulk index in a redb store instead of the heap
 location = "tmp"        # "tmp" (the workspace's tmp/), "global" (the platform cache), or an absolute dir
-                        # inside the workspace or the platform cache root
+                        # inside the workspace or this workspace's own cache directory
 manager = true          # let the machine-wide background manager keep the store fresh
 ```
 
@@ -55,10 +55,11 @@ a different workspace), then the platform cache. A store kept outside the worksp
 writes a store inside your repo it adds the directory to `.git/info/exclude`, so it cannot be
 `git add -A`'d by accident — and it is never something you should commit.
 
-An absolute `location` is honored only inside the workspace or the platform cache root. The config is
-workspace-controlled, and a store directory anywhere else is a directory one project's session would
-write and delete in on behalf of another project — so a path outside both roots is ignored with a
-warning and the default is used instead.
+An absolute `location` is honored only inside the workspace or this workspace's own cache directory.
+The config is workspace-controlled, and a store directory anywhere else (including another project's
+cache entry) is a directory one project's session would write and delete in on behalf of another —
+so a path outside both roots is ignored with a warning and the default is used instead. Use the
+`RUBYDEX_CACHE_DIR` environment variable when you want an arbitrary machine-local directory.
 
 ## What lands on disk
 
@@ -113,8 +114,8 @@ so a session that looks mid-build sees the previous store, never a half-written 
 repository you open can ship all three. Nothing in them is executed: the manifest is JSON, parsed and
 validated field by field (an older release's Marshal sidecar fails that parse and counts as absent),
 and a store without a readable manifest has no provenance — it is not served at all. Such a session
-indexes in memory instead, exactly as it does for a store that reported read errors. Rebuilding is
-left to the next boot, when a fresh marker is written by a build rubydex ran itself.
+indexes in memory instead, exactly as it does for a store that reported read errors, and launches a
+background rebuild so the next boot gets a fresh store with a valid JSON manifest.
 
 ## What spawns what
 

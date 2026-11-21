@@ -109,6 +109,32 @@ disk index's background manager is simply unavailable — sessions warn
 (`rubydex: index manager unavailable …`) and keep working. A `path:` install reads the binary
 straight out of the checkout, so `rake compile` there is enough.
 
+### Global install without editing every project Gemfile?
+
+The per-project `path:` line in 1b is only there to get this checkout onto the `ruby-lsp` server's
+load path: `ruby-lsp` discovers add-ons via `Gem.find_files("ruby_lsp/**/addon.rb")` inside the
+server process, and its composed bundle (`.ruby-lsp/Gemfile`) otherwise resolves the published
+`rubydex` gem from RubyGems.
+
+If you want to trial this checkout across multiple projects without modifying their Gemfiles, each
+global workaround carries a trade-off (the first two were probed, not run end-to-end as a daily
+driver):
+
+- **`cmd_env = { RUBYOPT = "-I/home/sean/code/rubydex/lib" }` in Neovim.** Prepends the checkout's
+  `lib/` to `$LOAD_PATH`, so `Gem.find_files` finds the checkout's `addon.rb` first and
+  `$LOADED_FEATURES` loads `/home/sean/code/rubydex/lib/rubydex.rb`. Caveat:
+  `Gem.loaded_specs["rubydex"].full_gem_path` still points at the published gem, and the compiled
+  extension in the checkout must match the project's Ruby ABI.
+- **Shared `cmd_env = { BUNDLE_GEMFILE = "~/.ruby-lsp/Gemfile" }`.** `exe/ruby-lsp` skips composing
+  when `BUNDLE_GEMFILE` is set, so one personal Gemfile can hold `path: "/home/sean/code/rubydex"`.
+  Caveat: `Bundler.locked_gems` then comes from that personal bundle, so core Ruby LSP loses the
+  project's own gem dependencies.
+- **Installing a locally built `.gem` globally (`rake build && gem install`).** RubyGems distributes
+  a *platform* gem (`rubydex-0.4.4-x86_64-linux`, `extensions = []`) whereas `rake build` produces a
+  *source* gem (`rubydex-0.4.4`, `extensions = ["ext/rubydex/extconf.rb"]`). Because the spec names
+  differ, installing the source gem leaves the platform gem installed alongside it unless you
+  uninstall the platform gem first.
+
 ---
 
 ## Part 1d — Iterating: pull, rebuild, no version juggling
@@ -265,8 +291,8 @@ return {
 ```
 
 Without that `capabilities` block the client still attaches and indexes, but the add-on never
-registers its watcher, so **no diagnostics ever appear** — on Linux by default, on every platform
-when another plugin narrows the capabilities.
+registers its `rubydex.toml` watcher — on Linux by default, and on every platform when another
+plugin narrows capabilities.
 
 and enable it once, in `init.lua`:
 
@@ -321,10 +347,13 @@ bundle exec rdx query "MATCH (c:Class) RETURN c.name"
 ```
 
 Diagnostics are *pushed* by the add-on (`textDocument/publishDiagnostics`, `source: "Rubydex"`,
-`code:` the rule name) rather than pulled on demand, and only on a watched-file change: saving a Ruby
-file, or creating/changing `rubydex.toml`. A freshly opened, unmodified buffer shows none until
-something is saved, and the first batch arrives when `rubydex.toml` is touched (the add-on's own
-watcher) or any watched Ruby file is saved.
+`code:` the rule name) on `workspace/didChangeWatchedFiles`, rather than pulled on demand.
+`lib/ruby_lsp/rubydex/addon.rb` only registers a watcher for `rubydex.toml` (not `.rb`/`.rbs`
+files), and `ruby-lsp` itself registers no base watchers. In Neovim, that means Rubydex diagnostics
+only refresh when `rubydex.toml` is created or saved (unless another add-on or client registers a
+`.rb` watcher). Rubydex's static-analysis linter is purely output and separate from style linters
+like `standard` or `rubocop` — indexing, go-to-definition, hover, completion, and references do not
+depend on it.
 
 What this setup does **not** give you: formatting. `Rubydex::Linter` registers a formatter id, but its
 `run_formatting` is an empty stub, so `formatter = "rubydex"` produces no edits. Leave
@@ -363,6 +392,6 @@ claude mcp add --scope project rubydex -- bundle exec rdx mcp
 | Bundler cannot resolve `rubydex` | `ruby-lsp 0.27.0.beta4` requires `< 0.3.0`; this checkout is `0.4.4` | Pin `gem "ruby-lsp", "0.27.0.beta5"` |
 | Neovim shows `Error loading add-ons: Rubydex Linter: Invalid config file … unknown setting …` | `rubydex.toml` uses key names the linter does not define (e.g. `[linter] exclude = []`) | Use the documented shapes only: `[linter.rules.<RuleName>]` with `enabled`, `exclude`, `severity` |
 | `Installing Rubydex requires Cargo…` during `bundle install` | No Rust toolchain on `PATH` (or older than `1.99.1`) | `rustup update stable`, then reinstall |
-| LSP attaches but no diagnostics appear | No watched-file change has happened since boot, or the client did not accept dynamic watcher registration | Save a file in the workspace; check `:LspLog` for `rubydex-linter-file-watcher` registration |
+| LSP attaches but no Rubydex diagnostics appear | The add-on only watches `rubydex.toml`, or the client did not accept dynamic watcher registration | Touch/save `rubydex.toml` and check `:LspLog` for `rubydex-linter-file-watcher` registration (or run `bundle exec rdx lint` on the CLI) |
 | `rubydex: index manager unavailable (Errno::ENOENT …)` | The manager binary was not packaged with the install | `bundle exec rake index_manager` in the checkout (a `path:` install picks it up), or ignore it — sessions work without the manager |
 | Native extension rebuild does not pick up an `extconf.rb` change | Rake caches the configured extension | `rm -rf tmp/*/rubydex && bundle exec rake compile` |

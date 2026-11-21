@@ -19,6 +19,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     super
     skip_unless_store_feature
     @tmp = Dir.mktmpdir
+    @graphs = []
     ENV["RUBYDEX_DISK_INDEX"] = "1"
     ENV["RUBYDEX_REFRESH_TTL"] = "0" # tests edit out of band and expect the next refresh to see them
     ENV["RUBYDEX_CACHE_DIR"] = @tmp
@@ -26,6 +27,11 @@ class DiskIndexCorruptStoreTest < Minitest::Test
   end
 
   def teardown
+    # Wait for any detached rebuild spawned during the test before removing `@tmp`, so the child
+    # cannot race `remove_entry` (noisy stderr on POSIX, EACCES/ENOTEMPTY on Windows).
+    @graphs&.each do |graph|
+      graph.instance_variable_get(:@rebuild_process)&.join(30)
+    end
     ENV.delete("RUBYDEX_DISK_INDEX")
     ENV.delete("RUBYDEX_REFRESH_TTL")
     ENV.delete("RUBYDEX_CACHE_DIR")
@@ -52,6 +58,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
       "#{cache}.files",
       JSON.generate({ "lockfile" => graph.send(:lockfile_hash), "files" => graph.send(:source_scan) }),
     )
+    @graphs << graph
     [graph, cache]
   end
 

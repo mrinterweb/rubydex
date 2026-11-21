@@ -373,11 +373,11 @@ module Rubydex
       FileUtils.mkdir_p(File.dirname(lock))
       return lock if make_lock_dir(lock)
 
-      # Something other than our directory holds the lock path. A *file* there (a committed store can
-      # ship one) never expires the way an abandoned directory does — `Dir.mkdir` raises EEXIST forever
-      # and `Dir.rmdir` raises ENOTDIR — so leaving it would suppress every rebuild of that store and
-      # the committed snapshot would stay served as ground truth.
-      if File.exist?(lock) && !File.directory?(lock)
+      # Something other than our directory holds the lock path. A *file* or symlink there (a committed
+      # store can ship one — including a dangling symlink, where `File.exist?` is false but `Dir.mkdir`
+      # still raises EEXIST) never expires the way an abandoned directory does, so leaving it would
+      # suppress every rebuild of that store and the committed snapshot would stay served as ground truth.
+      if File.symlink?(lock) || (File.exist?(lock) && !File.directory?(lock))
         FileUtils.rm_f(lock)
         return lock if make_lock_dir(lock)
       end
@@ -411,7 +411,7 @@ module Rubydex
     # already propagating.
     #: (String) -> void
     def release_rebuild_lock(lock)
-      Dir.rmdir(lock) if File.directory?(lock)
+      Dir.rmdir(lock) if !File.symlink?(lock) && File.directory?(lock)
     rescue SystemCallError
       nil
     end
@@ -503,18 +503,19 @@ module Rubydex
     end
 
     # An absolute `location` from the workspace's committed config. The config is workspace-controlled,
-    # so the directory is honored only where a store cannot overwrite what the workspace does not own:
-    # inside the workspace, or inside this machine's cache root. A path anywhere else (a shared
-    # world-writable directory such as "/tmp/rubydex-indexes", which would let one project's session
-    # write or delete another's store) falls back to the default instead.
+    # so the directory is honored only where a store cannot overwrite what another workspace or app owns:
+    # inside this workspace, or inside this workspace's own cache directory (`platform_store_dir`). A
+    # path anywhere else (including a sibling project's store under `platform_cache_root` or a shared
+    # directory like `/tmp`) falls back to the default instead. Users who want an arbitrary machine-local
+    # directory can set `RUBYDEX_CACHE_DIR` in the environment.
     #: (String) -> String
     def configured_store_dir(location)
       # `Config` only accepts an absolute path here (a relative one is a config error), so expanding it
       # cannot depend on the process's working directory.
       dir = File.expand_path(location)
-      return dir if within?(dir, workspace_path) || within?(dir, platform_cache_root)
+      return dir if within?(dir, workspace_path) || within?(dir, platform_store_dir)
 
-      warn("rubydex: ignoring disk_index.location #{location.inspect}: outside the workspace and the cache root")
+      warn("rubydex: ignoring disk_index.location #{location.inspect}: outside the workspace and its cache directory")
       Dir.exist?(File.join(workspace_path, "tmp")) ? workspace_store_dir : platform_store_dir
     end
 

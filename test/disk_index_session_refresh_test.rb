@@ -382,6 +382,32 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
+  def test_a_symlink_at_the_rebuild_lock_path_does_not_suppress_rebuilds
+    skip("symlinks require elevated privileges on Windows") if Gem.win_platform?
+
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      lock = "#{cache}.rebuild"
+
+      # Dangling symlink: File.exist? is false, yet Dir.mkdir raises EEXIST.
+      File.symlink(File.join(dir, "does-not-exist"), lock)
+      claimed = graph.send(:claim_rebuild, cache)
+      assert_equal(lock, claimed, "a dangling symlink at the lock path must be cleared and claimed")
+      assert(File.directory?(lock) && !File.symlink?(lock))
+      graph.send(:release_rebuild_lock, lock)
+
+      # Symlink pointing to an existing directory: File.directory? is true, yet Dir.rmdir raises ENOTDIR.
+      target_dir = File.join(dir, "real-dir")
+      Dir.mkdir(target_dir)
+      File.symlink(target_dir, lock)
+      claimed = graph.send(:claim_rebuild, cache)
+      assert_equal(lock, claimed, "a directory symlink at the lock path must be unlinked, not waited on")
+      assert(File.directory?(lock) && !File.symlink?(lock))
+      assert(Dir.exist?(target_dir), "unlinking the symlink must not touch its target directory")
+    end
+  end
+
   # The lock directory is removed by the detached builder's `ensure`; a builder killed before it runs
   # one must degrade the indexer to "not fresh" instead of spinning until the lock's mtime expiry.
   def test_waiting_for_a_lost_builder_is_bounded
