@@ -230,10 +230,14 @@ impl RedbStore {
             // table guard before the next table is opened within the same transaction.
             macro_rules! write_map {
                 ($table:expr, $map:expr) => {{
+                    // Ascending key order: the maps iterate in hash order, and redb splits a B-tree
+                    // leaf wherever the next key lands, so random inserts thrash the page cache.
+                    let mut entries: Vec<_> = $map.iter().map(|(id, value)| (id.get(), value)).collect();
+                    entries.sort_unstable_by_key(|(key, _)| *key);
                     let mut table = write_txn.open_table($table)?;
-                    for (id, value) in $map {
+                    for (key, value) in entries {
                         let bytes = postcard::to_allocvec(value).map_err(StoreError::Encode)?;
-                        table.insert(id.get(), bytes.as_slice())?;
+                        table.insert(key, bytes.as_slice())?;
                     }
                 }};
             }
@@ -247,15 +251,27 @@ impl RedbStore {
             write_map!(DOCUMENTS, graph.documents());
             write_map!(NAME_DEPENDENTS, graph.name_dependents());
             {
+                let mut entries: Vec<_> = graph
+                    .declarations()
+                    .iter()
+                    .map(|(id, declaration)| (id.get(), declaration.name().as_bytes()))
+                    .collect();
+                entries.sort_unstable_by_key(|(key, _)| *key);
                 let mut table = write_txn.open_table(SEARCH_NAMES)?;
-                for (id, declaration) in graph.declarations() {
-                    table.insert(id.get(), declaration.name().as_bytes())?;
+                for (key, name) in entries {
+                    table.insert(key, name)?;
                 }
             }
             {
+                let mut entries: Vec<_> = graph
+                    .documents()
+                    .iter()
+                    .map(|(id, document)| (id.get(), document.uri().as_bytes()))
+                    .collect();
+                entries.sort_unstable_by_key(|(key, _)| *key);
                 let mut table = write_txn.open_table(DOCUMENT_URIS)?;
-                for (id, document) in graph.documents() {
-                    table.insert(id.get(), document.uri().as_bytes())?;
+                for (key, uri) in entries {
+                    table.insert(key, uri)?;
                 }
             }
 
