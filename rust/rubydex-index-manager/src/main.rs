@@ -79,16 +79,23 @@ fn main() {
 
             sync(&mut watches, groups(&sessions), debounce);
 
+            // One pass drains every workspace without blocking, and the pass sleeps once when
+            // nothing happened. Waiting on each workspace's debounce in turn made one pass cost N
+            // debounce windows, stalling session pruning and workspace sync behind them.
+            let mut idle = true;
             for watch in &mut watches {
-                // Non-blocking: this pass must keep pruning sessions, syncing new workspaces and
-                // draining event batches while an indexer runs.
                 watch.builder.reap();
-                let batch = watch.source.try_next_batch(debounce);
+                let batch = watch.source.take_ready_batch();
+                idle &= batch.is_empty();
                 watch.builder.record(batch.len());
                 let started = watch.builder.start(watch.manifest);
                 if started.is_some() {
+                    idle = false;
                     eprintln!("rubydex-index-manager: started {started:?}");
                 }
+            }
+            if idle {
+                std::thread::sleep(Duration::from_millis(20));
             }
         }
     }

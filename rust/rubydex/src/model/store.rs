@@ -414,22 +414,18 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the read transaction or table iteration fails, or if a node's bytes do
     /// not decode.
-    pub fn for_each_declaration(
-        &self,
-        visit: &mut dyn FnMut(DeclarationId, Declaration),
-    ) -> Result<(), StoreError> {
+    pub fn for_each_declaration(&self, visit: &mut dyn FnMut(DeclarationId, Declaration)) -> Result<(), StoreError> {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DECLARATIONS)?;
         for entry in table.range(..=u64::MAX)? {
             let (key, value) = entry?;
             let id = key.value();
-            let declaration = postcard::from_bytes::<Declaration>(value.value()).map_err(|source| {
-                StoreError::Corrupt {
+            let declaration =
+                postcard::from_bytes::<Declaration>(value.value()).map_err(|source| StoreError::Corrupt {
                     table: "declarations",
                     id,
                     source,
-                }
-            })?;
+                })?;
             visit(DeclarationId::new(id), declaration);
         }
         Ok(())
@@ -451,22 +447,23 @@ impl RedbStore {
         for entry in references.range(..=u64::MAX)? {
             let (key, value) = entry?;
             let id = key.value();
-            let reference = postcard::from_bytes::<ConstantReference>(value.value()).map_err(|source| {
-                StoreError::Corrupt {
+            let reference =
+                postcard::from_bytes::<ConstantReference>(value.value()).map_err(|source| StoreError::Corrupt {
                     table: "constant_references",
                     id,
                     source,
-                }
-            })?;
+                })?;
             let name_id = reference.name_id().get();
             let name = match names.get(name_id)? {
-                Some(guard) => Some(postcard::from_bytes::<NameRef>(guard.value()).map_err(|source| {
-                    StoreError::Corrupt {
-                        table: "names",
-                        id: name_id,
-                        source,
-                    }
-                })?),
+                Some(guard) => {
+                    Some(
+                        postcard::from_bytes::<NameRef>(guard.value()).map_err(|source| StoreError::Corrupt {
+                            table: "names",
+                            id: name_id,
+                            source,
+                        })?,
+                    )
+                }
                 None => None,
             };
             visit(ConstantReferenceId::new(id), reference, name);
@@ -977,7 +974,10 @@ mod tests {
         graph.materialize_declaration(DeclarationId::from("Foo"));
         // Tombstone: Bar's document was deleted by a live edit.
         let bar_uri = url::Url::from_file_path(&bar).expect("file url").to_string();
-        assert!(graph.delete_document(&bar_uri).is_some(), "Bar's document is in the store");
+        assert!(
+            graph.delete_document(&bar_uri).is_some(),
+            "Bar's document is in the store"
+        );
 
         let mut seen = Vec::new();
         graph.for_each_store_declaration(|id, _declaration| seen.push(id));
@@ -1051,14 +1051,10 @@ mod tests {
 
         let mut resolves_foo = false;
         graph.for_each_store_constant_reference_with_name(|id, cref, name_ref| {
-            assert_eq!(
-                id,
-                cref.id(),
-                "the streamed id and the node's own id must agree"
-            );
-            if name_ref.is_some_and(|name_ref| {
-                matches!(name_ref, NameRef::Resolved(resolved) if **resolved.declaration_id() == foo.get())
-            }) {
+            assert_eq!(id, cref.id(), "the streamed id and the node's own id must agree");
+            if name_ref.is_some_and(
+                |name_ref| matches!(name_ref, NameRef::Resolved(resolved) if **resolved.declaration_id() == foo.get()),
+            ) {
                 resolves_foo = true;
             }
         });

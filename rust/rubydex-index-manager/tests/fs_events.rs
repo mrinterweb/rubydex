@@ -4,7 +4,7 @@
 //! events into one batch.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rubydex_index_manager::fs_events::NotifySource;
 
@@ -17,6 +17,40 @@ fn batch_contains(source: &mut NotifySource, file: &Path) -> bool {
 /// A source watching `root` with no ignored directories.
 fn event_source(root: &Path, debounce_ms: u64) -> NotifySource {
     NotifySource::new(&[root.to_path_buf()], Vec::new(), Duration::from_millis(debounce_ms))
+}
+
+#[test]
+fn take_ready_batch_does_not_block_and_waits_out_the_debounce() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    let source = event_source(&root, 200);
+
+    // Idle: the manager's loop cannot afford to wait a debounce window per workspace.
+    let started = Instant::now();
+    assert!(
+        source.take_ready_batch().is_empty(),
+        "an idle source has nothing to hand out"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "an idle source must answer immediately, took {:?}",
+        started.elapsed()
+    );
+
+    let file = root.join("a.rb");
+    std::fs::write(&file, "class A; end\n").expect("write");
+    // The burst is still settling, so nothing is handed out yet.
+    assert!(
+        source.take_ready_batch().is_empty(),
+        "a burst inside the debounce window is not ready"
+    );
+
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(source.take_ready_batch(), vec![file], "the settled burst is the batch");
+    assert!(
+        source.take_ready_batch().is_empty(),
+        "a drained batch is not served twice"
+    );
 }
 
 #[test]
@@ -72,7 +106,7 @@ fn adapter_reports_a_deleted_file() {
 fn adapter_coalesces_a_burst_into_one_batch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
-    let mut source = event_source(&root, 200);
+    let source = event_source(&root, 200);
     let files = vec![root.join("a.rb"), root.join("b.rb"), root.join("c.rb")];
     for file in &files {
         std::fs::write(file, "class A; end").expect("write");
@@ -148,7 +182,7 @@ fn the_store_cache_and_git_metadata_are_ignored() {
     let root = dir.path().to_path_buf();
     let store = root.join("tmp").join("rubydex");
     std::fs::create_dir_all(store.join("nested")).expect("store dir");
-    let mut source = NotifySource::new(
+    let source = NotifySource::new(
         std::slice::from_ref(&root),
         vec![store.clone()],
         Duration::from_millis(50),

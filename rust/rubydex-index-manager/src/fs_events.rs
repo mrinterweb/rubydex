@@ -10,10 +10,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Batch shared between the watcher threads and the manager: the paths seen so far and when the
+/// last one arrived. One lock for both, because they are only ever read and written together —
+/// two mutexes meant every event and every drain took them twice.
+type Batch = Arc<Mutex<(Vec<PathBuf>, Instant)>>;
+
 /// Shared state that every watcher of one source reports into.
 struct EventCollector {
-    pending: Arc<Mutex<Vec<PathBuf>>>,
-    last_event: Arc<Mutex<Instant>>,
+    batch: Batch,
     ignored: Arc<Vec<PathBuf>>,
 }
 
@@ -28,8 +32,9 @@ impl EventHandler for EventCollector {
             if paths.is_empty() {
                 return;
             }
-            self.pending.lock().unwrap().extend(paths);
-            *self.last_event.lock().unwrap() = Instant::now();
+            let mut batch = self.batch.lock().unwrap();
+            batch.0.extend(paths);
+            batch.1 = Instant::now();
         }
     }
 }
@@ -45,8 +50,7 @@ fn is_ignored(path: &std::path::Path, ignored: &[PathBuf]) -> bool {
 /// `ReadDirectoryChangesW`, polling fallback elsewhere.
 pub struct NotifySource {
     watchers: Vec<RecommendedWatcher>,
-    pending: Arc<Mutex<Vec<PathBuf>>>,
-    last_event: Arc<Mutex<Instant>>,
+    batch: Batch,
     debounce: Duration,
     /// Roots that could not be subscribed when they were tried. A per-user inotify budget is spent
     /// for minutes at a time (editors and other tools share it), so the manager keeps these to retry
@@ -70,8 +74,7 @@ impl NotifySource {
     pub fn new(paths: &[PathBuf], ignored: Vec<PathBuf>, debounce: Duration) -> NotifySource {
         let mut source = NotifySource {
             watchers: Vec::new(),
-            pending: Arc::new(Mutex::new(Vec::<PathBuf>::new())),
-            last_event: Arc::new(Mutex::new(Instant::now())),
+            batch: Arc::new(Mutex::new((Vec::<PathBuf>::new(), Instant::now()))),
             debounce,
             unwatched: Vec::new(),
             ignored: Arc::new(ignored),
@@ -85,8 +88,7 @@ impl NotifySource {
     /// Attempts to watch one root recursively, recording it as unwatched when that fails.
     fn subscribe(&mut self, path: PathBuf) {
         let collector = EventCollector {
-            pending: Arc::clone(&self.pending),
-            last_event: Arc::clone(&self.last_event),
+            batch: Arc::clone(&self.batch),
             ignored: Arc::clone(&self.ignored),
         };
         let config = Config::default()
@@ -119,33 +121,48 @@ impl NotifySource {
         }
         self.unwatched.len()
     }
-}
 
-impl NotifySource {
-    /// Returns the next batch of changed paths, debounced: a burst of events inside the
-    /// debounce window collapses into one batch. Gives up after `timeout` and returns an
-    /// empty batch so a broken backend fails instead of hanging.
+    /// Returns the settled batch of changed paths and empties it, or an empty batch when there is
+    /// nothing to hand out yet. Never blocks: the manager drains every workspace in one pass and
+    /// sleeps once, so a per-workspace debounce wait used to make one pass cost N debounce windows.
+    ///
+    /// A burst is only ready once it has been quiet for the debounce window, which is what collapses
+    /// it into one batch.
     ///
     /// # Panics
     /// Panics if the shared batch lock is poisoned (a watcher thread panicked while holding it).
-    pub fn try_next_batch(&mut self, timeout: Duration) -> Vec<PathBuf> {
+    #[must_use]
+    pub fn take_ready_batch(&self) -> Vec<PathBuf> {
+        let mut batch = self.batch.lock().unwrap();
+        if batch.0.is_empty() || batch.1.elapsed() < self.debounce {
+            return Vec::<PathBuf>::new();
+        }
+        let mut paths = std::mem::take(&mut batch.0);
+        // Sort outside the lock: the watcher thread must never wait on this.
+        drop(batch);
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// Polls [`Self::take_ready_batch`] until a batch is ready or `timeout` elapses, so a caller that
+    /// wants to wait on one workspace keeps working (and so a broken backend fails instead of
+    /// hanging).
+    ///
+    /// # Panics
+    /// Panics if the shared batch lock is poisoned (a watcher thread panicked while holding it).
+    #[must_use]
+    pub fn try_next_batch(&self, timeout: Duration) -> Vec<PathBuf> {
         let started = Instant::now();
         loop {
-            std::thread::sleep(Duration::from_millis(20));
-            let mut guard = self.pending.lock().unwrap();
-            let last = self.last_event.lock().unwrap();
-            let quiet = last.elapsed() >= self.debounce;
-            if guard.is_empty() || !quiet {
-                if started.elapsed() >= timeout {
-                    return Vec::<PathBuf>::new();
-                }
-                continue;
+            let batch = self.take_ready_batch();
+            if !batch.is_empty() {
+                return batch;
             }
-            let mut batch = guard.clone();
-            guard.clear();
-            batch.sort();
-            batch.dedup();
-            return batch;
+            if started.elapsed() >= timeout {
+                return Vec::<PathBuf>::new();
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }
