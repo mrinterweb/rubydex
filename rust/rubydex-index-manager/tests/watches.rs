@@ -99,3 +99,24 @@ fn an_unwatched_root_is_not_retried_on_every_pass() {
         "a retry inside the interval would walk the tree again for nothing"
     );
 }
+
+/// A burst is judged against the manifest's file count, and a session re-registers with a new one
+/// when its workspace grows; keeping the boot-time count would compare every later burst to it.
+#[test]
+fn a_re_registered_session_refreshes_the_manifest_count() {
+    let store = "/ws/index.redb";
+    let mut watches: Vec<Watch> = vec![];
+    let mut first = session(store, "/ws/a");
+    first.docs = 100;
+    sync(&mut watches, groups(&[first]), debounce());
+    assert_eq!(watches[0].manifest, 100);
+
+    let mut grown = session(store, "/ws/a");
+    grown.docs = 250;
+    sync(&mut watches, groups(&[grown]), debounce());
+
+    assert_eq!(
+        watches[0].manifest, 250,
+        "the same watcher set must carry the current manifest, not the boot-time one"
+    );
+}

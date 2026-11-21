@@ -5,6 +5,7 @@
 require "tmpdir"
 require "fileutils"
 require "test_helper"
+require "timeout"
 require "rubydex/mcp_server"
 
 # A store that reports read failures must not keep answering queries with holes: the graph reports
@@ -47,6 +48,10 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     FileUtils.mkdir_p(File.dirname(cache))
     memory.build_store(cache)
     File.write("#{cache}.hash", graph.send(:store_signature))
+    File.write(
+      "#{cache}.files",
+      JSON.generate({ "lockfile" => graph.send(:lockfile_hash), "files" => graph.send(:source_scan) }),
+    )
     [graph, cache]
   end
 
@@ -119,19 +124,59 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     refute(File.exist?("#{cache}.corrupt"), "a healthy store must not be quarantined")
   end
 
-  # A store that opens successfully but has an unreadable manifest sidecar fails after `attach_store`.
-  # The rescue must detach before `index_all`, or the "fall back to in-memory" path is a no-op against
-  # the attached store.
+  # A store whose manifest sidecar is unreadable has no provenance (and no baseline for a surgical
+  # refresh), so it must not answer queries: the session falls back to an in-memory index.
   def test_a_corrupt_manifest_detaches_the_store_before_the_in_memory_fallback
     graph, cache = write_store("foo.rb" => "class Foo; end\n")
     File.write(File.join(@tmp, "late.rb"), "class LateToAdd; end\n")
     File.write("#{cache}.hash", graph.send(:store_signature))
-    File.binwrite("#{cache}.files", "not a marshal dump")
+    File.write("#{cache}.files", "{not json")
 
     graph.index_workspace
     graph.resolve
 
     refute_nil(graph["LateToAdd"], "the fallback must index in memory, not no-op on the attached store")
     refute_nil(graph["Foo"], "the session must keep working after the failed manifest")
+  end
+
+  # The sidecar lives in a directory the workspace may commit, so it is data, never code. This payload
+  # raises from `_load` the instant anything calls `Marshal.load` on it.
+  class MarshalPayload
+    class << self
+      def _load(_payload)
+        raise "Marshal.load executed the manifest sidecar"
+      end
+    end
+
+    def _dump(_level)
+      "payload"
+    end
+  end
+
+  def test_a_marshal_payload_in_the_manifest_is_never_loaded
+    graph, cache = write_store("foo.rb" => "class Foo; end\n")
+    File.write("#{cache}.hash", graph.send(:store_signature))
+    File.binwrite("#{cache}.files", Marshal.dump(MarshalPayload.new))
+
+    graph.index_workspace
+    graph.resolve
+
+    refute_nil(graph["Foo"], "a sidecar this version cannot parse is absent, not executable")
+  end
+
+  # A sidecar only a build can rewrite, so "/run the rebuild" is what makes an older release's store
+  # migrate. Without it, every boot on that workspace would fall back to memory again.
+  def test_a_sidecar_from_an_older_release_is_rewritten_by_a_background_rebuild
+    graph, cache = write_store("foo.rb" => "class Foo; end\n")
+    File.write("#{cache}.hash", graph.send(:store_signature))
+    File.binwrite("#{cache}.files", Marshal.dump({ "lockfile" => "no-lockfile", "files" => {} }))
+
+    graph.index_workspace
+
+    Timeout.timeout(120) do
+      sleep(0.05) until (manifest = File.read("#{cache}.files")).start_with?("{")
+      assert_equal(["files", "lockfile"], JSON.parse(manifest).keys.sort)
+    end
+    assert(File.exist?("#{cache}.hash"), "the rebuild republished the marker too")
   end
 end

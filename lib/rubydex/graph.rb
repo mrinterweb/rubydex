@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "json"
 require "open3"
 require "rubydex/index_manager"
 
@@ -13,6 +14,14 @@ module Rubydex
     # A rebuild lock older than this is treated as abandoned (a builder that crashed) and
     # reclaimed, so a directory can never wedge itself out of rebuilding forever.
     REBUILD_LOCK_TIMEOUT = 30 * 60
+
+    # How long the indexer waits for a claimed rebuild to finish before giving up. The lock directory is
+    # removed by the detached builder's `ensure`, so a builder killed before it runs one leaves it
+    # behind, and an unbounded wait on it would stall this indexer until the lock's mtime expiry. The
+    # ceiling has to clear a real rebuild, though: a full build of a one-file workspace measures ~9 s on
+    # an M-series laptop (mostly process start plus the store write), and a large workspace is a small
+    # multiple of that, against the ~25 s documented for a surgical refresh's fallback.
+    REBUILD_LOCK_WAIT = 2 * 60
 
     # Above this fraction of changed files a full rebuild (one child, a fresh store shared by every
     # session) is cheaper than growing each session's overlay. Measured: surgical 200
@@ -89,11 +98,27 @@ module Rubydex
       end
       return index_all(workspace_paths) if quarantine_if_untrustworthy(cache)
 
-      adopt_manifest(cache)
-      if store_fresh?(cache)
-        @session_signature = session_state(@head_sha, source_scan)
+      # The manifest is what the attached snapshot is vouched for by: it records what the store holds
+      # and is the baseline a surgical refresh diffs against. A workspace can commit the store (and its
+      # marker) without one, so an unprovenanced snapshot is never served — it gets the same answer a
+      # corrupt store gets. A stale store *with* a manifest is fine: it answers while it refreshes.
+      if adopt_manifest(cache)
+        if store_fresh?(cache)
+          @session_signature = session_state(@head_sha, source_scan)
+        else
+          refresh_if_stale
+        end
       else
-        refresh_if_stale
+        warn("rubydex: disk-backed index has no usable provenance; indexing in memory")
+        detach_store
+        index_all(workspace_paths)
+        resolve
+        # Only a build rewrites the sidecar, so leave one running: without it every boot on this
+        # workspace takes this path again (a store written by an older release, whose Marshal sidecar
+        # this version will not parse, would never migrate). The rebuild also replaces whatever
+        # snapshot was committed, which is what makes serving it unnecessary in the first place.
+        lock = claim_rebuild(cache)
+        launch_rebuild(cache, lock) if lock
       end
       register_session(cache) if index_manager_enabled?
 
@@ -134,9 +159,8 @@ module Rubydex
       return false if @session_signature == signature
 
       marker = "#{cache}.hash"
-      if File.exist?(marker) && File.read(marker) == expected_marker
+      if store_published?(marker, expected_marker, cache)
         attach_store(cache)
-        adopt_manifest(cache)
       elsif (changes = surgical_changes(scan))
         apply_changes(changes)
         @applied_files = scan
@@ -161,7 +185,7 @@ module Rubydex
             begin
               build_store_in_child(cache, scan)
             ensure
-              Dir.rmdir(lock) if File.exist?(lock)
+              release_rebuild_lock(lock)
             end
           else
             launch_rebuild(cache, lock)
@@ -169,15 +193,14 @@ module Rubydex
         end
 
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.1
-        until File.exist?(marker) && File.read(marker) == expected_marker
+        until store_published?(marker, expected_marker, cache)
           break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
 
           sleep(0.02)
         end
-        return false unless File.exist?(marker) && File.read(marker) == expected_marker
+        return false unless store_published?(marker, expected_marker, cache)
 
         attach_store(cache)
-        adopt_manifest(cache)
       end
       @session_signature = signature
       true
@@ -295,18 +318,41 @@ module Rubydex
     end
 
     # What the store at `cache` was built from: the manifest sidecar written next to the marker.
-    # A store predating manifests has no sidecar, so the first stale refresh rebuilds and writes one.
-    #: (String) -> void
+    #
+    # The sidecar sits in a directory a workspace may commit (`[disk_index] location = "tmp"`), so it is
+    # data, never code: JSON, parsed and shape-checked before a single field is used. An older release's
+    # sidecar (Marshal) or any unreadable one fails the parse and is treated as absent — which costs one
+    # rebuild and, unlike `Marshal.load`, never instantiates what the workspace put there.
+    #
+    # Returns whether a manifest was adopted: a store whose sidecar is missing or unusable has no
+    # baseline to diff against and no record of what it holds, so callers rebuild instead of serving it.
+    #: (String) -> bool
     def adopt_manifest(cache)
-      manifest = Marshal.load(File.binread("#{cache}.files"))
+      files, lockfile = read_manifest("#{cache}.files")
       # What the attached store holds, kept apart from `@applied_files` (what this session is serving)
       # so the overlay can be measured against the store it sits on.
-      @manifest_files = manifest["files"]
-      @applied_files = @manifest_files
-      @applied_lockfile = manifest["lockfile"]
-    rescue Errno::ENOENT
-      @manifest_files = nil
-      @applied_files = nil
+      @manifest_files = files
+      @applied_files = files
+      @applied_lockfile = lockfile
+      !files.nil?
+    end
+
+    # Parses a manifest sidecar, returning `[files, lockfile]`, or `[nil, nil]` when it is absent or
+    # not the shape this version writes.
+    #: (String) -> [Hash[String, String]?, String?]
+    def read_manifest(path)
+      manifest = JSON.parse(File.read(path))
+      files = manifest["files"] if manifest.is_a?(Hash)
+      return [nil, nil] unless files.is_a?(Hash) && files.all? { |rel, stamp| rel.is_a?(String) && stamp.is_a?(String) }
+
+      lockfile = manifest["lockfile"]
+      return [nil, nil] unless lockfile.nil? || lockfile.is_a?(String)
+
+      [files, lockfile]
+    rescue SystemCallError, JSON::ParserError, EncodingError
+      # Unreadable, not JSON at all, or JSON with an encoding a `String` key cannot hold: all of them
+      # mean "no usable manifest", never "raise into the editor's tool call".
+      [nil, nil]
     end
 
     #: (String cache, String lock) -> void
@@ -314,7 +360,7 @@ module Rubydex
       pid = Process.spawn(*Rubydex::IndexManager.builder_argv(workspace_path, cache), "--full", "--claimed")
       @rebuild_process = Process.detach(pid)
     rescue StandardError
-      Dir.rmdir(lock) if File.exist?(lock)
+      release_rebuild_lock(lock)
       raise
     end
 
@@ -325,24 +371,65 @@ module Rubydex
     def claim_rebuild(cache)
       lock = "#{cache}.rebuild"
       FileUtils.mkdir_p(File.dirname(lock))
-      begin
-        Dir.mkdir(lock)
-      rescue Errno::EEXIST
-        return false unless File.exist?(lock) && (Time.now - File.mtime(lock)) > REBUILD_LOCK_TIMEOUT
+      return lock if make_lock_dir(lock)
 
-        # Reclaiming is racy: a competing session may have reclaimed and re-created the lock
-        # between the check and here, in which case this session lost and someone else is
-        # building. A build legitimately slower than REBUILD_LOCK_TIMEOUT is reclaimed too, so
-        # two builders can run on one store; the publish is atomic and the marker decides which
-        # store a session reads.
-        begin
-          Dir.rmdir(lock)
-          Dir.mkdir(lock)
-        rescue Errno::ENOENT, Errno::EEXIST
-          return false
-        end
+      # Something other than our directory holds the lock path. A *file* there (a committed store can
+      # ship one) never expires the way an abandoned directory does — `Dir.mkdir` raises EEXIST forever
+      # and `Dir.rmdir` raises ENOTDIR — so leaving it would suppress every rebuild of that store and
+      # the committed snapshot would stay served as ground truth.
+      if File.exist?(lock) && !File.directory?(lock)
+        FileUtils.rm_f(lock)
+        return lock if make_lock_dir(lock)
+      end
+
+      return false unless File.directory?(lock) && (Time.now - File.mtime(lock)) > REBUILD_LOCK_TIMEOUT
+
+      # Reclaiming is racy: a competing session may have reclaimed and re-created the lock
+      # between the check and here, in which case this session lost and someone else is
+      # building. A build legitimately slower than REBUILD_LOCK_TIMEOUT is reclaimed too, so
+      # two builders can run on one store; the publish is atomic and the marker decides which
+      # store a session reads.
+      begin
+        Dir.rmdir(lock)
+        Dir.mkdir(lock)
+      rescue Errno::ENOENT, Errno::EEXIST, Errno::ENOTDIR
+        return false
       end
       lock
+    end
+
+    #: (String lock) -> bool
+    def make_lock_dir(lock)
+      Dir.mkdir(lock)
+      true
+    rescue Errno::EEXIST
+      false
+    end
+
+    # Removes a rebuild lock this process holds. Only a directory is ours, so a file left at the path
+    # is not touched; `Dir.rmdir` raises ENOTDIR on one, and that must not mask the failure that is
+    # already propagating.
+    #: (String) -> void
+    def release_rebuild_lock(lock)
+      Dir.rmdir(lock) if File.directory?(lock)
+    rescue SystemCallError
+      nil
+    end
+
+    # Waits for another session's claimed rebuild to finish, returning false when it outlived
+    # `timeout`. The wait exists so an indexer leaves a store settled; the bound exists so a builder
+    # that died without removing its lock directory (SIGKILL, OOM — the build is a child precisely to
+    # bound memory) degrades to "not fresh" instead of spinning until the lock's mtime expiry.
+    #: (String store, ?Float timeout) -> bool
+    def wait_for_rebuild(store, timeout = REBUILD_LOCK_WAIT)
+      lock = "#{store}.rebuild"
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+      while Dir.exist?(lock)
+        return false if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+        sleep(0.02)
+      end
+      true
     end
 
     # Returns all workspace paths that should be indexed
@@ -411,8 +498,33 @@ module Rubydex
       when "tmp" then workspace_store_dir
       when "global" then platform_store_dir
       when "" then Dir.exist?(File.join(workspace_path, "tmp")) ? workspace_store_dir : platform_store_dir
-      else disk_index_location
+      else configured_store_dir(disk_index_location)
       end
+    end
+
+    # An absolute `location` from the workspace's committed config. The config is workspace-controlled,
+    # so the directory is honored only where a store cannot overwrite what the workspace does not own:
+    # inside the workspace, or inside this machine's cache root. A path anywhere else (a shared
+    # world-writable directory such as "/tmp/rubydex-indexes", which would let one project's session
+    # write or delete another's store) falls back to the default instead.
+    #: (String) -> String
+    def configured_store_dir(location)
+      # `Config` only accepts an absolute path here (a relative one is a config error), so expanding it
+      # cannot depend on the process's working directory.
+      dir = File.expand_path(location)
+      return dir if within?(dir, workspace_path) || within?(dir, platform_cache_root)
+
+      warn("rubydex: ignoring disk_index.location #{location.inspect}: outside the workspace and the cache root")
+      Dir.exist?(File.join(workspace_path, "tmp")) ? workspace_store_dir : platform_store_dir
+    end
+
+    # Whether `path` is `root` or inside it, with both expanded so ".." and a trailing separator cannot
+    # pass the check. Deliberately not `realpath`: the directory is usually created by the caller.
+    #: (String, String) -> bool
+    def within?(path, root)
+      path = File.expand_path(path)
+      root = File.expand_path(root)
+      path == root || path.start_with?("#{root}#{File::SEPARATOR}")
     end
 
     # The workspace's own `tmp/`, which Rails generates and gitignores. rubydex never indexes it
@@ -597,7 +709,17 @@ module Rubydex
     #: (String) -> bool
     def store_fresh?(cache)
       marker = "#{cache}.hash"
-      File.exist?(marker) && File.read(marker) == store_signature
+      store_published?(marker, store_signature, cache)
+    end
+
+    # Whether `cache` holds the store this session asked for: the marker says it was built from this
+    # source, *and* its manifest is readable. A workspace can commit the store, the marker and the
+    # sidecar (`[disk_index] location = "tmp"`), so the manifest is also the provenance check — a
+    # snapshot without one is rebuilt rather than trusted. Adopting it here is what a caller wants
+    # next anyway: the manifest is the baseline a surgical refresh diffs against.
+    #: (String marker, String expected_marker, String cache) -> bool
+    def store_published?(marker, expected_marker, cache)
+      File.exist?(marker) && File.read(marker) == expected_marker && adopt_manifest(cache)
     end
 
     # Builds the store in a short-lived child process (whose peak indexing memory is reclaimed
@@ -634,7 +756,9 @@ module Rubydex
         # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
         # The scan is captured BEFORE the child runs, so a file edited during the build is marked
         # stale and re-diffed by the next refresh rather than wrongly served as fresh.
-        File.binwrite(manifest_tmp, Marshal.dump({ "lockfile" => lockfile, "files" => scan }))
+        # JSON, not Marshal: this file is read back from a directory a workspace can commit, so it must
+        # be data a hostile repository cannot turn into an object (see `Graph#adopt_manifest`).
+        File.write(manifest_tmp, JSON.generate({ "lockfile" => lockfile, "files" => scan }))
         File.write(marker_tmp, store_signature(scan, lockfile))
         # Windows cannot replace a file another handle has open, and a session refreshing has this
         # store open to serve reads. POSIX renames over it and keeps serving.

@@ -37,6 +37,7 @@ Commit a `rubydex.toml` with a `[disk_index]` section:
 [disk_index]
 enabled = true          # keep the bulk index in a redb store instead of the heap
 location = "tmp"        # "tmp" (the workspace's tmp/), "global" (the platform cache), or an absolute dir
+                        # inside the workspace or the platform cache root
 manager = true          # let the machine-wide background manager keep the store fresh
 ```
 
@@ -54,13 +55,18 @@ a different workspace), then the platform cache. A store kept outside the worksp
 writes a store inside your repo it adds the directory to `.git/info/exclude`, so it cannot be
 `git add -A`'d by accident — and it is never something you should commit.
 
+An absolute `location` is honored only inside the workspace or the platform cache root. The config is
+workspace-controlled, and a store directory anywhere else is a directory one project's session would
+write and delete in on behalf of another project — so a path outside both roots is ignored with a
+warning and the default is used instead.
+
 ## What lands on disk
 
 | File | What it is |
 | --- | --- |
 | `index.redb` | The index itself. Read-only to every session; rebuilt, never patched. |
 | `index.redb.hash` | Signature of the source state the store was built from. |
-| `index.redb.files` | Manifest: every file in the store with its mtime and size. |
+| `index.redb.files` | Manifest: every file in the store with its mtime and size (JSON, shape-checked on read). |
 | `index.redb.corrupt` | A store that reported read failures, moved out of the way (see Troubleshooting). |
 | `index.redb.rebuild/` | Create-exclusive lock directory: N stale sessions pay one rebuild. |
 
@@ -100,6 +106,15 @@ is reaped when it exits; the memory isolation comes from it being a separate pro
 
 The result is published by atomic rename — store first, then the manifest, then the freshness marker —
 so a session that looks mid-build sees the previous store, never a half-written one.
+
+### The store is not trusted input
+
+`index.redb`, its marker and its manifest live in a directory your repository can commit, so a
+repository you open can ship all three. Nothing in them is executed: the manifest is JSON, parsed and
+validated field by field (an older release's Marshal sidecar fails that parse and counts as absent),
+and a store without a readable manifest has no provenance — it is not served at all. Such a session
+indexes in memory instead, exactly as it does for a store that reported read errors. Rebuilding is
+left to the next boot, when a fresh marker is written by a build rubydex ran itself.
 
 ## What spawns what
 

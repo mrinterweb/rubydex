@@ -80,6 +80,8 @@ fn main() {
             sync(&mut watches, groups(&sessions), debounce);
 
             for watch in &mut watches {
+                // Non-blocking: this pass must keep pruning sessions, syncing new workspaces and
+                // draining event batches while an indexer runs.
                 watch.builder.reap();
                 let batch = watch.source.try_next_batch(debounce);
                 watch.builder.record(batch.len());

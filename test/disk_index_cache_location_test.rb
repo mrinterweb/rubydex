@@ -36,11 +36,50 @@ class DiskIndexCacheLocationTest < Minitest::Test
     end
   end
 
-  def test_an_absolute_location_is_used_as_written
+  # An absolute `location` is workspace-controlled config, so it is honored only inside the workspace
+  # or the machine's cache root: anywhere else (a shared world-writable directory) one project's
+  # session could write or delete another's store.
+  def test_an_absolute_location_inside_the_workspace_is_used_as_written
+    Dir.mktmpdir do |tmpdir|
+      dir = File.realpath(tmpdir)
+      location = File.join(dir, "custom-store")
+      File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"#{location}\"\n")
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+
+      assert_equal(File.join(location, "index.redb"), graph.send(:store_cache_path))
+    end
+  end
+
+  def test_an_absolute_location_inside_the_cache_root_is_used_as_written
+    with_workspace do |graph, dir|
+      # The platform cache root is this machine's own directory, so a store there is not shared with
+      # anything the workspace controls.
+      location = File.join(graph.send(:platform_cache_root), "rubydex-indexes")
+      File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"#{location}\"\n")
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+
+      assert_equal(File.join(location, "index.redb"), graph.send(:store_cache_path))
+    end
+  end
+
+  def test_an_absolute_location_outside_the_workspace_and_cache_root_is_ignored
     # Absolute on every platform: a POSIX `/var/tmp` is not a path Windows accepts as absolute.
     location = File.join(Dir.tmpdir, "rubydex-indexes")
-    with_workspace(config: "[disk_index]\nlocation = \"#{location}\"\n") do |graph, _dir|
-      assert_equal(File.join(location, "index.redb"), graph.send(:store_cache_path))
+    with_workspace(config: "[disk_index]\nlocation = \"#{location}\"\n") do |graph, dir|
+      store = graph.send(:store_cache_path)
+
+      refute(store.start_with?(location), "a committed absolute location outside both roots is not honored")
+      refute(store.start_with?(dir.to_s), "and the fallback keeps the store in the platform cache")
+    end
+  end
+
+  def test_a_location_that_escapes_the_workspace_through_dot_dot_is_ignored
+    with_workspace do |graph, dir|
+      outside = File.join(dir, "..", "escaped-store")
+      File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"#{outside}\"\n")
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+
+      refute(graph.send(:store_cache_path).include?("escaped-store"), "a path resolves before it is trusted")
     end
   end
 

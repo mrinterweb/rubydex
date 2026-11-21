@@ -77,17 +77,42 @@ impl Offset {
     }
 
     /// Converts this offset to a 0-indexed [`Location`] with start and end line/column numbers.
+    ///
+    /// Uses [`Document::line_index_for_positions`] (which rebuilds the index from disk for a
+    /// store-loaded document, whose source is not persisted) and clamps offsets past the end of that
+    /// source: `line-index` panics on an out-of-range offset, and a panic inside `extern \"C\"` aborts
+    /// the host process instead of degrading.
     #[must_use]
     pub fn to_location(&self, document: &Document) -> Location {
-        let line_index = document.line_index();
-        let start = line_index.line_col(self.start().into());
-        let end = line_index.line_col(self.end().into());
+        let line_index = document.line_index_for_positions();
+        let max = u32::from(line_index.len());
+        let start = line_index.line_col(self.start().min(max).into());
+        let end = line_index.line_col(self.end().min(max).into());
         Location {
             start_line: start.line,
             start_col: start.col,
             end_line: end.line,
             end_col: end.col,
         }
+    }
+
+    /// Converts this offset to a [`Location`], or `None` when it falls past the end of the source the
+    /// index was built from.
+    ///
+    /// Same index as [`Self::to_location`], but reports the stale offset instead of clamping it, for
+    /// callers that would rather emit nothing than a wrong position (e.g. a persisted store whose file
+    /// shrank on disk).
+    #[must_use]
+    pub fn try_to_location(&self, document: &Document) -> Option<Location> {
+        let line_index = document.line_index_for_positions();
+        let start = line_index.try_line_col(self.start().into())?;
+        let end = line_index.try_line_col(self.end().into())?;
+        Some(Location {
+            start_line: start.line,
+            start_col: start.col,
+            end_line: end.line,
+            end_col: end.col,
+        })
     }
 }
 

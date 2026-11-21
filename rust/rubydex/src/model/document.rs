@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use line_index::LineIndex;
@@ -56,6 +57,25 @@ impl Document {
     #[must_use]
     pub fn line_index(&self) -> &LineIndex {
         &self.line_index
+    }
+
+    /// The line index to use for position lookups.
+    ///
+    /// A store-loaded document persists no source, so its index is the empty placeholder. Rebuilding it
+    /// from the file on disk is the only way to answer positions for it, and it is confined to those
+    /// documents: a live document's index reflects its in-memory (possibly unsaved) source, which a disk
+    /// read would shift. Falls back to the document's own index when the source cannot be read back, so
+    /// callers see the empty index rather than an error.
+    #[must_use]
+    pub fn line_index_for_positions(&self) -> Cow<'_, LineIndex> {
+        #[cfg(feature = "redb-store")]
+        if u32::from(self.line_index.len()) == 0
+            && let Some(path) = self.file_path()
+            && let Ok(source) = std::fs::read_to_string(path)
+        {
+            return Cow::Owned(LineIndex::new(&source));
+        }
+        Cow::Borrowed(&self.line_index)
     }
 
     #[must_use]

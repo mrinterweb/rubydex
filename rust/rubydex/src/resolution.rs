@@ -1919,7 +1919,11 @@ impl<'a> Resolver<'a> {
                     let Some(definition) = self.graph.definition(id) else {
                         continue;
                     };
-                    let uri_rank = *uri_ranks.get(definition.uri_id()).unwrap();
+                    // The rank is only a tiebreaker, so a URI the ranking scan did not report must not
+                    // abort: `uri_ranks` comes from the store's document-URI table, which returns an
+                    // empty set when that one table fails to read while this definition (another table)
+                    // is still readable — and a panic here unwinds out of the `extern "C"` resolver.
+                    let uri_rank = *uri_ranks.get(definition.uri_id()).unwrap_or(&u32::MAX);
                     let uri = *definition.uri_id();
                     let offset = definition.offset().clone();
 
@@ -1963,7 +1967,9 @@ impl<'a> Resolver<'a> {
                     let Some(constant_ref) = self.graph.constant_reference(id) else {
                         continue;
                     };
-                    let uri_rank = *uri_ranks.get(&constant_ref.uri_id()).unwrap();
+                    // Same tiebreaker-only rank as the definitions above: an unranked URI (a store
+                    // table that failed to scan) sorts last instead of aborting the resolver.
+                    let uri_rank = *uri_ranks.get(&constant_ref.uri_id()).unwrap_or(&u32::MAX);
                     let depth = depth_of(constant_ref.name_id());
                     let offset = constant_ref.offset().clone();
                     const_refs.push((Unit::ConstantRef(id), (depth, uri_rank, offset)));

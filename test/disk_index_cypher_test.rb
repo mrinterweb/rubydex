@@ -40,6 +40,27 @@ class DiskIndexCypherTest < Minitest::Test
     assert_equal("Foo", node.name)
   end
 
+  # A store-loaded document keeps no source, so its `LineIndex` is the empty placeholder. The `line`
+  # property has to rebuild that index from the file on disk: against the empty one, `line_col` panics
+  # and the panic unwinds out of the `extern "C"` entry point, which aborts the host process.
+  def test_a_store_backed_definition_reports_its_real_line
+    skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
+
+    path = File.join(@tmp, "foo.rb")
+    File.write(path, "\n\n\nclass Foo\nend\n") # the class definition starts on line 4
+
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
+    graph.index_workspace
+
+    # Selected by file name, not by URI: the store records the real path, and on macOS `$TMPDIR` is a
+    # `/var` symlink to `/private/var` (the cache-location test documents the same trap).
+    rows = Rubydex::Query.parse("MATCH (d:Definition) RETURN d.file, d.line").run(graph).rows
+    ours = rows.select { |row| row["d.file"].to_s.include?("foo.rb") }
+
+    refute_empty(ours, "the store-backed document must have definitions")
+    assert_equal([4], ours.map { |row| row["d.line"] }.uniq, "the line comes from the source, not the empty placeholder")
+  end
+
   def test_a_live_edited_declaration_appears_once
     skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
 

@@ -4,12 +4,28 @@
 use rubydex_index_manager::builder::Builder;
 use rubydex_index_manager::builder::FULL_FLAG;
 
+use std::time::{Duration, Instant};
+
 // The indexer argv every test uses.
 fn indexer() -> Vec<String> {
     ["ruby", "-e", ""]
         .iter()
         .map(std::string::ToString::to_string)
         .collect()
+}
+
+// `Builder::reap` never blocks (the manager's loop cannot wait on one watch), so a test that needs
+// the child collected has to poll for it.
+fn reap_until_done(builder: &mut Builder) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while builder.is_running() && Instant::now() < deadline {
+        builder.reap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !builder.is_running(),
+        "the indexer must be collected before the next assertion"
+    );
 }
 
 #[test]
@@ -30,7 +46,7 @@ fn events_during_a_build_re_arm_the_next_one() {
     builder.record(1);
     assert!(builder.start(100).is_some(), "the first batch starts a build");
     builder.record(5);
-    builder.reap();
+    reap_until_done(&mut builder);
     let argv = builder.start(100);
     assert!(
         argv.is_some(),

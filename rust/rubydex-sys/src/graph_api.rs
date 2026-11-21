@@ -304,20 +304,41 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
         // graphs is needed.
         #[cfg(feature = "redb-store")]
         if graph.is_store_backed() {
+            // A rooted name (`::Foo`) is top-level by definition: `name_from_nesting_names` maps the
+            // empty parent scope to `ParentScope::TopLevel`, which the resolver resolves against
+            // `Object`'s ancestors. Qualifying it with the nesting — or looking the id up with the root
+            // marker still attached, since declaration names never carry it — would answer `null` for a
+            // name the in-memory resolver finds.
+            let rooted = const_name.starts_with("::");
+            let const_name = const_name.trim_start_matches("::");
+
             // 1. Lexical scope: try `nesting[..depth]::name` from innermost to top level.
-            for depth in (0..=nesting.len()).rev() {
+            let depths: Vec<usize> = if rooted {
+                vec![0]
+            } else {
+                (0..=nesting.len()).rev().collect()
+            };
+            for depth in depths {
                 let mut parts = nesting[..depth].to_vec();
-                parts.push(const_name.clone());
-                let id = DeclarationId::from(parts.join("::").as_str());
+                parts.push(const_name.to_string());
+                let id = declaration_id_from_lookup_name(&parts.join("::"));
                 if let Some(decl) = graph.declaration(id) {
                     return Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))).cast_const();
                 }
             }
             // 2. Inheritance: the constant may be defined in an ancestor (parent class / included
-            // module / concern) of an enclosing namespace. Walk each enclosing scope's ancestors.
-            let member = rubydex::model::ids::StringId::from(const_name.as_str());
-            for depth in (1..=nesting.len()).rev() {
-                let scope_id = DeclarationId::from(nesting[..depth].join("::").as_str());
+            // module / concern) of an enclosing namespace. Walk each enclosing scope's ancestors —
+            // which for a rooted name is `Object` alone, the top-level scope.
+            let member = rubydex::model::ids::StringId::from(const_name);
+            let scopes: Vec<DeclarationId> = if rooted {
+                vec![*rubydex::model::built_in::OBJECT_ID]
+            } else {
+                (1..=nesting.len())
+                    .rev()
+                    .map(|depth| declaration_id_from_lookup_name(&nesting[..depth].join("::")))
+                    .collect()
+            };
+            for scope_id in scopes {
                 if let Ok(member_id) = rubydex::query::find_member_in_ancestors(graph, scope_id, member, false)
                     && let Some(decl) = graph.declaration(member_id)
                 {

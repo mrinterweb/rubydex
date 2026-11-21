@@ -20,10 +20,12 @@ if flags.include?("--full")
   begin
     graph.send(:build_store_in_child, store)
   ensure
-    Dir.rmdir(lock) if File.exist?(lock)
+    graph.send(:release_rebuild_lock, lock)
   end
 else
   graph.refresh_if_stale
-  sleep(0.02) while Dir.exist?("#{store}.rebuild")
+  # Bounded: the lock directory is removed by the detached builder's `ensure`, so a builder killed
+  # before it could run one would otherwise spin this indexer — and the manager waits on this indexer.
+  exit(1) unless graph.send(:wait_for_rebuild, store)
   exit(1) unless graph.send(:store_fresh?, store)
 end

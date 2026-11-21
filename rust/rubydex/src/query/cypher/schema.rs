@@ -600,11 +600,14 @@ fn definition_property(graph: &Graph, id: DefinitionId, prop: &str) -> CypherVal
             .map_or(CypherValue::Null, |document| {
                 CypherValue::Str(document.uri().to_string())
             }),
+        // A store-loaded document keeps no source, so its index is rebuilt from disk before the
+        // offset is mapped. An offset past the end of that source is NULL: `line_col` would panic and
+        // a panic unwinds out of the `extern "C"` Cypher entry point, which aborts the host.
         "line" => graph
             .document(*definition.uri_id())
-            .map_or(CypherValue::Null, |document| {
-                let location = definition.offset().to_location(&document).to_presentation();
-                CypherValue::Int(i64::from(location.start_line()))
+            .and_then(|document| definition.offset().try_to_location(&document))
+            .map_or(CypherValue::Null, |location| {
+                CypherValue::Int(i64::from(location.to_presentation().start_line()))
             }),
         _ => CypherValue::Null,
     }

@@ -64,7 +64,12 @@ pub fn sync(watches: &mut Vec<Watch>, grouped: Vec<Group>, debounce: Duration) {
     watches.retain(|watch| grouped.iter().any(|group| group.store == watch.store));
     for group in grouped {
         if let Some(index) = watches.iter().position(|watch| watch.store == group.store) {
-            if watches[index].workspaces != group.workspaces {
+            if watches[index].workspaces == group.workspaces {
+                // The manifest count is what decides full-vs-surgical for a burst, and a session that
+                // re-registered with a grown workspace reports a new one. Keeping the boot-time count
+                // would compare every later burst against a stale baseline.
+                watches[index].manifest = group.manifest;
+            } else {
                 watches[index] = watch_for(group, debounce);
             }
             continue;

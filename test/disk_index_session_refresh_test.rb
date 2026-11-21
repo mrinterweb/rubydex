@@ -363,4 +363,44 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       assert_kind_of(String, graph.send(:claim_rebuild, cache), "an expired lock is reclaimed")
     end
   end
+
+  # A committed store can ship a *file* at the lock path. It never expires the way an abandoned
+  # directory does (`Dir.mkdir` raises EEXIST forever, `Dir.rmdir` raises ENOTDIR), so leaving it alone
+  # would suppress every rebuild of that store and keep serving whatever snapshot was committed.
+  def test_a_file_at_the_rebuild_lock_path_does_not_suppress_rebuilds
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      lock = "#{cache}.rebuild"
+      File.write(lock, "not a lock directory")
+
+      claimed = graph.send(:claim_rebuild, cache)
+
+      assert_equal(lock, claimed, "a non-directory at the lock path is removed, not waited on")
+      assert(File.directory?(lock), "the claim replaced it with the real lock")
+      refute(graph.send(:claim_rebuild, cache), "and the lock is exclusive afterwards")
+    end
+  end
+
+  # The lock directory is removed by the detached builder's `ensure`; a builder killed before it runs
+  # one must degrade the indexer to "not fresh" instead of spinning until the lock's mtime expiry.
+  def test_waiting_for_a_lost_builder_is_bounded
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      lock = "#{cache}.rebuild"
+      Dir.mkdir(lock)
+      begin
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        refute(graph.send(:wait_for_rebuild, cache, 0.1), "a lock that outlives the timeout is abandoned")
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        assert_operator(elapsed, :>=, 0.09)
+        assert_operator(elapsed, :<, 5, "the wait is bounded, it does not run to the lock's mtime expiry")
+      ensure
+        Dir.rmdir(lock)
+      end
+
+      assert(graph.send(:wait_for_rebuild, cache, 0.1), "no lock means nothing to wait for")
+    end
+  end
 end
