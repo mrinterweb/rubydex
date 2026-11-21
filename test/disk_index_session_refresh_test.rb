@@ -410,6 +410,46 @@ class DiskIndexSessionRefreshTest < Minitest::Test
 
   # The lock directory is removed by the detached builder's `ensure`; a builder killed before it runs
   # one must degrade the indexer to "not fresh" instead of spinning until the lock's mtime expiry.
+  # The freshness check is the whole cost of a warm boot on a large workspace: the walk (~105 ms on
+  # 6,441 files) and the digest over it. Re-reading the sidecar and re-signing the same scan doubled
+  # that for nothing, and a sidecar is parsed data, so the second parse was pure spend.
+  def test_a_warm_boot_parses_the_manifest_and_signs_the_scan_once
+    with_workspace do |dir, _rb|
+      session(dir) # a fresh store, marker and sidecar
+
+      warm = Rubydex::Graph.configure_for_workspace(dir)
+      counts = Hash.new(0)
+      warm.singleton_class.prepend(Module.new do
+        define_method(:read_manifest) do |*args|
+          counts[:manifest] += 1
+          super(*args)
+        end
+        define_method(:store_signature) do |*args|
+          counts[:signature] += 1
+          super(*args)
+        end
+      end)
+      warm.index_workspace
+
+      assert_equal(1, counts[:manifest], "a warm boot must parse the manifest sidecar once")
+      assert_equal(1, counts[:signature], "a warm boot must sign the source scan once")
+
+      # A store whose marker is gone is attached but unproven, so it still has to refresh.
+      FileUtils.rm_f("#{warm.send(:store_cache_path)}.hash")
+      refreshed = false
+      stale = Rubydex::Graph.configure_for_workspace(dir)
+      stale.singleton_class.prepend(Module.new do
+        define_method(:refresh_if_stale) do |*args|
+          refreshed = true
+          super(*args)
+        end
+      end)
+      stale.index_workspace
+
+      assert(refreshed, "a missing marker must refresh instead of trusting the attached store")
+    end
+  end
+
   def test_waiting_for_a_lost_builder_is_bounded
     with_workspace do |dir, _rb|
       graph = session(dir)

@@ -103,8 +103,16 @@ module Rubydex
       # marker) without one, so an unprovenanced snapshot is never served — it gets the same answer a
       # corrupt store gets. A stale store *with* a manifest is fine: it answers while it refreshes.
       if adopt_manifest(cache)
-        if store_fresh?(cache)
-          @session_signature = session_state(@head_sha, source_scan)
+        # One walk and one digest for the whole boot: the marker is exactly the signature this
+        # session would publish, and `adopt_manifest` already parsed the sidecar that
+        # `store_published?` would parse again.
+        expected_marker = store_signature
+        if store_fresh?(cache, expected_marker)
+          # What this session is serving: the store's content plus the commit it read it at. HEAD
+          # belongs here and deliberately not in `store_signature` — a commit rewrites no files, so
+          # the shared store is still exactly right and only this session has to notice, while a
+          # marker keyed on HEAD would throw away a good store after every commit.
+          @session_signature = "#{@head_sha}#{expected_marker}"
         else
           refresh_if_stale
         end
@@ -288,7 +296,7 @@ module Rubydex
       return unless @applied_files && @applied_lockfile == lockfile_hash
 
       changed = scan.filter_map { |rel, stamp| rel if @applied_files[rel] != stamp }
-      removed = @applied_files.keys - scan.keys
+      removed = @applied_files.each_key.reject { |rel| scan.key?(rel) }
       return if (changed.size + removed.size) > (scan.size * REBUILD_DIFF_RATIO)
       return if overlay_divergence(scan) > (scan.size * OVERLAY_COMPACTION_RATIO)
 
@@ -300,7 +308,8 @@ module Rubydex
     # rebuild (or a re-attach) resets it.
     #: (Hash[String, String]) -> Integer
     def overlay_divergence(scan)
-      scan.count { |rel, stamp| @manifest_files[rel] != stamp } + (@manifest_files.keys - scan.keys).size
+      scan.count { |rel, stamp| @manifest_files[rel] != stamp } +
+        @manifest_files.each_key.count { |rel| !scan.key?(rel) }
     end
 
     # Re-indexes the changed files and deletes the removed ones, then resolves. The store is never
@@ -599,16 +608,6 @@ module Rubydex
       "unknown"
     end
 
-    # What a session is serving: the store's content plus the commit it read it at. HEAD belongs here
-    # and deliberately not in `store_signature` — a commit rewrites no files, so the shared store is
-    # still exactly right and only this session has to notice, while a marker keyed on HEAD would throw
-    # away a good store after every commit.
-    #
-    #: (String?, Hash[String, String]) -> String
-    def session_state(head, scan)
-      "#{head}#{store_signature(scan)}"
-    end
-
     # The commit this workspace is checked out to, or nil outside a repository. One `git rev-parse`
     # (~1 ms) per freshness check, and the reason the walk can afford a TTL: a commit or branch switch
     # moves HEAD whether or not any file's stamp moved. Deliberately not `git status`: that stats every
@@ -707,10 +706,13 @@ module Rubydex
       digest.hexdigest
     end
 
-    #: (String) -> bool
-    def store_fresh?(cache)
+    # Whether `cache` holds the store built from `expected_marker` (the current source signature).
+    # The marker is published last, after the store and its manifest sidecar, so a matching marker
+    # implies both are there — which is why this check does not parse the manifest to re-prove it.
+    #: (String, ?String) -> bool
+    def store_fresh?(cache, expected_marker = store_signature)
       marker = "#{cache}.hash"
-      store_published?(marker, store_signature, cache)
+      File.exist?(marker) && File.read(marker) == expected_marker
     end
 
     # Whether `cache` holds the store this session asked for: the marker says it was built from this
@@ -751,7 +753,7 @@ module Rubydex
         # Publish order matters for concurrent correctness: rename the store first, then the marker.
         # Both renames are atomic on POSIX, so a concurrent reader (attach_store) never sees a
         # partially-written file. A reader that lands between the two renames sees a NEW store with an
-        # OLD marker, so store_fresh? compares the old marker to the new signature, mismatches, and
+        # OLD marker, so the freshness check compares the old marker to the new signature, mismatches, and
         # rebuilds — a wasted rebuild, never staleness (a stale store can only be served when the
         # marker says fresh, which requires the new marker, which is written last). Concurrent builders
         # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
