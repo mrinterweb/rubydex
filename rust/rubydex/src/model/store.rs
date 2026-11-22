@@ -23,15 +23,41 @@ use crate::model::name::NameRef;
 use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::string_ref::StringRef;
 
-// One redb table per graph node map, all keyed by the node's `u64` content-hash ID.
-const STRINGS: TableDefinition<u64, &[u8]> = TableDefinition::new("strings");
-const DECLARATIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("declarations");
-const DEFINITIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("definitions");
-const NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("names");
-const CONSTANT_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("constant_references");
-const METHOD_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("method_references");
-const DOCUMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("documents");
-const NAME_DEPENDENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("name_dependents");
+// One redb table per graph node map. A row is not a node: nodes are bucketed by the top bits of
+// their `u64` content-hash id, so a table row is a bucket holding ~64 nodes (see `encode_bucket`).
+// That turns 535k small B-tree rows into ~7.5k, which cuts redb's per-row leaf overhead and lets
+// the build encode buckets in parallel.
+const STRINGS: TableDefinition<u32, &[u8]> = TableDefinition::new("strings");
+const DECLARATIONS: TableDefinition<u32, &[u8]> = TableDefinition::new("declarations");
+const DEFINITIONS: TableDefinition<u32, &[u8]> = TableDefinition::new("definitions");
+const NAMES: TableDefinition<u32, &[u8]> = TableDefinition::new("names");
+const CONSTANT_REFERENCES: TableDefinition<u32, &[u8]> = TableDefinition::new("constant_references");
+const METHOD_REFERENCES: TableDefinition<u32, &[u8]> = TableDefinition::new("method_references");
+const DOCUMENTS: TableDefinition<u32, &[u8]> = TableDefinition::new("documents");
+const NAME_DEPENDENTS: TableDefinition<u32, &[u8]> = TableDefinition::new("name_dependents");
+
+// Per-table bucket counts, stored in `STORE_METADATA` so a reader knows how to hash an id to its
+// bucket without consulting the table itself. Cached on `RedbStore`, so a point read pays nothing.
+const META_FORMAT_VERSION: u8 = 0;
+const META_BITS_STRINGS: u8 = 1;
+const META_BITS_DECLARATIONS: u8 = 2;
+const META_BITS_DEFINITIONS: u8 = 3;
+const META_BITS_NAMES: u8 = 4;
+const META_BITS_CONSTANT_REFERENCES: u8 = 5;
+const META_BITS_METHOD_REFERENCES: u8 = 6;
+const META_BITS_DOCUMENTS: u8 = 7;
+const META_BITS_NAME_DEPENDENTS: u8 = 8;
+
+/// 65,536 buckets is far past the point where a bucket is one page; the cap only keeps `1 << bits`
+/// and the shift arithmetic bounded.
+const MAX_BUCKET_BITS: u8 = 16;
+
+/// Nodes per bucket. Small enough that a point read decodes only what it needs, large enough that
+/// the bucket index is noise next to the payload.
+const TARGET_ENTRIES_PER_BUCKET: usize = 64;
+
+/// Documents are ~1 KB each, so they pack fewer to a bucket.
+const TARGET_DOCUMENTS_PER_BUCKET: usize = 16;
 
 /// Declaration FQN names for search, as `shard index -> front-coded (declaration_id, FQN) block`.
 /// A compact projection so name-based search scans short strings instead of deserializing full
@@ -289,6 +315,332 @@ fn encode_search_shards(entries: &[(&[u8], u64)]) -> Result<Vec<Vec<u8>>, StoreE
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// Hash-prefix buckets
+//
+// A node table row is a *bucket*: the nodes whose ids share the top `bits` bits, keyed by that
+// prefix. Wire format:
+//
+//   [count:   u32 LE]
+//   [keys:    count x u64 LE, ascending]        (8 * count bytes)
+//   [offsets: (count + 1) x u32 LE]             (byte offsets into the payload)
+//   [payload: offsets[count] bytes]             (concatenated postcard-encoded values)
+//
+// A point read is then: one redb get, one binary search, one postcard decode. `offsets` is u32
+// rather than u16 because a single bucket holds every node when `bits == 0` (small tables, and the
+// test-only `RedbStore::create`), where 65,535 entries is reachable.
+// ---------------------------------------------------------------------------------------------
+
+/// Bucket counts per table, cached on the store so a point read pays no metadata lookup.
+#[derive(Debug, Clone, Copy, Default)]
+struct BucketBits {
+    strings: u8,
+    declarations: u8,
+    definitions: u8,
+    names: u8,
+    constant_references: u8,
+    method_references: u8,
+    documents: u8,
+    name_dependents: u8,
+}
+
+/// The bucket count for a table of `count` nodes, as a bit count: `1 << bits` buckets.
+#[must_use]
+fn bucket_bits_for_count(count: usize, target_per_bucket: usize) -> u8 {
+    if count <= target_per_bucket {
+        return 0;
+    }
+    let buckets = count.div_ceil(target_per_bucket).next_power_of_two();
+    u8::try_from(buckets.trailing_zeros())
+        .unwrap_or(MAX_BUCKET_BITS)
+        .min(MAX_BUCKET_BITS)
+}
+
+/// The bucket an id belongs to: its top `bits` bits.
+///
+/// `bits == 0` must be handled before shifting: shifting a `u64` right by 64 panics in debug builds
+/// and wraps in release builds.
+#[must_use]
+fn bucket_id(key: u64, bits: u8) -> u32 {
+    if bits == 0 {
+        return 0;
+    }
+    u32::try_from(key >> (64 - u32::from(bits))).unwrap_or(u32::MAX)
+}
+
+/// The byte ranges of one bucket's header, validated against the block's length.
+struct BucketView<'a> {
+    count: usize,
+    keys: &'a [u8],
+    offsets: &'a [u8],
+    payload: &'a [u8],
+}
+
+impl<'a> BucketView<'a> {
+    fn new(table: &'static str, key: u32, bytes: &'a [u8]) -> Result<Self, StoreError> {
+        let error = |reason| StoreError::CorruptBlock { table, key, reason };
+        let count_bytes: [u8; 4] = bytes
+            .get(0..4)
+            .ok_or_else(|| error("truncated bucket header"))?
+            .try_into()
+            .unwrap();
+        let count = usize::try_from(u32::from_le_bytes(count_bytes))
+            .map_err(|_| error("bucket entry count does not fit in usize"))?;
+        let keys_end = 4usize
+            .checked_add(count.checked_mul(8).ok_or_else(|| error("bucket key count overflow"))?)
+            .ok_or_else(|| error("bucket key count overflow"))?;
+        let offsets_end = keys_end
+            .checked_add(
+                count
+                    .checked_add(1)
+                    .ok_or_else(|| error("bucket offset count overflow"))?
+                    .checked_mul(4)
+                    .ok_or_else(|| error("bucket offset count overflow"))?,
+            )
+            .ok_or_else(|| error("bucket offset count overflow"))?;
+        Ok(Self {
+            count,
+            keys: bytes.get(4..keys_end).ok_or_else(|| error("truncated bucket keys"))?,
+            offsets: bytes
+                .get(keys_end..offsets_end)
+                .ok_or_else(|| error("truncated bucket offsets"))?,
+            payload: bytes
+                .get(offsets_end..)
+                .ok_or_else(|| error("truncated bucket payload"))?,
+        })
+    }
+
+    fn key_at(&self, index: usize) -> u64 {
+        let start = index * 8;
+        let mut bytes = [0_u8; 8];
+        // `BucketView::new` guarantees `keys` holds exactly `count * 8` bytes.
+        bytes.copy_from_slice(&self.keys[start..start + 8]);
+        u64::from_le_bytes(bytes)
+    }
+
+    /// The payload slice for entry `index`, or `None` if its offsets are out of range or reversed.
+    fn value_at(&self, index: usize) -> Option<&'a [u8]> {
+        let mut start_bytes = [0_u8; 4];
+        start_bytes.copy_from_slice(self.offsets.get(index * 4..index * 4 + 4)?);
+        let mut end_bytes = [0_u8; 4];
+        end_bytes.copy_from_slice(self.offsets.get(index * 4 + 4..index * 4 + 8)?);
+        let start = usize::try_from(u32::from_le_bytes(start_bytes)).ok()?;
+        let end = usize::try_from(u32::from_le_bytes(end_bytes)).ok()?;
+        if start > end {
+            return None;
+        }
+        self.payload.get(start..end)
+    }
+}
+
+/// The serialized value of `key` in `bucket`, if present. The bucket's keys must be ascending.
+fn lookup_in_bucket<'a>(
+    table: &'static str,
+    bucket_key: u32,
+    bucket: &'a [u8],
+    key: u64,
+) -> Result<Option<&'a [u8]>, StoreError> {
+    let view = BucketView::new(table, bucket_key, bucket)?;
+    let error = |reason| StoreError::CorruptBlock {
+        table,
+        key: bucket_key,
+        reason,
+    };
+    let mut low = 0;
+    let mut high = view.count;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match view.key_at(mid).cmp(&key) {
+            std::cmp::Ordering::Less => low = mid + 1,
+            std::cmp::Ordering::Greater => high = mid,
+            std::cmp::Ordering::Equal => {
+                return view
+                    .value_at(mid)
+                    .map(Some)
+                    .ok_or_else(|| error("entry offsets out of range"));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Calls `visit(key, value_bytes)` for every entry of `bucket`, in ascending key order.
+fn iter_bucket_entries<'a>(
+    table: &'static str,
+    bucket_key: u32,
+    bucket: &'a [u8],
+    mut visit: impl FnMut(u64, &'a [u8]) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    let view = BucketView::new(table, bucket_key, bucket)?;
+    for index in 0..view.count {
+        let value = view.value_at(index).ok_or_else(|| StoreError::CorruptBlock {
+            table,
+            key: bucket_key,
+            reason: "entry offsets out of range",
+        })?;
+        visit(view.key_at(index), value)?;
+    }
+    Ok(())
+}
+
+/// Pushes every key of `bucket`, in ascending order.
+fn iter_bucket_keys(table: &'static str, bucket_key: u32, bucket: &[u8], out: &mut Vec<u64>) -> Result<(), StoreError> {
+    let view = BucketView::new(table, bucket_key, bucket)?;
+    out.extend((0..view.count).map(|index| view.key_at(index)));
+    Ok(())
+}
+
+/// Writes the bucket header + payload for `count` ascending keys with the given payload offsets.
+fn write_bucket(count: u32, keys: &[u64], offsets: &[u32], payload: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.extend_from_slice(&count.to_le_bytes());
+    for key in keys {
+        out.extend_from_slice(&key.to_le_bytes());
+    }
+    for offset in offsets {
+        out.extend_from_slice(&offset.to_le_bytes());
+    }
+    out.extend_from_slice(payload);
+}
+
+/// Encodes a bucket from already-serialized payloads. `entries` must be sorted by key.
+#[cfg(test)]
+fn encode_bucket_raw(entries: &[(u64, Vec<u8>)], out: &mut Vec<u8>) -> Result<(), StoreError> {
+    let too_long = |reason| StoreError::CorruptBlock {
+        table: "buckets",
+        key: 0,
+        reason,
+    };
+    let count = u32::try_from(entries.len()).map_err(|_| too_long("bucket entry count exceeds u32::MAX"))?;
+    let mut keys = Vec::with_capacity(entries.len());
+    let mut offsets = Vec::with_capacity(entries.len() + 1);
+    let mut payload = Vec::new();
+    for (key, value) in entries {
+        keys.push(*key);
+        offsets.push(u32::try_from(payload.len()).map_err(|_| too_long("bucket payload exceeds u32::MAX"))?);
+        payload.extend_from_slice(value);
+    }
+    offsets.push(u32::try_from(payload.len()).map_err(|_| too_long("bucket payload exceeds u32::MAX"))?);
+    write_bucket(count, &keys, &offsets, &payload, out);
+    Ok(())
+}
+
+/// Encodes a bucket of nodes. `entries` must be sorted by key.
+///
+/// Serializes straight into the payload buffer, so encoding a whole table costs no per-node
+/// allocation beyond the bucket's own buffers.
+fn encode_bucket<V: serde::Serialize>(entries: &[(u64, &V)], out: &mut Vec<u8>) -> Result<(), StoreError> {
+    let too_long = |reason| StoreError::CorruptBlock {
+        table: "buckets",
+        key: 0,
+        reason,
+    };
+    let count = u32::try_from(entries.len()).map_err(|_| too_long("bucket entry count exceeds u32::MAX"))?;
+    let mut keys = Vec::with_capacity(entries.len());
+    let mut offsets = Vec::with_capacity(entries.len() + 1);
+    let mut payload: Vec<u8> = Vec::with_capacity(entries.len() * 24);
+    for (key, value) in entries {
+        keys.push(*key);
+        offsets.push(u32::try_from(payload.len()).map_err(|_| too_long("bucket payload exceeds u32::MAX"))?);
+        // `to_extend` takes the buffer by value and hands it back, which keeps the payload
+        // buffer reused across the bucket's entries.
+        payload = postcard::to_extend(value, payload).map_err(StoreError::Encode)?;
+    }
+    offsets.push(u32::try_from(payload.len()).map_err(|_| too_long("bucket payload exceeds u32::MAX"))?);
+    write_bucket(count, &keys, &offsets, &payload, out);
+    Ok(())
+}
+
+/// Encodes `buckets[first_bucket..]` into `(bucket key, bytes)`, skipping empty buckets.
+fn encode_buckets<V: serde::Serialize>(
+    buckets: &[Vec<(u64, &V)>],
+    first_bucket: u32,
+) -> Result<Vec<(u32, Vec<u8>)>, StoreError> {
+    let mut encoded = Vec::with_capacity(buckets.len());
+    for (offset, entries) in buckets.iter().enumerate() {
+        if entries.is_empty() {
+            continue;
+        }
+        let key = first_bucket
+            .checked_add(u32::try_from(offset).unwrap_or(u32::MAX))
+            .ok_or(StoreError::CorruptBlock {
+                table: "buckets",
+                key: first_bucket,
+                reason: "bucket key overflow",
+            })?;
+        let mut out = Vec::with_capacity(entries.len() * 24 + 16);
+        encode_bucket(entries, &mut out)?;
+        encoded.push((key, out));
+    }
+    Ok(encoded)
+}
+
+/// Encodes `buckets` (whose first bucket key is `first_bucket`) on all available cores.
+fn encode_buckets_parallel<V: serde::Serialize + Sync>(
+    buckets: &[Vec<(u64, &V)>],
+    first_bucket: u32,
+) -> Result<Vec<(u32, Vec<u8>)>, StoreError> {
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    if buckets.len() < 64 || workers < 2 {
+        return encode_buckets(buckets, first_bucket);
+    }
+    let slice_size = buckets.len().div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = buckets
+            .chunks(slice_size)
+            .enumerate()
+            .map(|(index, slice)| {
+                let offset = u32::try_from(index * slice_size).unwrap_or(u32::MAX);
+                let start = first_bucket.saturating_add(offset);
+                scope.spawn(move || encode_buckets(slice, start))
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("bucket encoder panicked"))
+            .collect::<Result<Vec<_>, StoreError>>()
+    })
+    .map(|chunks| chunks.into_iter().flatten().collect())
+}
+
+/// Writes `map` into `table_def` as hash-prefix buckets, encoding them on all available cores.
+/// Returns the bit count the reader needs to hash an id to its bucket.
+fn write_bucketed_map<Id, V>(
+    write_txn: &redb::WriteTransaction,
+    table_def: TableDefinition<u32, &[u8]>,
+    map: &crate::model::identity_maps::IdentityHashMap<Id, V>,
+    target_per_bucket: usize,
+) -> Result<u8, StoreError>
+where
+    Id: Copy + std::ops::Deref<Target = u64> + Sync,
+    V: serde::Serialize + Sync,
+{
+    let bits = bucket_bits_for_count(map.len(), target_per_bucket);
+    let num_buckets = 1usize << bits;
+    let mut buckets: Vec<Vec<(u64, &V)>> = (0..num_buckets)
+        .map(|_| Vec::with_capacity(target_per_bucket + 8))
+        .collect();
+    for (id, value) in map {
+        buckets[bucket_id(**id, bits) as usize].push((**id, value));
+    }
+    for bucket in &mut buckets {
+        bucket.sort_unstable_by_key(|(key, _)| *key);
+    }
+
+    let mut table = write_txn.open_table(table_def)?;
+    // Encoded in two rounds so the bytes held in memory stay near half the table's rather than
+    // all of it (70 MB for `method_references` on a large corpus), while each round still keeps
+    // every worker busy.
+    let round_size = buckets.len().div_ceil(2).max(1);
+    for (round, slice) in buckets.chunks(round_size).enumerate() {
+        let first_bucket = u32::try_from(round * round_size).unwrap_or(u32::MAX);
+        for (key, blob) in encode_buckets_parallel(slice, first_bucket)? {
+            table.insert(key, blob.as_slice())?;
+        }
+    }
+    Ok(bits)
+}
+
 /// Layout version of the persisted store. Bump this when a node's serialized shape, a table's key
 /// scheme, or the set of tables changes — anything that makes an older store unreadable or
 /// semantically stale. The gem version deliberately does NOT participate: a release that does not
@@ -311,9 +663,71 @@ enum StoreDb {
     ReadOnly(ReadOnlyDatabase),
 }
 
+/// Funnels a metadata problem into `StoreError::Open`, the one variant that says "the store itself
+/// cannot be trusted" rather than "this node failed to decode".
+fn metadata_error(reason: &'static str) -> StoreError {
+    StoreError::Open(redb::Error::Io(std::io::Error::other(reason)))
+}
+
+/// Reads the format version and the per-table bucket bit counts in one read transaction.
+fn read_metadata<E: ReadableDatabase>(db: &E) -> Result<(Option<u32>, BucketBits), StoreError> {
+    let txn = db.begin_read()?;
+    let table = txn.open_table(STORE_METADATA)?;
+    let version = table.get(META_FORMAT_VERSION)?.map(|entry| entry.value());
+
+    let mut bits = BucketBits::default();
+    for (key, field) in [
+        (META_BITS_STRINGS, &mut bits.strings),
+        (META_BITS_DECLARATIONS, &mut bits.declarations),
+        (META_BITS_DEFINITIONS, &mut bits.definitions),
+        (META_BITS_NAMES, &mut bits.names),
+        (META_BITS_CONSTANT_REFERENCES, &mut bits.constant_references),
+        (META_BITS_METHOD_REFERENCES, &mut bits.method_references),
+        (META_BITS_DOCUMENTS, &mut bits.documents),
+        (META_BITS_NAME_DEPENDENTS, &mut bits.name_dependents),
+    ] {
+        let stored = table.get(key)?.map(|entry| entry.value());
+        *field = match stored {
+            Some(value) => u8::try_from(value).map_err(|_| metadata_error("bucket bit count out of range"))?,
+            None => 0,
+        };
+        if *field > MAX_BUCKET_BITS {
+            return Err(metadata_error("bucket bit count out of range"));
+        }
+    }
+    Ok((version, bits))
+}
+
+/// Reads and decodes a single node by id from a bucketed table, within an existing read
+/// transaction.
+fn decode_node<V: DeserializeOwned>(
+    read_txn: &redb::ReadTransaction,
+    table_def: TableDefinition<u32, &[u8]>,
+    bits: u8,
+    name: &'static str,
+    key: u64,
+) -> Result<Option<V>, StoreError> {
+    let table = read_txn.open_table(table_def)?;
+    let bucket_key = bucket_id(key, bits);
+    let Some(bucket) = table.get(bucket_key)? else {
+        return Ok(None);
+    };
+    let Some(bytes) = lookup_in_bucket(name, bucket_key, bucket.value(), key)? else {
+        return Ok(None);
+    };
+    postcard::from_bytes::<V>(bytes)
+        .map(Some)
+        .map_err(|source| StoreError::Corrupt {
+            table: name,
+            id: key,
+            source,
+        })
+}
+
 /// A redb-backed node store.
 pub struct RedbStore {
     db: StoreDb,
+    bits: BucketBits,
 }
 
 impl std::fmt::Debug for RedbStore {
@@ -361,15 +775,14 @@ impl RedbStore {
         }));
         match opened {
             Ok(Ok(db)) => {
-                let version = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<_, StoreError> {
-                    let txn = db.begin_read()?;
-                    let table = txn.open_table(STORE_METADATA)?;
-                    Ok(table.get(0)?.map(|entry| entry.value()))
-                }))
-                .map_err(|_| StoreError::Open(redb::Error::Io(std::io::Error::other("store metadata is damaged"))))??;
-                match version {
+                let metadata =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_metadata(&db))).map_err(|_| {
+                        StoreError::Open(redb::Error::Io(std::io::Error::other("store metadata is damaged")))
+                    })??;
+                match metadata.0 {
                     Some(STORE_FORMAT_VERSION) => Ok(Self {
                         db: StoreDb::ReadOnly(db),
+                        bits: metadata.1,
                     }),
                     Some(version) => Err(StoreError::IncompatibleFormat(version)),
                     None => Err(StoreError::Open(redb::Error::Io(std::io::Error::other(
@@ -399,33 +812,64 @@ impl RedbStore {
             return Err(StoreError::Open(redb::Error::Io(err)));
         }
         let db = Builder::new().set_cache_size(BUILD_CACHE_SIZE).create(path)?;
-        {
+        let bits = {
             let write_txn = db.begin_write()?;
-            write_txn.open_table(STORE_METADATA)?.insert(0, STORE_FORMAT_VERSION)?;
-            // Serialize each `(id, node)` pair into the node's table. The `{{ }}` scoping drops each
-            // table guard before the next table is opened within the same transaction.
-            macro_rules! write_map {
-                ($table:expr, $map:expr) => {{
-                    // Ascending key order: the maps iterate in hash order, and redb splits a B-tree
-                    // leaf wherever the next key lands, so random inserts thrash the page cache.
-                    let mut entries: Vec<_> = $map.iter().map(|(id, value)| (id.get(), value)).collect();
-                    entries.sort_unstable_by_key(|(key, _)| *key);
-                    let mut table = write_txn.open_table($table)?;
-                    for (key, value) in entries {
-                        let bytes = postcard::to_allocvec(value).map_err(StoreError::Encode)?;
-                        table.insert(key, bytes.as_slice())?;
-                    }
-                }};
-            }
+            write_txn
+                .open_table(STORE_METADATA)?
+                .insert(META_FORMAT_VERSION, STORE_FORMAT_VERSION)?;
 
-            write_map!(DECLARATIONS, graph.declarations());
-            write_map!(DEFINITIONS, graph.definitions());
-            write_map!(STRINGS, graph.strings());
-            write_map!(NAMES, graph.names());
-            write_map!(CONSTANT_REFERENCES, graph.constant_references());
-            write_map!(METHOD_REFERENCES, graph.method_references());
-            write_map!(DOCUMENTS, graph.documents());
-            write_map!(NAME_DEPENDENTS, graph.name_dependents());
+            // One bucketed table per node map. Each call encodes its buckets on all cores; the
+            // tables themselves go one at a time because a redb write transaction is not `Sync`.
+            let bits = BucketBits {
+                strings: write_bucketed_map(&write_txn, STRINGS, graph.strings(), TARGET_ENTRIES_PER_BUCKET)?,
+                declarations: write_bucketed_map(
+                    &write_txn,
+                    DECLARATIONS,
+                    graph.declarations(),
+                    TARGET_ENTRIES_PER_BUCKET,
+                )?,
+                definitions: write_bucketed_map(
+                    &write_txn,
+                    DEFINITIONS,
+                    graph.definitions(),
+                    TARGET_ENTRIES_PER_BUCKET,
+                )?,
+                names: write_bucketed_map(&write_txn, NAMES, graph.names(), TARGET_ENTRIES_PER_BUCKET)?,
+                constant_references: write_bucketed_map(
+                    &write_txn,
+                    CONSTANT_REFERENCES,
+                    graph.constant_references(),
+                    TARGET_ENTRIES_PER_BUCKET,
+                )?,
+                method_references: write_bucketed_map(
+                    &write_txn,
+                    METHOD_REFERENCES,
+                    graph.method_references(),
+                    TARGET_ENTRIES_PER_BUCKET,
+                )?,
+                documents: write_bucketed_map(&write_txn, DOCUMENTS, graph.documents(), TARGET_DOCUMENTS_PER_BUCKET)?,
+                name_dependents: write_bucketed_map(
+                    &write_txn,
+                    NAME_DEPENDENTS,
+                    graph.name_dependents(),
+                    TARGET_ENTRIES_PER_BUCKET,
+                )?,
+            };
+            {
+                let mut metadata = write_txn.open_table(STORE_METADATA)?;
+                for (key, value) in [
+                    (META_BITS_STRINGS, bits.strings),
+                    (META_BITS_DECLARATIONS, bits.declarations),
+                    (META_BITS_DEFINITIONS, bits.definitions),
+                    (META_BITS_NAMES, bits.names),
+                    (META_BITS_CONSTANT_REFERENCES, bits.constant_references),
+                    (META_BITS_METHOD_REFERENCES, bits.method_references),
+                    (META_BITS_DOCUMENTS, bits.documents),
+                    (META_BITS_NAME_DEPENDENTS, bits.name_dependents),
+                ] {
+                    metadata.insert(key, u32::from(value))?;
+                }
+            }
             {
                 // Sorted by FQN, not by id: front-coding pays off between neighbours, and the
                 // search scan reads the block in this order anyway.
@@ -459,9 +903,11 @@ impl RedbStore {
             }
 
             write_txn.commit()?;
-        }
+            bits
+        };
         Ok(Self {
             db: StoreDb::Writable(db),
+            bits,
         })
     }
 
@@ -477,10 +923,18 @@ impl RedbStore {
     pub fn create(path: &Path) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
         let txn = db.begin_write()?;
-        txn.open_table(STORE_METADATA)?.insert(0, STORE_FORMAT_VERSION)?;
+        {
+            let mut metadata = txn.open_table(STORE_METADATA)?;
+            metadata.insert(META_FORMAT_VERSION, STORE_FORMAT_VERSION)?;
+            // No bucket hashing: one bucket per table, which is all a handful of test nodes needs.
+            for key in META_BITS_STRINGS..=META_BITS_NAME_DEPENDENTS {
+                metadata.insert(key, 0)?;
+            }
+        }
         txn.commit()?;
         Ok(Self {
             db: StoreDb::Writable(db),
+            bits: BucketBits::default(),
         })
     }
 
@@ -492,18 +946,13 @@ impl RedbStore {
     #[cfg(test)]
     pub(crate) fn put_node<V: serde::Serialize>(
         &self,
-        table: TableDefinition<u64, &[u8]>,
+        table: TableDefinition<u32, &[u8]>,
+        bits: u8,
         key: u64,
         value: &V,
     ) -> Result<(), StoreError> {
         let bytes = postcard::to_allocvec(value).map_err(StoreError::Encode)?;
-        let write_txn = self.begin_write()?;
-        {
-            let mut table = write_txn.open_table(table)?;
-            table.insert(key, bytes.as_slice())?;
-        }
-        write_txn.commit()?;
-        Ok(())
+        self.mutate_bucket(table, bits, key, Some(bytes))
     }
 
     /// Removes a node from `table` at `key`, returning whether it existed.
@@ -511,14 +960,82 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb transaction fails.
     #[cfg(test)]
-    pub(crate) fn delete_node(&self, table: TableDefinition<u64, &[u8]>, key: u64) -> Result<bool, StoreError> {
-        let write_txn = self.begin_write()?;
-        let existed = {
-            let mut table = write_txn.open_table(table)?;
-            table.remove(key)?.is_some()
-        };
-        write_txn.commit()?;
+    pub(crate) fn delete_node(
+        &self,
+        table: TableDefinition<u32, &[u8]>,
+        bits: u8,
+        key: u64,
+    ) -> Result<bool, StoreError> {
+        let bucket_key = bucket_id(key, bits);
+        let existed = self.existing_bucket_keys(table, bucket_key)?.contains(&key);
+        self.mutate_bucket(table, bits, key, None)?;
         Ok(existed)
+    }
+
+    /// Whether `key` is already in its bucket, read-only.
+    #[cfg(test)]
+    fn existing_bucket_keys(
+        &self,
+        table: TableDefinition<u32, &[u8]>,
+        bucket_key: u32,
+    ) -> Result<Vec<u64>, StoreError> {
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(table)?;
+        let Some(bucket) = table.get(bucket_key)? else {
+            return Ok(Vec::new());
+        };
+        let mut keys = Vec::new();
+        iter_bucket_keys("bucket", bucket_key, bucket.value(), &mut keys)?;
+        Ok(keys)
+    }
+
+    /// Rewrites the bucket holding `key`, inserting `value` or (with `None`) removing it. A bucket
+    /// left empty is deleted rather than written as a zero-entry row.
+    ///
+    /// Re-encoding the whole bucket is right for the test-only mutation API: one write transaction
+    /// per node, where re-encoding ~64 nodes is noise. A batched writer would rewrite each touched
+    /// bucket once.
+    #[cfg(test)]
+    fn mutate_bucket(
+        &self,
+        table: TableDefinition<u32, &[u8]>,
+        bits: u8,
+        key: u64,
+        value: Option<Vec<u8>>,
+    ) -> Result<(), StoreError> {
+        // `Table::get` is on `ReadableTable`, which only the test-only mutator needs.
+        use redb::ReadableTable as _;
+
+        let bucket_key = bucket_id(key, bits);
+        let write_txn = self.begin_write()?;
+        {
+            let mut table = write_txn.open_table(table)?;
+            let mut entries: Vec<(u64, Vec<u8>)> = match table.get(bucket_key)? {
+                Some(bucket) => {
+                    let mut entries = Vec::new();
+                    iter_bucket_entries("bucket", bucket_key, bucket.value(), |entry_key, bytes| {
+                        entries.push((entry_key, bytes.to_vec()));
+                        Ok(())
+                    })?;
+                    entries
+                }
+                None => Vec::new(),
+            };
+            entries.retain(|(entry_key, _)| *entry_key != key);
+            if let Some(value) = value {
+                entries.push((key, value));
+            }
+            if entries.is_empty() {
+                table.remove(bucket_key)?;
+            } else {
+                entries.sort_unstable_by_key(|(entry_key, _)| *entry_key);
+                let mut blob = Vec::new();
+                encode_bucket_raw(&entries, &mut blob)?;
+                table.insert(bucket_key, blob.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
     }
 
     /// Inserts or replaces a single interned string.
@@ -527,7 +1044,7 @@ impl RedbStore {
     /// Returns an error if serialization or the redb transaction fails.
     #[cfg(test)]
     pub fn put_string(&self, id: StringId, value: &StringRef) -> Result<(), StoreError> {
-        self.put_node(STRINGS, id.get(), value)
+        self.put_node(STRINGS, self.bits.strings, id.get(), value)
     }
 
     /// Inserts or replaces a single declaration node.
@@ -536,7 +1053,7 @@ impl RedbStore {
     /// Returns an error if serialization or the redb transaction fails.
     #[cfg(test)]
     pub fn put_declaration(&self, id: DeclarationId, value: &Declaration) -> Result<(), StoreError> {
-        self.put_node(DECLARATIONS, id.get(), value)
+        self.put_node(DECLARATIONS, self.bits.declarations, id.get(), value)
     }
 
     /// Removes a declaration node, returning whether it existed.
@@ -545,7 +1062,7 @@ impl RedbStore {
     /// Returns an error if the redb transaction fails.
     #[cfg(test)]
     pub fn delete_declaration(&self, id: DeclarationId) -> Result<bool, StoreError> {
-        self.delete_node(DECLARATIONS, id.get())
+        self.delete_node(DECLARATIONS, self.bits.declarations, id.get())
     }
 
     /// Reads and deserializes a node of type `V` from `table` by its `u64` key, if present.
@@ -554,22 +1071,13 @@ impl RedbStore {
     /// Returns an error if the redb read transaction fails.
     fn get_node<V: DeserializeOwned>(
         &self,
-        table: TableDefinition<u64, &[u8]>,
+        table: TableDefinition<u32, &[u8]>,
+        bits: u8,
         name: &'static str,
         key: u64,
     ) -> Result<Option<V>, StoreError> {
         let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(table)?;
-        match table.get(key)? {
-            Some(guard) => postcard::from_bytes::<V>(guard.value())
-                .map(Some)
-                .map_err(|source| StoreError::Corrupt {
-                    table: name,
-                    id: key,
-                    source,
-                }),
-            None => Ok(None),
-        }
+        decode_node(&read_txn, table, bits, name, key)
     }
 
     /// Reads a single interned string, if present.
@@ -577,7 +1085,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_string(&self, id: StringId) -> Result<Option<StringRef>, StoreError> {
-        self.get_node(STRINGS, "strings", id.get())
+        self.get_node(STRINGS, self.bits.strings, "strings", id.get())
     }
 
     /// Reads a single declaration node, if present.
@@ -585,7 +1093,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_declaration(&self, id: DeclarationId) -> Result<Option<Declaration>, StoreError> {
-        self.get_node(DECLARATIONS, "declarations", id.get())
+        self.get_node(DECLARATIONS, self.bits.declarations, "declarations", id.get())
     }
 
     /// Streams every declaration node through `visit` in a single read transaction.
@@ -600,16 +1108,17 @@ impl RedbStore {
     pub fn for_each_declaration(&self, visit: &mut dyn FnMut(DeclarationId, Declaration)) -> Result<(), StoreError> {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DECLARATIONS)?;
-        for entry in table.range(..=u64::MAX)? {
-            let (key, value) = entry?;
-            let id = key.value();
-            let declaration =
-                postcard::from_bytes::<Declaration>(value.value()).map_err(|source| StoreError::Corrupt {
+        for entry in table.range(0..=u32::MAX)? {
+            let (bucket_key, bucket) = entry?;
+            iter_bucket_entries("declarations", bucket_key.value(), bucket.value(), |id, bytes| {
+                let declaration = postcard::from_bytes::<Declaration>(bytes).map_err(|source| StoreError::Corrupt {
                     table: "declarations",
                     id,
                     source,
                 })?;
-            visit(DeclarationId::new(id), declaration);
+                visit(DeclarationId::new(id), declaration);
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -626,30 +1135,25 @@ impl RedbStore {
     ) -> Result<(), StoreError> {
         let read_txn = self.begin_read()?;
         let references = read_txn.open_table(CONSTANT_REFERENCES)?;
-        let names = read_txn.open_table(NAMES)?;
-        for entry in references.range(..=u64::MAX)? {
-            let (key, value) = entry?;
-            let id = key.value();
-            let reference =
-                postcard::from_bytes::<ConstantReference>(value.value()).map_err(|source| StoreError::Corrupt {
-                    table: "constant_references",
-                    id,
-                    source,
-                })?;
-            let name_id = reference.name_id().get();
-            let name = match names.get(name_id)? {
-                Some(guard) => {
-                    Some(
-                        postcard::from_bytes::<NameRef>(guard.value()).map_err(|source| StoreError::Corrupt {
-                            table: "names",
-                            id: name_id,
+        for entry in references.range(0..=u32::MAX)? {
+            let (bucket_key, bucket) = entry?;
+            iter_bucket_entries(
+                "constant_references",
+                bucket_key.value(),
+                bucket.value(),
+                |id, bytes| {
+                    let reference =
+                        postcard::from_bytes::<ConstantReference>(bytes).map_err(|source| StoreError::Corrupt {
+                            table: "constant_references",
+                            id,
                             source,
-                        })?,
-                    )
-                }
-                None => None,
-            };
-            visit(ConstantReferenceId::new(id), reference, name);
+                        })?;
+                    let name_id = reference.name_id().get();
+                    let name = decode_node::<NameRef>(&read_txn, NAMES, self.bits.names, "names", name_id)?;
+                    visit(ConstantReferenceId::new(id), reference, name);
+                    Ok(())
+                },
+            )?;
         }
         Ok(())
     }
@@ -791,53 +1295,60 @@ impl RedbStore {
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
-    fn node_ids<T>(&self, table: TableDefinition<u64, &[u8]>, id: fn(u64) -> T) -> Result<Vec<T>, redb::Error> {
+    fn node_ids<T>(
+        &self,
+        table_def: TableDefinition<u32, &[u8]>,
+        name: &'static str,
+        id: fn(u64) -> T,
+    ) -> Result<Vec<T>, StoreError> {
         let read_txn = self.begin_read()?;
-        let table = read_txn.open_table(table)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<T, redb::Error> { Ok(id(entry?.0.value())) })
-            .collect()
+        let table = read_txn.open_table(table_def)?;
+        let mut raw = Vec::new();
+        for entry in table.range(0..=u32::MAX)? {
+            let (bucket_key, bucket) = entry?;
+            iter_bucket_keys(name, bucket_key.value(), bucket.value(), &mut raw)?;
+        }
+        Ok(raw.into_iter().map(id).collect())
     }
 
     /// Reads all definition node ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
-    pub fn definition_ids(&self) -> Result<Vec<DefinitionId>, redb::Error> {
-        self.node_ids(DEFINITIONS, DefinitionId::new)
+    pub fn definition_ids(&self) -> Result<Vec<DefinitionId>, StoreError> {
+        self.node_ids(DEFINITIONS, "definitions", DefinitionId::new)
     }
 
     /// Reads all declaration node ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
-    pub fn declaration_ids(&self) -> Result<Vec<DeclarationId>, redb::Error> {
-        self.node_ids(DECLARATIONS, DeclarationId::new)
+    pub fn declaration_ids(&self) -> Result<Vec<DeclarationId>, StoreError> {
+        self.node_ids(DECLARATIONS, "declarations", DeclarationId::new)
     }
 
     /// Reads all document node ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
-    pub fn document_ids(&self) -> Result<Vec<UriId>, redb::Error> {
-        self.node_ids(DOCUMENTS, UriId::new)
+    pub fn document_ids(&self) -> Result<Vec<UriId>, StoreError> {
+        self.node_ids(DOCUMENTS, "documents", UriId::new)
     }
 
     /// Reads all constant reference ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
-    pub fn constant_reference_ids(&self) -> Result<Vec<ConstantReferenceId>, redb::Error> {
-        self.node_ids(CONSTANT_REFERENCES, ConstantReferenceId::new)
+    pub fn constant_reference_ids(&self) -> Result<Vec<ConstantReferenceId>, StoreError> {
+        self.node_ids(CONSTANT_REFERENCES, "constant_references", ConstantReferenceId::new)
     }
 
     /// Reads all method reference ids for enumeration.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
-    pub fn method_reference_ids(&self) -> Result<Vec<MethodReferenceId>, redb::Error> {
-        self.node_ids(METHOD_REFERENCES, MethodReferenceId::new)
+    pub fn method_reference_ids(&self) -> Result<Vec<MethodReferenceId>, StoreError> {
+        self.node_ids(METHOD_REFERENCES, "method_references", MethodReferenceId::new)
     }
 
     /// Reads a single definition node, if present.
@@ -845,7 +1356,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_definition(&self, id: DefinitionId) -> Result<Option<Definition>, StoreError> {
-        self.get_node(DEFINITIONS, "definitions", id.get())
+        self.get_node(DEFINITIONS, self.bits.definitions, "definitions", id.get())
     }
 
     /// Reads a single name node, if present.
@@ -853,7 +1364,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_name(&self, id: NameId) -> Result<Option<NameRef>, StoreError> {
-        self.get_node(NAMES, "names", id.get())
+        self.get_node(NAMES, self.bits.names, "names", id.get())
     }
 
     /// Reads a single constant reference node, if present.
@@ -861,7 +1372,12 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_constant_reference(&self, id: ConstantReferenceId) -> Result<Option<ConstantReference>, StoreError> {
-        self.get_node(CONSTANT_REFERENCES, "constant_references", id.get())
+        self.get_node(
+            CONSTANT_REFERENCES,
+            self.bits.constant_references,
+            "constant_references",
+            id.get(),
+        )
     }
 
     /// Reads a single method reference node, if present.
@@ -869,7 +1385,12 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_method_reference(&self, id: MethodReferenceId) -> Result<Option<MethodRef>, StoreError> {
-        self.get_node(METHOD_REFERENCES, "method_references", id.get())
+        self.get_node(
+            METHOD_REFERENCES,
+            self.bits.method_references,
+            "method_references",
+            id.get(),
+        )
     }
 
     /// Reads a single document node, if present.
@@ -877,7 +1398,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_document(&self, id: UriId) -> Result<Option<Document>, StoreError> {
-        self.get_node(DOCUMENTS, "documents", id.get())
+        self.get_node(DOCUMENTS, self.bits.documents, "documents", id.get())
     }
 
     /// Streams the `DOCUMENTS` table, returning every `(uri_id, diagnostic)` the store recorded,
@@ -889,20 +1410,23 @@ impl RedbStore {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DOCUMENTS)?;
         let mut diagnostics = Vec::new();
-        for entry in table.range(..=u64::MAX)? {
-            let (id, bytes) = entry?;
-            let uri_id = UriId::new(id.value());
-            let document: Document = postcard::from_bytes(bytes.value()).map_err(|source| StoreError::Corrupt {
-                table: "documents",
-                id: id.value(),
-                source,
+        for entry in table.range(0..=u32::MAX)? {
+            let (bucket_key, bucket) = entry?;
+            iter_bucket_entries("documents", bucket_key.value(), bucket.value(), |id, bytes| {
+                let uri_id = UriId::new(id);
+                let document: Document = postcard::from_bytes(bytes).map_err(|source| StoreError::Corrupt {
+                    table: "documents",
+                    id,
+                    source,
+                })?;
+                diagnostics.extend(
+                    document
+                        .diagnostics()
+                        .iter()
+                        .map(|diagnostic| (uri_id, diagnostic.clone())),
+                );
+                Ok(())
             })?;
-            diagnostics.extend(
-                document
-                    .diagnostics()
-                    .iter()
-                    .map(|diagnostic| (uri_id, diagnostic.clone())),
-            );
         }
         Ok(diagnostics)
     }
@@ -912,7 +1436,7 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction fails.
     pub fn get_name_dependents(&self, id: NameId) -> Result<Option<Vec<NameDependent>>, StoreError> {
-        self.get_node(NAME_DEPENDENTS, "name_dependents", id.get())
+        self.get_node(NAME_DEPENDENTS, self.bits.name_dependents, "name_dependents", id.get())
     }
 }
 
@@ -1193,6 +1717,41 @@ mod tests {
         );
     }
 
+    /// Overwrites the `DECLARATIONS` bucket holding `id` with `bytes`, then reopens the store.
+    fn corrupt_declaration_bucket(path: &Path, bucket_key: u32, bytes: &[u8]) {
+        let db = Database::builder().open(path).expect("open for corruption");
+        let txn = db.begin_write().expect("write transaction");
+        {
+            let mut table = txn.open_table(DECLARATIONS).expect("declarations table");
+            table.insert(bucket_key, bytes).expect("corrupt node");
+        }
+        txn.commit().expect("commit corruption");
+    }
+
+    #[test]
+    fn for_each_store_declaration_records_a_corrupt_bucket_without_panicking() {
+        let graph = Graph::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        let store = RedbStore::build(&path, &graph).expect("build store");
+        let id = store
+            .declaration_ids()
+            .expect("declaration ids")
+            .into_iter()
+            .next()
+            .expect("the built-in seed has declarations");
+        let bits = store.bits.declarations;
+        drop(store);
+
+        corrupt_declaration_bucket(&path, bucket_id(id.get(), bits), &[0xff_u8, 0xff, 0xff]);
+        let graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        graph.for_each_store_declaration(|_, _| {});
+        assert!(
+            graph.store_error_count() > 0,
+            "a bucket that fails structural validation must be recorded, not panicked on"
+        );
+    }
+
     #[test]
     fn for_each_store_declaration_records_a_corrupt_node_without_panicking() {
         let graph = Graph::new();
@@ -1205,26 +1764,47 @@ mod tests {
             .into_iter()
             .next()
             .expect("the built-in seed has declarations");
+        let bits = store.bits.declarations;
         drop(store);
 
-        let db = Database::builder().open(&path).expect("open for corruption");
-        let txn = db.begin_write().expect("write transaction");
-        {
-            let mut table = txn.open_table(DECLARATIONS).expect("declarations table");
-            table
-                .insert(id.get(), &[0xff_u8, 0xff, 0xff][..])
-                .expect("corrupt node");
-        }
-        txn.commit().expect("commit corruption");
-        drop(db);
+        // A structurally valid bucket whose one entry's postcard payload is garbage: proves the
+        // bucket layer passes through to the node decoder rather than swallowing it.
+        let mut bucket = Vec::new();
+        write_bucket(1, &[id.get()], &[0, 3], &[0xff, 0xff, 0xff], &mut bucket);
+        corrupt_declaration_bucket(&path, bucket_id(id.get(), bits), &bucket);
 
         let graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
         graph.for_each_store_declaration(|_, _| {});
-
         assert!(
             graph.store_error_count() > 0,
             "a corrupt node must be recorded, not panicked on"
         );
+    }
+
+    #[test]
+    fn bucket_ids_cover_the_whole_u64_key_space() {
+        assert_eq!(bucket_id(0, 0), 0, "a table with one bucket hashes everything to 0");
+        assert_eq!(bucket_id(u64::MAX, 0), 0);
+        for bits in 1..=MAX_BUCKET_BITS {
+            let buckets = 1_u64 << bits;
+            for key in [0, 1, u64::MAX - 1, u64::MAX] {
+                let bucket = u64::from(bucket_id(key, bits));
+                assert!(bucket < buckets, "bucket {bucket} out of range for {bits} bits");
+            }
+            // The top bits are the bucket: two keys that differ only in the low bits collide.
+            assert_eq!(bucket_id(u64::MAX, bits), bucket_id(u64::MAX - 1, bits));
+            assert_eq!(bucket_id(0, bits), 0);
+            assert_eq!(bucket_id(u64::MAX, bits), u32::from(u16::MAX >> (16 - bits)));
+        }
+    }
+
+    #[test]
+    fn bucket_bits_grow_with_the_entry_count() {
+        assert_eq!(bucket_bits_for_count(0, 64), 0);
+        assert_eq!(bucket_bits_for_count(64, 64), 0);
+        assert_eq!(bucket_bits_for_count(65, 64), 1);
+        assert_eq!(bucket_bits_for_count(192, 64), 2);
+        assert!(bucket_bits_for_count(usize::MAX / 2, 64) <= MAX_BUCKET_BITS);
     }
 
     #[test]

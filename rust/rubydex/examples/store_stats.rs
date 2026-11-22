@@ -82,6 +82,33 @@ fn time_scan(path: &str) {
     }
     println!("scan-only all: {:?}/op ({n} matches)", start.elapsed() / 20);
 
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        n = graph
+            .store_declaration_ids_matching(&|_, name| name.contains("String"))
+            .into_iter()
+            .filter_map(|id| graph.declaration(id))
+            .count();
+    }
+    println!("exact scan + point reads: {:?}/op ({n} matches)", start.elapsed() / 20);
+
+    let ids = graph.store_declaration_ids_matching(&|_, name| name.contains("String"));
+    let start = std::time::Instant::now();
+    for _ in 0..200 {
+        std::hint::black_box(ids.iter().filter_map(|id| graph.declaration(*id)).count());
+    }
+    println!("point reads only: {:?}/op ({} ids)", start.elapsed() / 200, ids.len());
+
+    let start = std::time::Instant::now();
+    for _ in 0..200 {
+        std::hint::black_box(
+            graph
+                .store_declaration_ids_matching(&|_, name| name.contains("String"))
+                .len(),
+        );
+    }
+    println!("exact scan only: {:?}/op", start.elapsed() / 200);
+
     let fuzzy = |name: &str| {
         let mut query = "arbs".chars().peekable();
         for character in name.chars() {
@@ -102,7 +129,10 @@ fn time_scan(path: &str) {
             .filter_map(|id| graph.declaration(id))
             .count();
     }
-    println!("fuzzy scan + point reads (FQN order): {:?}/op ({n} matches)", start.elapsed() / 20);
+    println!(
+        "fuzzy scan + point reads (FQN order): {:?}/op ({n} matches)",
+        start.elapsed() / 20
+    );
 
     let start = std::time::Instant::now();
     let mut sorted = 0;
@@ -112,5 +142,8 @@ fn time_scan(path: &str) {
         n = ids.into_iter().filter_map(|id| graph.declaration(id)).count();
         sorted += n;
     }
-    println!("fuzzy scan + sort + point reads (id order): {:?}/op ({n} matches, {sorted})", start.elapsed() / 20);
+    println!(
+        "fuzzy scan + sort + point reads (id order): {:?}/op ({n} matches, {sorted})",
+        start.elapsed() / 20
+    );
 }

@@ -26,17 +26,32 @@ fn indexed_graph() -> Graph {
     graph
 }
 
-/// Overwrites one node's bytes with a structurally valid postcard payload of the wrong shape,
-/// standing in for a store written by an incompatible layout or damaged in transit.
+/// Overwrites every bucket row of `table_name` with a structurally valid bucket holding `id` and a
+/// payload that is not a node, standing in for a store written by an incompatible layout or damaged
+/// in transit. Writing it to every row avoids the test needing to know the store's bucket bit count.
 fn corrupt_node(table_name: &str, id: u64, path: &std::path::Path) {
+    let mut bad_bucket = Vec::new();
+    bad_bucket.extend_from_slice(&1_u32.to_le_bytes()); // one entry
+    bad_bucket.extend_from_slice(&id.to_le_bytes());
+    bad_bucket.extend_from_slice(&0_u32.to_le_bytes()); // payload offset of entry 0
+    bad_bucket.extend_from_slice(&3_u32.to_le_bytes()); // payload end
+    bad_bucket.extend_from_slice(&[0xff, 0xff, 0xff]);
+
     let db = redb::Database::builder().open(path).expect("open for corruption");
     let write_txn = db.begin_write().expect("write txn");
     {
+        use redb::ReadableTable;
         let mut table = write_txn
-            .open_table(redb::TableDefinition::<u64, &[u8]>::new(table_name))
+            .open_table(redb::TableDefinition::<u32, &[u8]>::new(table_name))
             .expect("table");
-        let wrong_shape = postcard::to_allocvec(&vec![1u8, 2, 3]).expect("encode");
-        table.insert(id, wrong_shape.as_slice()).expect("overwrite");
+        let keys: Vec<u32> = table
+            .range(0..=u32::MAX)
+            .expect("range")
+            .map(|entry| entry.expect("entry").0.value())
+            .collect();
+        for key in keys {
+            table.insert(key, bad_bucket.as_slice()).expect("overwrite");
+        }
     }
     write_txn.commit().expect("commit corruption");
 }

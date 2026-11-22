@@ -16,7 +16,7 @@
 - [x] Phase 1 gate — Rust + focused Ruby tests; measured; committed
 - [x] Phase 2 — `StoreError::CorruptBlock`, front-coded codec, sharded `SEARCH_NAMES`, packed `DOCUMENT_URIS`
 - [x] Phase 2 gate — Rust + `test/disk_index_enumerators_test.rb`; measured; committed
-- [ ] Phase 3A — hash-prefix bucketed node tables + parallel build
+- [x] Phase 3A — hash-prefix bucketed node tables + parallel build
 - [ ] Phase 3B — LZ4 block compression on buckets and search shards
 - [ ] Phase 3B gate — Rust + focused Ruby tests; measured; committed
 - [ ] Phase 4.1 — record `"workspace"` in `index.redb.files`
@@ -27,13 +27,13 @@
 **Measured so far** (30,738-file gems corpus; redb `TableStats` page footprint, because the `.redb`
 file itself grows in redb's doubling steps — see the Phase 1 note):
 
-| | Phase 0 | Phase 1 | Phase 2 |
-| --- | --- | --- | --- |
-| `stored + fragmented + metadata` | 723 MB | 646 MB | 539 MB |
-| `.redb` file | 1028 MB | 1028 MB | 515 MB |
-| `Store build` | 3.86 s | 3.68 s | 3.52 s |
-| search exact / fuzzy | 12.6 / 61.0 ms | — | 6.2 / 62.1 ms |
-| `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | — | 0.36 / 0.81 / 6.0 ms |
+| | Phase 0 | Phase 1 | Phase 2 | Phase 3A |
+| --- | --- | --- | --- | --- |
+| `stored + fragmented + metadata` | 723 MB | 646 MB | 539 MB | 415 MB |
+| `.redb` file | 1028 MB | 1028 MB | 515 MB | 515 MB |
+| `Store build` | 3.86 s | 3.68 s | 3.52 s | 0.69 s |
+| search exact / fuzzy | 12.6 / 61.0 ms | — | 6.2 / 62.1 ms | 10–13 / 61 ms |
+| `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | — | 0.36 / 0.81 / 6.0 ms | 0.36 / 0.81 / 6.5 ms |
 
 **Background analysis:** `docs/disk-persisted-index/database_diet.md`, `docs/disk-persisted-index/perf-and-cleanup.md`, `docs/disk-persisted-index/memory-baseline.md`.
 
