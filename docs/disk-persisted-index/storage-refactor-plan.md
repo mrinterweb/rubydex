@@ -39,6 +39,13 @@
 | search exact / fuzzy | 12.6 / 61.0 ms | — | 6.2 / 62.1 ms | 6.7–9.7 / 61.3 ms |
 | `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | — | 0.36 / 0.81 / 6.0 ms | 0.36 / 0.83 / 6.4 ms |
 
+**Note on the `.redb` file size.** redb doubles its file as it grows
+(`page_manager.rs`'s `grow`), so the file size moves in large steps and is not a live-data metric: it
+stayed at 1028 MB through Phases 1 and 2 while a third of the payload went away, then dropped to
+515 MB during Phase 3. The live leaf-page footprint is the honest number. 288 MB of live pages sits
+just above redb's 256 MB step, which is why the file is 515 MB instead of ~290 MB; roughly 27 MB less
+live data would halve it again.
+
 ### Phase 3B outcome: compression rejected on measurement
 
 Implemented as specified (LZ4 behind a 4-byte length header on every bucket and shard), measured on
@@ -61,7 +68,7 @@ comment text (17 MB of `definitions`) and the duplicated FQN/URI projection tabl
 already removed both, and what is left is dominated by uniformly-distributed 64-bit content hashes,
 which LZ77 cannot match. And LZ4 has to decompress a whole ~10 KB bucket to answer one point read, so
 the fuzzy search path (48k point reads) pays ~0.6 µs per read: 61 ms → 93 ms. A 6% payload cut that
-does not even move the file size (redb doubles its file; see the Phase 1 note) is not worth a 50%
+does not even move the file size (redb doubles its file; see the note above) is not worth a 50%
 regression on search.
 
 **Background analysis:** `docs/disk-persisted-index/database_diet.md`, `docs/disk-persisted-index/perf-and-cleanup.md`, `docs/disk-persisted-index/memory-baseline.md`.
