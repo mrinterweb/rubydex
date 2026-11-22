@@ -187,15 +187,30 @@ mod tests {
 
     #[test]
     fn keeps_unreadable_workspaces_that_are_not_missing() {
-        // A permission error is not a deletion: pointing at a file instead of a directory gives a
-        // non-`NotFound` failure for the path's children without needing to change permissions.
+        // A non-`NotFound` stat failure is not a deletion: traversing beneath a regular file yields
+        // `NotADirectory` on Unix without needing to change permissions.
         let cache = tempfile::tempdir().expect("cache");
         let workspace = tempfile::tempdir().expect("workspace");
         let file = workspace.path().join("a-file");
         std::fs::write(&file, b"").expect("write file");
+        let beneath_file = file.join("child");
+        #[cfg(unix)]
+        {
+            let err = std::fs::metadata(&beneath_file).expect_err("traversing a file must error");
+            assert_ne!(
+                err.kind(),
+                std::io::ErrorKind::NotFound,
+                "expected a non-NotFound error to exercise the non-deletion branch"
+            );
+        }
 
-        let dir = store_dir(cache.path(), "abc123", Some(&file));
-        assert_eq!(0, prune_orphaned_stores(cache.path(), &[]));
-        assert!(dir.exists());
+        let dir = store_dir(cache.path(), "abc123", Some(&beneath_file));
+        #[cfg(unix)]
+        {
+            assert_eq!(0, prune_orphaned_stores(cache.path(), &[]));
+            assert!(dir.exists());
+        }
+        #[cfg(not(unix))]
+        let _ = dir;
     }
 }

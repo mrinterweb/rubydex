@@ -89,11 +89,11 @@ fn main() {
         let debounce = Duration::from_millis(args.debounce_ms.into());
         let mut watches: Vec<Watch> = Vec::<Watch>::new();
         let mut last_sync: Option<Instant> = None;
-        let mut last_prune: Option<Instant> = None;
         prune(
             &args.registry,
             &rubydex_index_manager::registry::live_sessions(&args.registry),
         );
+        let mut last_prune = Instant::now();
 
         loop {
             // Re-scan the registry on the debounce cadence instead of every 20ms idle tick, so an
@@ -107,9 +107,9 @@ fn main() {
                 sync(&mut watches, groups(&sessions), debounce);
                 last_sync = Some(Instant::now());
 
-                if last_prune.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL) {
+                if last_prune.elapsed() >= PRUNE_INTERVAL {
                     prune(&args.registry, &sessions);
-                    last_prune = Some(Instant::now());
+                    last_prune = Instant::now();
                 }
             }
 

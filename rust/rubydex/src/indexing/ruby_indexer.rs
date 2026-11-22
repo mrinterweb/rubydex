@@ -1541,19 +1541,12 @@ impl CommentGroup {
     // 2. not add the comment to the comments array
     fn add_comment(&mut self, comment: &ruby_prism::Comment) {
         self.end_offset = comment.location().end() as usize;
-        let slice = comment.location().as_slice();
-
-        if slice
-            .split(|&byte| byte == b'\n')
-            .any(|line| line.starts_with(b"# @deprecated"))
-        {
-            self.deprecated = true;
-        }
-
-        self.comments.push(Comment::new(
+        let (comment, deprecated) = Comment::from_source_bytes(
             Offset::from_prism_location(&comment.location()),
-            String::from_utf8_lossy(slice).trim().into(),
-        ));
+            comment.location().as_slice(),
+        );
+        self.deprecated |= deprecated;
+        self.comments.push(comment);
     }
 
     fn comments(&self) -> Box<[Comment]> {

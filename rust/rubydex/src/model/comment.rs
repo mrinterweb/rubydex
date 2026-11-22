@@ -22,6 +22,16 @@ impl Comment {
         }
     }
 
+    /// Builds a comment from raw source bytes and reports whether any line carries `# @deprecated`.
+    #[must_use]
+    pub fn from_source_bytes(offset: Offset, slice: &[u8]) -> (Self, bool) {
+        let deprecated = slice
+            .split(|&byte| byte == b'\n')
+            .any(|line| line.starts_with(b"# @deprecated"));
+        let comment = Self::new(offset, String::from_utf8_lossy(slice).trim().into());
+        (comment, deprecated)
+    }
+
     #[must_use]
     pub fn offset(&self) -> &Offset {
         &self.offset

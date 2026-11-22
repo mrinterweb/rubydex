@@ -6,9 +6,10 @@ background daemon keeps stores fresh.
 
 ## Architecture & File Map
 
-- **Storage engine (`rust/rubydex/src/model/store.rs`)**: `RedbStore` (format v3). Eight node tables
-  are hash-prefix bucketed (~64 nodes/row, 16 for `documents`) under `u32` bucket keys and encoded
-  in parallel; `search_names` (32 shards) and `document_uris` (1 block) are front-coded. `Id<T>`
+- **Storage engine (`rust/rubydex/src/model/store/`)**: `RedbStore` (format v3) in `mod.rs` and
+  pure binary codecs (front-coding + hash-prefix buckets) in `format.rs`. Eight node tables are
+  hash-prefix bucketed (~64 nodes/row, 16 for `documents`) under `u32` bucket keys and encoded in
+  parallel; `search_names` (32 shards) and `document_uris` (1 block) are front-coded. `Id<T>`
   encodes as fixed 8-byte LE.
 - **Layered graph (`rust/rubydex/src/model/graph.rs`)**: `Graph::with_store` / `attach_store`
   layers an in-memory overlay over `RedbStore`. Reads check memory/tombstones first, then disk.

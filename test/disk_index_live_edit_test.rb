@@ -82,6 +82,13 @@ class DiskIndexLiveEditTest < Minitest::Test
     foo = graph["Foo"]
     refute_nil(foo, "graph[\"Foo\"] should read from the store")
     assert_equal(["# Doc comment"], foo.definitions.first.comments.map(&:string))
+
+    # Edit/truncate the file on disk behind the store (without refreshing): attaching directly
+    # exercises the C FFI comment path against stale offsets and must return empty text, not crash.
+    File.write(rb, "x\n")
+    stale = Rubydex::Graph.new
+    stale.attach_store(graph.send(:store_cache_path))
+    assert_equal([""], stale["Foo"].definitions.first.comments.map(&:string))
   end
 
   def test_failed_store_build_cleans_up_temp_files
