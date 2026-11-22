@@ -31,6 +31,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     # cannot race `remove_entry` (noisy stderr on POSIX, EACCES/ENOTEMPTY on Windows).
     @graphs&.each do |graph|
       graph.instance_variable_get(:@rebuild_process)&.join(30)
+      graph.detach_store
     end
     ENV.delete("RUBYDEX_DISK_INDEX")
     ENV.delete("RUBYDEX_REFRESH_TTL")
@@ -182,7 +183,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
 
     Timeout.timeout(120) do
       sleep(0.05) until (manifest = File.read("#{cache}.files")).start_with?("{")
-      assert_equal(["files", "lockfile", "workspace"], JSON.parse(manifest).keys.sort)
+      assert_equal(["files", "lockfile", "store", "workspace"], JSON.parse(manifest).keys.sort)
     end
     assert(File.exist?("#{cache}.hash"), "the rebuild republished the marker too")
   end

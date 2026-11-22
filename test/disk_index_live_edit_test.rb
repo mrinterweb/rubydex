@@ -87,8 +87,46 @@ class DiskIndexLiveEditTest < Minitest::Test
     # exercises the C FFI comment path against stale offsets and must return empty text, not crash.
     File.write(rb, "x\n")
     stale = Rubydex::Graph.new
-    stale.attach_store(graph.send(:store_cache_path))
+    stale.attach_store(graph.send(:active_store_path))
     assert_equal([""], stale["Foo"].definitions.first.comments.map(&:string))
+  ensure
+    stale&.detach_store
+    graph&.detach_store
+  end
+
+  def test_rebuilds_publish_new_generations_and_reject_unsafe_store_names
+    skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
+
+    rb = File.join(@tmp, "foo.rb")
+    File.write(rb, "class Foo; end\n")
+
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
+    graph.index_workspace
+    cache = graph.send(:store_cache_path)
+    first_gen = graph.send(:active_store_path)
+    assert_match(Rubydex::Graph::GENERATION_STORE_PATTERN, File.basename(first_gen))
+
+    # A rebuild writes a fresh generation file and cleans up the old one once published.
+    graph.send(:build_store_in_child, cache)
+    second_gen = File.join(File.dirname(cache), JSON.parse(File.read("#{cache}.files")).fetch("store"))
+    refute_equal(first_gen, second_gen, "each rebuild must write a distinct generation file")
+    assert(File.exist?(second_gen))
+    unless Gem.win_platform?
+      refute(File.exist?(first_gen), "POSIX unlinks superseded generations immediately")
+    end
+
+    # Moving the session onto the new generation releases its handle on the old one and deletes it.
+    graph.send(:attach_store_generation, second_gen)
+    refute(File.exist?(first_gen), "detaching the old generation cleans it up")
+
+    # Trust boundary: a manifest naming a path outside the store directory must be rejected.
+    File.write(
+      "#{cache}.files",
+      JSON.generate({ "store" => "../escape.redb", "lockfile" => "no-lockfile", "files" => {} }),
+    )
+    assert_equal([nil, nil, nil], graph.send(:read_manifest, "#{cache}.files"))
+  ensure
+    graph&.detach_store
   end
 
   def test_failed_store_build_cleans_up_temp_files

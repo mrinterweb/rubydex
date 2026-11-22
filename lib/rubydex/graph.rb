@@ -3,6 +3,7 @@
 require "fileutils"
 require "json"
 require "open3"
+require "securerandom"
 require "rubydex/index_manager"
 
 module Rubydex
@@ -11,6 +12,10 @@ module Rubydex
   # Note: this class is partially defined in C to integrate with the Rust backend
   class Graph
     INDEXABLE_EXTENSIONS = [".rb", ".rake", ".rbs", ".ru"].freeze
+    # Immutable per-build store filename inside the store directory. A rebuild writes a new
+    # generation and points `index.redb.files` at it instead of replacing an open `.redb` file
+    # in place, so Windows sessions can keep reading the old snapshot while a rebuild publishes.
+    GENERATION_STORE_PATTERN = /\Aindex\.[0-9a-f]{16}\.redb\z/
     # A rebuild lock older than this is treated as abandoned (a builder that crashed) and
     # reclaimed, so a directory can never wedge itself out of rebuilding forever.
     REBUILD_LOCK_TIMEOUT = 30 * 60
@@ -85,16 +90,23 @@ module Rubydex
 
       cache = store_cache_path
       @head_sha = workspace_head
-      if File.exist?(cache)
+      # Parse the manifest once up front so warm boot knows which generation file to open without
+      # reading `index.redb.files` twice. When the manifest is absent or unusable, fall back to the
+      # legacy `index.redb` path so an older store can still be quarantined or rebuilt in the background.
+      adopted = adopt_manifest(cache)
+      store_file = @manifest_store_path || cache
+      if File.exist?(store_file)
         begin
-          attach_store(cache)
+          attach_store_generation(store_file)
         rescue RuntimeError # no usable snapshot: wait for a new store instead of serving the old one
           build_store_in_child(cache)
-          attach_store(cache)
+          adopted = adopt_manifest(cache)
+          attach_store_generation(@manifest_store_path || cache)
         end
       else
         build_store_in_child(cache)
-        attach_store(cache)
+        adopted = adopt_manifest(cache)
+        attach_store_generation(@manifest_store_path || cache)
       end
       return index_all(workspace_paths) if quarantine_if_untrustworthy(cache)
 
@@ -102,7 +114,7 @@ module Rubydex
       # and is the baseline a surgical refresh diffs against. A workspace can commit the store (and its
       # marker) without one, so an unprovenanced snapshot is never served — it gets the same answer a
       # corrupt store gets. A stale store *with* a manifest is fine: it answers while it refreshes.
-      if adopt_manifest(cache)
+      if adopted
         # One walk and one digest for the whole boot: the marker is exactly the signature this
         # session would publish, and `adopt_manifest` already parsed the sidecar that
         # `store_published?` would parse again.
@@ -119,7 +131,7 @@ module Rubydex
         end
       else
         warn("rubydex: disk-backed index has no usable provenance; indexing in memory")
-        detach_store
+        detach_attached_store
         index_all(workspace_paths)
         resolve
         # Only a build rewrites the sidecar, so leave one running: without it every boot on this
@@ -140,7 +152,7 @@ module Rubydex
       # corrupt manifest sidecar, an unreadable scan) has to detach before the fallback is real.
       # No store feature compiled in means nothing was ever attached, and `detach_store` raises
       # rather than no-op there — which would replace the failure being recovered from.
-      detach_store if respond_to?(:detach_store) && self.class.store_format_version.positive?
+      detach_attached_store if respond_to?(:detach_store) && self.class.store_format_version.positive?
       index_all(workspace_paths)
     end
 
@@ -169,7 +181,7 @@ module Rubydex
 
       marker = "#{cache}.hash"
       if store_published?(marker, expected_marker, cache)
-        attach_store(cache)
+        attach_store_generation(@manifest_store_path || cache)
       elsif (changes = surgical_changes(scan))
         apply_changes(changes)
         @applied_files = scan
@@ -179,7 +191,7 @@ module Rubydex
           @rebuild_process = nil
           unless status.success?
             warn("rubydex: store rebuild failed; falling back to in-memory")
-            detach_store
+            detach_attached_store
             index_all(workspace_paths)
             resolve
             @session_signature = signature
@@ -188,17 +200,7 @@ module Rubydex
         end
 
         if (lock = claim_rebuild(cache))
-          if Gem.win_platform?
-            # shortcut: Windows cannot replace an open store; use a generation path to serve the
-            # old snapshot during a background rebuild.
-            begin
-              build_store_in_child(cache, scan)
-            ensure
-              release_rebuild_lock(lock)
-            end
-          else
-            launch_rebuild(cache, lock)
-          end
+          launch_rebuild(cache, lock)
         end
 
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.1
@@ -209,7 +211,7 @@ module Rubydex
         end
         return false unless store_published?(marker, expected_marker, cache)
 
-        attach_store(cache)
+        attach_store_generation(@manifest_store_path || cache)
       end
       @session_signature = signature
       true
@@ -233,8 +235,15 @@ module Rubydex
       return false unless respond_to?(:store_errors) && store_errors.positive?
 
       warn("rubydex: disk-backed index returned errors; quarantining the store and indexing in memory")
-      detach_store
-      FileUtils.mv(cache, "#{cache}.corrupt", force: true)
+      store_file = @attached_store_path || cache
+      detach_attached_store
+      begin
+        FileUtils.mv(store_file, "#{cache}.corrupt", force: true) if File.exist?(store_file)
+      rescue SystemCallError
+        # Another session on Windows may still hold the corrupt file open; dropping the marker
+        # below is still enough to make the next run rebuild cleanly.
+        nil
+      end
       FileUtils.rm_f("#{cache}.hash")
       true
     end
@@ -338,31 +347,43 @@ module Rubydex
     # baseline to diff against and no record of what it holds, so callers rebuild instead of serving it.
     #: (String) -> bool
     def adopt_manifest(cache)
-      files, lockfile = read_manifest("#{cache}.files")
+      files, lockfile, store_file = read_manifest("#{cache}.files")
+      return false unless files && store_file && File.exist?(store_file)
+
       # What the attached store holds, kept apart from `@applied_files` (what this session is serving)
       # so the overlay can be measured against the store it sits on.
       @manifest_files = files
       @applied_files = files
       @applied_lockfile = lockfile
-      !files.nil?
+      @manifest_store_path = store_file
+      true
     end
 
-    # Parses a manifest sidecar, returning `[files, lockfile]`, or `[nil, nil]` when it is absent or
-    # not the shape this version writes.
-    #: (String) -> [Hash[String, String]?, String?]
+    # Parses a manifest sidecar, returning `[files, lockfile, store_file]`, or `[nil, nil, nil]`
+    # when it is absent or not the shape this version writes.
+    #: (String) -> [Hash[String, String]?, String?, String?]
     def read_manifest(path)
       manifest = JSON.parse(File.read(path))
       files = manifest["files"] if manifest.is_a?(Hash)
-      return [nil, nil] unless files.is_a?(Hash) && files.all? { |rel, stamp| rel.is_a?(String) && stamp.is_a?(String) }
+      return [nil, nil, nil] unless files.is_a?(Hash) && files.all? { |rel, stamp| rel.is_a?(String) && stamp.is_a?(String) }
 
       lockfile = manifest["lockfile"]
-      return [nil, nil] unless lockfile.nil? || lockfile.is_a?(String)
+      return [nil, nil, nil] unless lockfile.nil? || lockfile.is_a?(String)
 
-      [files, lockfile]
+      store_file = if manifest.key?("store")
+        store_name = manifest["store"]
+        return [nil, nil, nil] unless store_name.is_a?(String) && store_name.match?(GENERATION_STORE_PATTERN)
+
+        File.join(File.dirname(path), store_name)
+      else
+        path.delete_suffix(".files")
+      end
+
+      [files, lockfile, store_file]
     rescue SystemCallError, JSON::ParserError, EncodingError
       # Unreadable, not JSON at all, or JSON with an encoding a `String` key cannot hold: all of them
       # mean "no usable manifest", never "raise into the editor's tool call".
-      [nil, nil]
+      [nil, nil, nil]
     end
 
     #: (String cache, String lock) -> void
@@ -720,7 +741,79 @@ module Rubydex
     # next anyway: the manifest is the baseline a surgical refresh diffs against.
     #: (String marker, String expected_marker, String cache) -> bool
     def store_published?(marker, expected_marker, cache)
-      File.exist?(marker) && File.read(marker) == expected_marker && adopt_manifest(cache)
+      return false unless File.exist?(marker)
+
+      File.read(marker) == expected_marker && adopt_manifest(cache)
+    rescue SystemCallError
+      # A Windows builder renaming the marker at this instant can fail the read transiently; the
+      # caller's poll loop retries on the next tick.
+      false
+    end
+
+    # Path of the actual `.redb` data file this session is attached to (or that the manifest names),
+    # falling back to the logical `index.redb` path for legacy stores.
+    #: (?String) -> String
+    def active_store_path(cache = store_cache_path)
+      @attached_store_path || @manifest_store_path || cache
+    end
+
+    # Attaches a store generation and releases our handle on any previous generation, then deletes
+    # that previous generation if nothing else holds it open.
+    #: (String) -> void
+    def attach_store_generation(path)
+      previous = @attached_store_path
+      attach_store(path)
+      @attached_store_path = path
+      return unless previous && previous != path && File.basename(previous).match?(GENERATION_STORE_PATTERN)
+
+      begin
+        File.delete(previous)
+      rescue SystemCallError
+        nil
+      end
+    end
+
+    #: -> void
+    def detach_attached_store
+      detach_store
+      @attached_store_path = nil
+    end
+
+    # Renames `src` onto `dst`, retrying briefly on Windows where a reader or AV scanner can hold
+    # the short-lived sidecar open for a few milliseconds.
+    #: (String, String) -> void
+    def rename_with_retry(src, dst)
+      attempts = 0
+      begin
+        File.rename(src, dst)
+      rescue SystemCallError
+        if Gem.win_platform? && (attempts += 1) < 5
+          sleep(0.05 * attempts)
+          retry
+        end
+        raise
+      end
+    end
+
+    # Best-effort sweep of older generation files (and any legacy `index.redb`) after a new
+    # generation is published. Files still held open by another Windows session fail with EACCES
+    # and are skipped until that session moves on or the manager's prune pass reaps them.
+    #: (String, String) -> void
+    def cleanup_stale_generations(cache, keep_basename)
+      dir = File.dirname(cache)
+      legacy = File.basename(cache)
+      Dir.each_child(dir) do |entry|
+        next if entry == keep_basename
+        next unless entry == legacy || entry.match?(GENERATION_STORE_PATTERN)
+
+        begin
+          File.delete(File.join(dir, entry))
+        rescue SystemCallError
+          nil
+        end
+      end
+    rescue SystemCallError
+      nil
     end
 
     # Builds the store in a short-lived child process (whose peak indexing memory is reclaimed
@@ -734,6 +827,8 @@ module Rubydex
       require "rbconfig"
       FileUtils.mkdir_p(File.dirname(cache))
       ensure_store_ignored(File.dirname(cache))
+      gen_name = "index.#{SecureRandom.hex(8)}.redb"
+      gen_path = File.join(File.dirname(cache), gen_name)
       tmp = "#{cache}.#{Process.pid}.building"
       marker = "#{cache}.hash"
       marker_tmp = "#{marker}.#{Process.pid}.building"
@@ -741,6 +836,7 @@ module Rubydex
       manifest_tmp = "#{manifest}.#{Process.pid}.building"
       builder = File.expand_path("store_builder.rb", __dir__)
       lockfile = lockfile_hash
+      manifest_published = false
 
       begin
         pid = Process.spawn(RbConfig.ruby, "-I#{File.expand_path("..", __dir__)}", builder, tmp, workspace_path)
@@ -748,15 +844,12 @@ module Rubydex
         raise "store build subprocess failed (#{status&.exitstatus})" unless status&.success?
         raise "Gemfile.lock changed while building the store" unless lockfile_hash == lockfile
 
-        # Publish order matters for concurrent correctness: rename the store first, then the marker.
-        # Both renames are atomic on POSIX, so a concurrent reader (attach_store) never sees a
-        # partially-written file. A reader that lands between the two renames sees a NEW store with an
-        # OLD marker, so the freshness check compares the old marker to the new signature, mismatches, and
-        # rebuilds — a wasted rebuild, never staleness (a stale store can only be served when the
-        # marker says fresh, which requires the new marker, which is written last). Concurrent builders
-        # use per-pid temps, so they never clobber each other's build; the second rename simply wins.
-        # The scan is captured BEFORE the child runs, so a file edited during the build is marked
-        # stale and re-diffed by the next refresh rather than wrongly served as fresh.
+        # Publish order matters for concurrent correctness: publish the immutable generation file
+        # first, then the manifest naming it, then the marker. Because each build writes a fresh
+        # `index.<gen>.redb` filename, no reader ever has the destination file open — even on
+        # Windows, where replacing an open file fails with EACCES. A reader landing between the
+        # manifest and marker renames sees the new manifest with the old marker, mismatches, and
+        # refreshes; it never sees a dangling store path or stale content marked fresh.
         # JSON, not Marshal: this file is read back from a directory a workspace can commit, so it must
         # be data a hostile repository cannot turn into an object (see `Graph#adopt_manifest`).
         # `workspace` records which checkout this store belongs to, so the index manager can evict
@@ -764,40 +857,26 @@ module Rubydex
         # unknown keys, so older stores stay readable.
         File.write(
           manifest_tmp,
-          JSON.generate({ "workspace" => workspace_path, "lockfile" => lockfile, "files" => scan }),
+          JSON.generate({
+            "store" => gen_name,
+            "workspace" => workspace_path,
+            "lockfile" => lockfile,
+            "files" => scan,
+          }),
         )
         File.write(marker_tmp, store_signature(scan, lockfile))
-        # Windows cannot replace a file another handle has open, and a session refreshing has this
-        # store open to serve reads. POSIX renames over it and keeps serving.
-        # shortcut: on Windows a rebuild only publishes while no other session holds the store, so
-        # that session keeps its old snapshot instead of seeing the rebuild. Publish to a new
-        # generation file when Windows has to match POSIX.
-        reopened = Gem.win_platform? && self.class.store_format_version.positive?
-        detach_store if reopened
-        attempts = 0
-        begin
-          File.rename(tmp, cache)
-        rescue StandardError
-          # A store the OS has only just finished writing can still be held by a scanner, which
-          # fails the replace with EACCES/EPERM even though no reader has the old store open.
-          # Retry before declaring the build unpublished.
-          if Gem.win_platform? && (attempts += 1) < 5
-            sleep(0.05 * attempts)
-            retry
-          end
-          # The old store is still there: the rename is what failed. Put the session back on it
-          # rather than leaving it with no index at all.
-          attach_store(cache) if reopened && File.exist?(cache)
-          raise
-        end
-        File.rename(manifest_tmp, manifest)
-        File.rename(marker_tmp, marker)
+        rename_with_retry(tmp, gen_path)
+        rename_with_retry(manifest_tmp, manifest)
+        manifest_published = true
+        rename_with_retry(marker_tmp, marker)
+        cleanup_stale_generations(cache, gen_name)
       ensure
-        # A failed build (or a crash mid-publish) must not leave .building temps behind; after a
-        # successful publish all three were renamed, so these are no-ops.
+        # A failed build (or a crash mid-publish) must not leave .building temps or an unreferenced
+        # generation behind; after a successful publish all temps were renamed, so these are no-ops.
         File.delete(tmp) if File.exist?(tmp)
         File.delete(marker_tmp) if File.exist?(marker_tmp)
         File.delete(manifest_tmp) if File.exist?(manifest_tmp)
+        File.delete(gen_path) if !manifest_published && File.exist?(gen_path)
       end
     end
 

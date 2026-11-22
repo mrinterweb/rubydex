@@ -16,6 +16,7 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
     super
     skip_unless_store_feature
     @tmp = Dir.mktmpdir
+    @graphs = []
     @ws = File.join(@tmp, "ws")
     FileUtils.mkdir_p(@ws)
     ENV["RUBYDEX_DISK_INDEX"] = "1"
@@ -27,6 +28,10 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
   end
 
   def teardown
+    @graphs&.each do |graph|
+      graph.instance_variable_get(:@rebuild_process)&.join(30)
+      graph.detach_store
+    end
     ENV.delete("RUBYDEX_DISK_INDEX")
     ENV.delete("RUBYDEX_REFRESH_TTL")
     ENV.delete("RUBYDEX_CACHE_DIR")
@@ -77,14 +82,12 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
       write("c#{rounds * 2}.rb", "class C#{rounds * 2}\n  def r#{rounds}; end\nend\n")
       write("c#{rounds * 2 + 1}.rb", "class C#{rounds * 2 + 1}\n  def r#{rounds}; end\nend\n")
       moved = graph.refresh_if_stale
-      break if Gem.win_platform? ? graph.send(:store_fresh?, graph.send(:store_cache_path)) : !moved
+      break unless moved
     end
 
     assert_equal(3, rounds, "25% of 22 files is 5, so the round that applies the 6th file rebuilds")
-    unless Gem.win_platform?
-      await_rebuild(graph)
-      assert(graph.refresh_if_stale)
-    end
+    await_rebuild(graph)
+    assert(graph.refresh_if_stale)
   end
 
   def test_store_signature_is_unchanged_by_the_scan_refactor
@@ -133,19 +136,16 @@ class DiskIndexSurgicalRefreshTest < Minitest::Test
   def booted_graph
     skip("ruby subprocess unavailable") unless Process.respond_to?(:spawn)
     graph = Rubydex::Graph.configure_for_workspace(@ws)
+    @graphs << graph
     graph.index_workspace
     graph
   end
 
   def refresh_and_await_full_rebuild(graph)
     moved = graph.refresh_if_stale
-    if Gem.win_platform?
-      assert(moved, "Windows builds synchronously")
-    else
-      refute(moved, "the old snapshot stays available during the rebuild")
-      await_rebuild(graph)
-      assert(graph.refresh_if_stale, "the session reattaches after the rebuild")
-    end
+    refute(moved, "the old snapshot stays available during the rebuild")
+    await_rebuild(graph)
+    assert(graph.refresh_if_stale, "the session reattaches after the rebuild")
     assert(graph.send(:store_fresh?, graph.send(:store_cache_path)), "the store was rebuilt")
   end
 

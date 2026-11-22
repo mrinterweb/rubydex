@@ -14,9 +14,10 @@ background daemon keeps stores fresh.
 - **Layered graph (`rust/rubydex/src/model/graph.rs`)**: `Graph::with_store` / `attach_store`
   layers an in-memory overlay over `RedbStore`. Reads check memory/tombstones first, then disk.
 - **Ruby lifecycle (`lib/rubydex/graph.rb`)**: cache path resolution (`RUBYDEX_CACHE_DIR` >
-  `[disk_index] location` > workspace `tmp/` > platform cache), JSON manifest (`index.redb.files`)
-  and signature (`index.redb.hash`), create-exclusive `.rebuild` lock, surgical refresh, and child
-  build process.
+  `[disk_index] location` > workspace `tmp/` > platform cache), generation-numbered store files
+  (`index.<16hex>.redb` named by `"store"` in `index.redb.files` so rebuilds never overwrite open
+  handles on Windows), JSON manifest (`index.redb.files`) and signature (`index.redb.hash`),
+  create-exclusive `.rebuild` lock, surgical refresh, and child build process.
 - **Background daemon (`rust/rubydex-index-manager/`)**: watches active workspaces via `notify` v9
   (`fs_events.rs`), tracks live sessions (`registry.rs`), triggers incremental/full rebuilds
   (`builder.rs`), and evicts stores of deleted workspaces (`prune.rs`).
@@ -33,8 +34,8 @@ background daemon keeps stores fresh.
   is active) under **both** default features and `--features rubydex/redb-store,rubydex-sys/redb-store`.
   Builds without `redb-store` must preserve the in-memory fallback cleanly.
 - **Bump `STORE_FORMAT_VERSION` on layout changes.** Any change to serialization, bucket layout, or
-  metadata keys in `store.rs` must bump `STORE_FORMAT_VERSION` (currently `3`) so existing caches
-  trigger a rebuild instead of misreading bytes.
+  metadata keys in `model/store/` must bump `STORE_FORMAT_VERSION` (currently `3`) so existing
+  caches trigger a rebuild instead of misreading bytes.
 - **Gate storage size on `TableStats`, not `.redb` file size.** `redb` doubles its file as it grows,
   so `.redb` file size moves in coarse 2× steps and hides real savings. Always compare
   `stored + fragmented + metadata` ("Live footprint") and `leaf_pages` via

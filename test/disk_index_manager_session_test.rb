@@ -34,8 +34,10 @@ class DiskIndexManagerSessionTest < Minitest::Test
       begin
         yield(graph, dir)
       ensure
-        # The session's registry file stays locked until released, and Windows cannot unlink an open
-        # file, so the tmpdir would fail to clean up.
+        # Wait for any detached rebuild and close open handles before `mktmpdir` removes `dir`,
+        # since Windows cannot unlink an open file or a directory being written to.
+        graph.instance_variable_get(:@rebuild_process)&.join(30)
+        graph.detach_store
         Rubydex::IndexManager.release_all
       end
     end
@@ -93,7 +95,8 @@ class DiskIndexManagerSessionTest < Minitest::Test
 
       assert(run_index_session(dir, store, "--full"), "the full build must succeed")
       refute(File.exist?(lock), "the builder must release the rebuild lock")
-      assert(File.exist?(store), "the store was built")
+      manifest = JSON.parse(File.read("#{store}.files"))
+      assert(File.exist?(File.join(File.dirname(store), manifest.fetch("store"))), "the store was built")
     end
   end
 
@@ -107,7 +110,7 @@ class DiskIndexManagerSessionTest < Minitest::Test
 
       assert(run_index_session(dir, store, "--full"), "losing the lock is not a failure")
       assert(File.exist?(lock), "another builder's lock must not be removed")
-      refute(File.exist?(store), "no store is built without the lock")
+      assert_empty(Dir.glob(File.join(File.dirname(store), "index*.redb")), "no store is built without the lock")
     end
   end
 

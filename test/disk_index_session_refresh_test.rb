@@ -15,6 +15,7 @@ class DiskIndexSessionRefreshTest < Minitest::Test
   def setup
     super
     skip_unless_store_feature
+    @sessions = []
   end
 
   def with_workspace
@@ -29,6 +30,7 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       begin
         yield(dir, rb)
       ensure
+        join_rebuilds
         # Windows cannot unlink a file this process still holds open, and an opted-in session keeps
         # its registry file locked until released, so the tmpdir would fail to clean up.
         Rubydex::IndexManager.release_all
@@ -40,9 +42,18 @@ class DiskIndexSessionRefreshTest < Minitest::Test
 
   def session(dir)
     graph = Rubydex::Graph.configure_for_workspace(dir)
+    @sessions << graph
     graph.index_workspace
     graph.resolve
     graph
+  end
+
+  def join_rebuilds(*extra)
+    (@sessions + extra).each do |graph|
+      graph.instance_variable_get(:@rebuild_process)&.join(30)
+      graph.detach_store
+    end
+    @sessions.clear
   end
 
   def git(dir, *args)
@@ -132,13 +143,14 @@ class DiskIndexSessionRefreshTest < Minitest::Test
 
         git(dir, "checkout", "-q", "other")
         moved = graph.refresh_if_stale
-        refute(moved, "the old snapshot is available during a branch-switch rebuild") unless Gem.win_platform?
+        refute(moved, "the old snapshot is available during a branch-switch rebuild")
         Timeout.timeout(45) { sleep(0.02) until graph.send(:store_fresh?, graph.send(:store_cache_path)) }
         graph.refresh_if_stale
         members = graph["Foo"].members.map(&:name)
         assert_includes(members, "Foo#baz()")
         refute_includes(members, "Foo#bar()", "must not still answer from the previous branch")
       ensure
+        join_rebuilds(graph) if graph
         ENV.delete("RUBYDEX_DISK_INDEX")
       end
     end
@@ -222,10 +234,6 @@ class DiskIndexSessionRefreshTest < Minitest::Test
   # holds (source scan + lockfile), not on HEAD: HEAD belongs to what the session is serving, and
   # mixing it into the marker made this branch dead in a git repo.
   def test_a_session_moves_to_the_store_another_session_rebuilt
-    # Windows cannot replace a store the other session still has open, so the rebuild falls back to
-    # the in-memory index there and the re-attach never happens.
-    skip("Windows cannot publish a store another session holds open") if Gem.win_platform?
-
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "tmp"))
       8.times { |i| File.write(File.join(dir, "k#{i}.rb"), "class K#{i}\n  def old; end\nend\n") }
@@ -260,6 +268,7 @@ class DiskIndexSessionRefreshTest < Minitest::Test
         assert_includes(members, "K0#new()")
         refute_includes(members, "K0#old()", "the reopened session must not still answer from the old snapshot")
       ensure
+        join_rebuilds
         ENV.delete("RUBYDEX_DISK_INDEX")
         ENV.delete("RUBYDEX_REFRESH_TTL")
       end
@@ -275,13 +284,12 @@ class DiskIndexSessionRefreshTest < Minitest::Test
   end
 
   def test_boot_uses_an_existing_stale_store_while_it_refreshes
-    skip("Windows cannot publish over a store another session holds open") if Gem.win_platform?
-
     with_workspace do |dir, rb|
       first = session(dir)
       cache = first.send(:store_cache_path)
       File.write(rb, "class Foo\n  def baz; end\nend\n")
       second = Rubydex::Graph.configure_for_workspace(dir)
+      @sessions << second
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       second.index_workspace
@@ -313,8 +321,6 @@ class DiskIndexSessionRefreshTest < Minitest::Test
   end
 
   def test_a_failed_background_rebuild_falls_back_to_a_fresh_in_memory_index
-    skip("Windows rebuilds synchronously") if Gem.win_platform?
-
     with_workspace do |dir, rb|
       graph = session(dir)
       File.write(rb, "class Foo\n  def baz; end\nend\n")
@@ -331,8 +337,6 @@ class DiskIndexSessionRefreshTest < Minitest::Test
   end
 
   def test_a_session_serves_its_snapshot_while_its_own_rebuild_runs
-    skip("Windows cannot publish over a store this session holds open") if Gem.win_platform?
-
     with_workspace do |dir, rb|
       graph = session(dir)
       cache = graph.send(:store_cache_path)

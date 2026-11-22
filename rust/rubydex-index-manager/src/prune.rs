@@ -49,22 +49,70 @@ pub fn prune_orphaned_stores(cache_root: &Path, active_stores: &[PathBuf]) -> us
         if name == "manager" || name.starts_with('.') {
             continue;
         }
-        if active_stores.iter().any(|store| store == &dir.join(STORE)) {
-            continue;
-        }
-        // A rebuild claimed this directory: run a full rebuild rather than evict a store that is
-        // about to be replaced.
+        // A rebuild claimed this directory: wait for it to finish rather than evicting the store or
+        // racing its generation publish.
         if dir.join(REBUILD_LOCK).exists() {
             continue;
         }
-        if workspace_is_gone(&dir) {
+        let session_active = active_stores.iter().any(|store| store == &dir.join(STORE));
+        if !session_active && workspace_is_gone(&dir) {
             // Best effort: a directory that cannot be removed is retried on the next tick.
             if std::fs::remove_dir_all(&dir).is_ok() {
                 removed += 1;
             }
+            continue;
         }
+        prune_stale_generations(&dir);
     }
     removed
+}
+
+/// Whether `name` matches a generation store filename (`index.<16 lowercase hex>.redb`).
+fn is_generation_store_name(name: &str) -> bool {
+    let Some(hex) = name.strip_prefix("index.").and_then(|s| s.strip_suffix(".redb")) else {
+        return false;
+    };
+    hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Removes unreferenced generation store files (and superseded legacy `index.redb` files) from a
+/// live store directory. Best-effort: files still held open by a Windows session fail to remove and
+/// are retried on a later tick.
+fn prune_stale_generations(dir: &Path) {
+    let Ok(manifest) = std::fs::read(dir.join(MANIFEST)) else {
+        return;
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&manifest) else {
+        return;
+    };
+    let active = match json.get("store") {
+        Some(value) => match value.as_str() {
+            Some(name) if is_generation_store_name(name) => name,
+            _ => return,
+        },
+        None => STORE,
+    };
+    let Ok(entries) = dir.read_dir() else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == active {
+            continue;
+        }
+        if name == STORE || is_generation_store_name(name) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Whether the store directory's manifest names a workspace that no longer exists.
@@ -212,5 +260,59 @@ mod tests {
         }
         #[cfg(not(unix))]
         let _ = dir;
+    }
+
+    #[test]
+    fn sweeps_stale_generation_files_without_touching_the_active_one() {
+        let cache = tempfile::tempdir().expect("cache");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let dir = cache.path().join("live123");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let active = "index.0123456789abcdef.redb";
+        let stale = "index.fedcba9876543210.redb";
+        std::fs::write(dir.join(active), b"active").expect("write active");
+        std::fs::write(dir.join(stale), b"stale").expect("write stale");
+        std::fs::write(dir.join(STORE), b"legacy").expect("write legacy");
+        std::fs::write(dir.join("index.redb.hash"), b"hash").expect("write hash");
+        let manifest = serde_json::json!({
+            "store": active,
+            "workspace": workspace.path().to_string_lossy(),
+            "lockfile": "",
+            "files": {},
+        });
+        std::fs::write(dir.join(MANIFEST), manifest.to_string()).expect("write manifest");
+
+        assert_eq!(0, prune_orphaned_stores(cache.path(), &[]));
+        assert!(dir.join(active).exists(), "active generation must survive");
+        assert!(dir.join("index.redb.hash").exists(), "sidecars must survive");
+        assert!(!dir.join(stale).exists(), "stale generation must be removed");
+        assert!(
+            !dir.join(STORE).exists(),
+            "superseded legacy index.redb must be removed"
+        );
+    }
+
+    #[test]
+    fn leaves_generations_alone_while_a_rebuild_lock_is_held() {
+        let cache = tempfile::tempdir().expect("cache");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let dir = cache.path().join("rebuilding");
+        std::fs::create_dir_all(dir.join(REBUILD_LOCK)).expect("lock");
+
+        let active = "index.0123456789abcdef.redb";
+        let incoming = "index.fedcba9876543210.redb";
+        std::fs::write(dir.join(active), b"active").expect("write active");
+        std::fs::write(dir.join(incoming), b"incoming").expect("write incoming");
+        let manifest = serde_json::json!({
+            "store": active,
+            "workspace": workspace.path().to_string_lossy(),
+            "lockfile": "",
+            "files": {},
+        });
+        std::fs::write(dir.join(MANIFEST), manifest.to_string()).expect("write manifest");
+
+        assert_eq!(0, prune_orphaned_stores(cache.path(), &[]));
+        assert!(dir.join(incoming).exists(), "in-flight generation must not be deleted");
     }
 }
