@@ -24,16 +24,19 @@
 - [x] Phase 4 gate — `cargo test -p rubydex-index-manager`, `rubocop`; committed
 - [ ] Final validation — `rake lint`, full `rake test`, end-to-end table in `database_diet.md`
 
-**Measured so far** (30,738-file gems corpus; redb `TableStats` page footprint, because the `.redb`
-file itself grows in redb's doubling steps — see the Phase 1 note):
+**Measured** (30,738-file gems corpus under `Gem.dir`; redb `TableStats` page footprint, because the
+`.redb` file itself grows in redb's doubling steps — see the Phase 1 note):
 
-| | Phase 0 | Phase 1 | Phase 2 | Phase 3A |
+| | Phase 0 | Phase 1 | Phase 2 | Phase 3A (final) |
 | --- | --- | --- | --- | --- |
+| leaf pages (live data) | 164,461 / 673 MB | 124,318 / 509 MB | 124,318 / 509 MB | 70,520 / 288 MB |
 | `stored + fragmented + metadata` | 723 MB | 646 MB | 539 MB | 415 MB |
 | `.redb` file | 1028 MB | 1028 MB | 515 MB | 515 MB |
-| `Store build` | 3.86 s | 3.68 s | 3.52 s | 0.69 s |
-| search exact / fuzzy | 12.6 / 61.0 ms | — | 6.2 / 62.1 ms | 10–13 / 61 ms |
-| `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | — | 0.36 / 0.81 / 6.0 ms | 0.36 / 0.81 / 6.5 ms |
+| `Store build` | 3.86 s | 3.68 s | 3.52 s | 0.67 s |
+| total cold build (`--build-store`) | 5.87 s | 5.75 s | 5.55 s | 2.45 s |
+| peak RSS | 1222 MB | 1257 MB | 1249 MB | 1252 MB |
+| search exact / fuzzy | 12.6 / 61.0 ms | — | 6.2 / 62.1 ms | 6.7–9.7 / 61.3 ms |
+| `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | — | 0.36 / 0.81 / 6.0 ms | 0.36 / 0.83 / 6.4 ms |
 
 ### Phase 3B outcome: compression rejected on measurement
 

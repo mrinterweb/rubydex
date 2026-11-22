@@ -182,7 +182,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
 
     Timeout.timeout(120) do
       sleep(0.05) until (manifest = File.read("#{cache}.files")).start_with?("{")
-      assert_equal(["files", "lockfile"], JSON.parse(manifest).keys.sort)
+      assert_equal(["files", "lockfile", "workspace"], JSON.parse(manifest).keys.sort)
     end
     assert(File.exist?("#{cache}.hash"), "the rebuild republished the marker too")
   end

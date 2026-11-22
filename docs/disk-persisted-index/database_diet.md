@@ -22,6 +22,42 @@ So the store is ~4.6× the size of the code it describes, or ~25 KB per indexed 
 Rails app with ~20 MB of `app/` plus its gems lands in the hundreds of megabytes — which is exactly
 what the reference project shows. The size is not one bug; it is four separate multipliers.
 
+## What changed (implementation outcome)
+
+The plan in `storage-refactor-plan.md` was implemented through Phase 4. Measured on a 30,738-file gems
+tree (`$(ruby -e 'puts Gem.dir')/gems`, 1.5× the corpus used above, and a superset of it):
+
+| | before | after |
+| --- | --- | --- |
+| `.redb` file | 1028 MB | 515 MB (−50%) |
+| live leaf pages | 673 MB | 288 MB (−57%) |
+| `stored + fragmented + metadata` | 723 MB | 415 MB (−43%) |
+| `Store build` | 3.86 s | 0.67 s (**5.8× faster**) |
+| total cold build (`--build-store`) | 5.87 s | 2.45 s (2.4× faster) |
+| search exact / fuzzy | 12.6 / 61.0 ms | 6.7 / 61.3 ms |
+| `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | 0.36 / 0.83 / 6.4 ms |
+| peak RSS | 1222 MB | 1252 MB |
+
+Landed: comment text is no longer stored (offsets only, re-read from source); `Id<T>` is a fixed 8
+bytes; `search_names` and `document_uris` are front-coded into shards (11.3 MB of 32 leaf pages and
+1.1 MB of one page, against 56.9 MB and 8.6 MB of 11,594 and 2,111 rows); every node table is
+hash-prefix bucketed, ~64 nodes to a row, so redb indexes 7.5k rows instead of 535k and the build
+encodes buckets in parallel.
+
+Not landed, with the measurements behind each call:
+
+- **Compression (plan step 4).** LZ4 on buckets and shards buys 6% of payload and costs 50% of fuzzy
+  search (61 ms → 93 ms), because a point read must decompress a whole ~10 KB bucket. Only
+  `declarations` (1.18×), `documents` (1.08×) and the projection shards (1.36×) compress at all; the
+  rest are 1.00×. The 2.6× headroom measured below was the comment text and the duplicated
+  projections that steps 1 and 2 removed, and the payload that remains is dominated by
+  uniformly-distributed 64-bit content hashes.
+- **Dropping one edge direction (plan step 3) and the shared library store (plan step 5).** Out of
+  scope: both change read paths the live-edit overlay depends on.
+- **The 65–73% file-size target.** The file is 1.8× the live data because redb doubles its file as it
+  grows; 288 MB of live pages sits just above a 256 MB step, so the file lands at 515 MB. Crossing it
+  needs ~27 MB less live data (per-entry bucket keys and offsets are the nearest term at 55 MB).
+
 ## What is stored
 
 Eleven tables (`rust/rubydex/src/model/store.rs`). "Logical" is the sum of key and value bytes for
