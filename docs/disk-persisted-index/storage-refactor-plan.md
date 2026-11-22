@@ -19,9 +19,9 @@
 - [x] Phase 3A — hash-prefix bucketed node tables + parallel build
 - [x] Phase 3B — LZ4 block compression implemented, measured, **reverted**: it buys 6% of payload and
       costs 50% of fuzzy search (see "Phase 3B outcome" below)
-- [ ] Phase 4.1 — record `"workspace"` in `index.redb.files`
-- [ ] Phase 4.2 — `prune.rs` + wiring in `rubydex-index-manager`
-- [ ] Phase 4 gate — `cargo test -p rubydex-index-manager`, `rubocop`; committed
+- [x] Phase 4.1 — record `"workspace"` in `index.redb.files`
+- [x] Phase 4.2 — `prune.rs` + wiring in `rubydex-index-manager`
+- [x] Phase 4 gate — `cargo test -p rubydex-index-manager`, `rubocop`; committed
 - [ ] Final validation — `rake lint`, full `rake test`, end-to-end table in `database_diet.md`
 
 **Measured so far** (30,738-file gems corpus; redb `TableStats` page footprint, because the `.redb`

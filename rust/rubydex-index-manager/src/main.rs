@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::time::{Duration, Instant};
 
+use rubydex_index_manager::prune::prune_orphaned_stores;
 use rubydex_index_manager::watches::Watch;
 use rubydex_index_manager::watches::groups;
 use rubydex_index_manager::watches::sync;
@@ -44,6 +45,23 @@ struct Args {
     debounce_ms: u32,
 }
 
+/// How often to look for store directories whose workspace has been deleted. Deleting a checkout is
+/// rare and re-scanning the cache root is a few `stat`s per store, so this can be lazy.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Evicts the stores of workspaces that no longer exist. `registry` is `<cache_root>/rubydex/manager/
+/// sessions`, so the stores live two levels up.
+fn prune(registry: &std::path::Path, sessions: &[rubydex_index_manager::registry::Session]) {
+    let Some(cache_root) = registry.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    let active: Vec<PathBuf> = sessions.iter().map(|session| session.store.clone()).collect();
+    let removed = prune_orphaned_stores(cache_root, &active);
+    if removed > 0 {
+        eprintln!("rubydex-index-manager: evicted {removed} store(s) of deleted workspaces");
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -71,6 +89,11 @@ fn main() {
         let debounce = Duration::from_millis(args.debounce_ms.into());
         let mut watches: Vec<Watch> = Vec::<Watch>::new();
         let mut last_sync: Option<Instant> = None;
+        let mut last_prune: Option<Instant> = None;
+        prune(
+            &args.registry,
+            &rubydex_index_manager::registry::live_sessions(&args.registry),
+        );
 
         loop {
             // Re-scan the registry on the debounce cadence instead of every 20ms idle tick, so an
@@ -83,6 +106,11 @@ fn main() {
 
                 sync(&mut watches, groups(&sessions), debounce);
                 last_sync = Some(Instant::now());
+
+                if last_prune.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL) {
+                    prune(&args.registry, &sessions);
+                    last_prune = Some(Instant::now());
+                }
             }
 
             // One pass drains every workspace without blocking, and the pass sleeps once when

@@ -56,6 +56,19 @@ class DiskIndexLiveEditTest < Minitest::Test
     refute_includes(member_names, "Foo#bar()")
   end
 
+  def test_manifest_records_the_workspace_so_orphaned_stores_can_be_evicted
+    skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
+
+    File.write(File.join(@tmp, "foo.rb"), "class Foo; end\n")
+
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
+    graph.index_workspace # builds + attaches the store
+
+    manifest = JSON.parse(File.read("#{graph.send(:store_cache_path)}.files"))
+    assert_equal(@tmp, manifest["workspace"], "the manifest must name the checkout it belongs to")
+    assert_kind_of(Hash, manifest["files"])
+  end
+
   def test_store_backed_definition_comments_are_read_from_source
     skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
 

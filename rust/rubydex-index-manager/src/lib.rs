@@ -8,5 +8,6 @@
 
 pub mod builder;
 pub mod fs_events;
+pub mod prune;
 pub mod registry;
 pub mod watches;

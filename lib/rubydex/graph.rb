@@ -759,7 +759,13 @@ module Rubydex
         # stale and re-diffed by the next refresh rather than wrongly served as fresh.
         # JSON, not Marshal: this file is read back from a directory a workspace can commit, so it must
         # be data a hostile repository cannot turn into an object (see `Graph#adopt_manifest`).
-        File.write(manifest_tmp, JSON.generate({ "lockfile" => lockfile, "files" => scan }))
+        # `workspace` records which checkout this store belongs to, so the index manager can evict
+        # the stores of deleted workspaces (see `rubydex-index-manager`'s prune). Readers ignore
+        # unknown keys, so older stores stay readable.
+        File.write(
+          manifest_tmp,
+          JSON.generate({ "workspace" => workspace_path, "lockfile" => lockfile, "files" => scan }),
+        )
         File.write(marker_tmp, store_signature(scan, lockfile))
         # Windows cannot replace a file another handle has open, and a session refreshing has this
         # store open to serve reads. POSIX renames over it and keeps serving.
