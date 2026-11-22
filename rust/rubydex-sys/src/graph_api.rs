@@ -5,7 +5,9 @@ use crate::declaration_api::CDeclaration;
 use crate::declaration_api::DeclarationsIter;
 use crate::declaration_api::decl_id_from_char_ptr;
 use crate::document_api::DocumentsIter;
-use crate::reference_api::{CConstantReference, CMethodReference, ConstantReferencesIter, MethodReferencesIter};
+use crate::reference_api::{
+    CConstantReference, CMethodReference, ConstantReferencesIter, MethodReferencesIter, NO_METHOD_REFERENCE_NAME,
+};
 use crate::{name_api, utils};
 use libc::{c_char, c_void};
 use rubydex::config::Config;
@@ -13,7 +15,8 @@ use rubydex::indexing::LanguageId;
 use rubydex::model::definitions::Definition;
 use rubydex::model::encoding::Encoding;
 use rubydex::model::graph::Graph;
-use rubydex::model::ids::{DeclarationId, DefinitionId, NameId, UriId, declaration_id_from_lookup_name};
+use rubydex::model::identity_maps::IdentityHashMap;
+use rubydex::model::ids::{DeclarationId, DefinitionId, NameId, StringId, UriId, declaration_id_from_lookup_name};
 use rubydex::model::keywords;
 use rubydex::model::name::NameRef;
 use rubydex::model::visibility::Visibility;
@@ -869,27 +872,57 @@ pub unsafe extern "C" fn rdx_graph_constant_references_iter_new(pointer: GraphPo
     })
 }
 
-/// Creates a new iterator over method references by snapshotting the current set of IDs.
+/// Returns the graph's current mutation epoch, incremented whenever a document is deleted or the
+/// backing store changes.
+///
+/// # Safety
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_mutation_epoch(pointer: GraphPointer) -> u64 {
+    with_graph(pointer, Graph::mutation_epoch)
+}
+
+/// Creates a new iterator over method references by snapshotting the current set of IDs and
+/// deduplicated method names so full scans avoid millions of per-reference store transactions.
 ///
 /// # Safety
 /// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_method_references_iter_new(pointer: GraphPointer) -> *mut MethodReferencesIter {
     with_graph(pointer, |graph| {
-        let mut refs: Vec<_> = graph
-            .method_references()
-            .keys()
-            .map(|id| CMethodReference { id: **id })
-            .collect();
-        refs.extend(
-            graph
-                .store_method_reference_ids()
-                .into_iter()
-                .filter(|id| !graph.method_references().contains_key(id))
-                .map(|id| CMethodReference { id: *id }),
-        );
+        let mut strings: Vec<Box<str>> = Vec::new();
+        let mut string_indices: IdentityHashMap<StringId, u32> = IdentityHashMap::default();
+        let mut refs: Vec<CMethodReference> = Vec::with_capacity(graph.method_references().len());
 
-        MethodReferencesIter::new(refs.into_boxed_slice())
+        for (id, reference) in graph.method_references() {
+            let str_id = *reference.str();
+            let name_index = if let Some(&idx) = string_indices.get(&str_id) {
+                idx
+            } else if let Some(string_ref) = graph.string(str_id) {
+                let idx = u32::try_from(strings.len()).unwrap_or(NO_METHOD_REFERENCE_NAME);
+                if idx < NO_METHOD_REFERENCE_NAME {
+                    strings.push(string_ref.as_str().into());
+                    string_indices.insert(str_id, idx);
+                }
+                idx
+            } else {
+                NO_METHOD_REFERENCE_NAME
+            };
+            refs.push(CMethodReference { id: **id, name_index });
+        }
+
+        graph.for_each_store_method_reference_with_name(&mut strings, &mut string_indices, |id, name_index| {
+            refs.push(CMethodReference {
+                id: id.get(),
+                name_index,
+            });
+        });
+
+        MethodReferencesIter::with_names(
+            refs.into_boxed_slice(),
+            strings.into_boxed_slice(),
+            graph.mutation_epoch(),
+        )
     })
 }
 

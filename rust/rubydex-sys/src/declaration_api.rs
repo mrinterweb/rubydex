@@ -6,7 +6,9 @@ use std::ptr;
 
 use crate::definition_api::{DefinitionsIter, rdx_definitions_iter_new_from_ids};
 use crate::graph_api::{GraphPointer, with_graph};
-use crate::reference_api::{CConstantReference, CMethodReference, ConstantReferencesIter, MethodReferencesIter};
+use crate::reference_api::{
+    CConstantReference, CMethodReference, ConstantReferencesIter, MethodReferencesIter, NO_METHOD_REFERENCE_NAME,
+};
 use crate::utils;
 use crate::utils::OwnedString;
 use rubydex::model::ids::{DeclarationId, StringId, declaration_id_from_lookup_name};
@@ -521,7 +523,10 @@ pub unsafe extern "C" fn rdx_declaration_method_references_iter_new(
         let entries: Vec<_> = method
             .references()
             .iter()
-            .map(|ref_id| CMethodReference { id: **ref_id })
+            .map(|ref_id| CMethodReference {
+                id: **ref_id,
+                name_index: NO_METHOD_REFERENCE_NAME,
+            })
             .collect();
 
         MethodReferencesIter::new(entries.into_boxed_slice())

@@ -785,6 +785,64 @@ impl RedbStore {
         Ok(())
     }
 
+    /// Streams every method reference's `(id, name_index)` into `visit`, interning each distinct
+    /// method name into `strings` in the same read transaction so whole-table scans (e.g.
+    /// `Graph#method_references`) avoid millions of per-node transactions.
+    ///
+    /// Returns `u32::MAX` as `name_index` when a reference's string is missing or the string table
+    /// exceeds `u32::MAX` entries.
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction or table iteration fails, or if a node's bytes do
+    /// not decode.
+    pub fn for_each_method_reference_with_name(
+        &self,
+        strings: &mut Vec<Box<str>>,
+        string_indices: &mut crate::model::identity_maps::IdentityHashMap<StringId, u32>,
+        visit: &mut dyn FnMut(MethodReferenceId, u32),
+    ) -> Result<(), StoreError> {
+        let read_txn = self.begin_read()?;
+        let references = read_txn.open_table(NodeTable::MethodReferences.def())?;
+        let strings_table = read_txn.open_table(NodeTable::Strings.def())?;
+        let string_bits = self.bits.get(NodeTable::Strings);
+        for entry in references.range(0..=u32::MAX)? {
+            let (bucket_key, bucket) = entry?;
+            iter_bucket_entries(
+                NodeTable::MethodReferences.name(),
+                bucket_key.value(),
+                bucket.value(),
+                |id, bytes| {
+                    let reference = postcard::from_bytes::<MethodRef>(bytes).map_err(|source| StoreError::Corrupt {
+                        table: NodeTable::MethodReferences.name(),
+                        id,
+                        source,
+                    })?;
+                    let str_id = *reference.str();
+                    let name_index = if let Some(&idx) = string_indices.get(&str_id) {
+                        idx
+                    } else if let Some(string_ref) = decode_node_from_table::<StringRef>(
+                        &strings_table,
+                        NodeTable::Strings,
+                        string_bits,
+                        str_id.get(),
+                    )? {
+                        let idx = u32::try_from(strings.len()).unwrap_or(u32::MAX);
+                        if idx < u32::MAX {
+                            strings.push(string_ref.as_str().into());
+                            string_indices.insert(str_id, idx);
+                        }
+                        idx
+                    } else {
+                        u32::MAX
+                    };
+                    visit(MethodReferenceId::new(id), name_index);
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     /// Reads all `(declaration_id, FQN name)` pairs for name-based search.
     ///
     /// Test-only: production search streams the table ([`Self::declaration_ids_matching`]) and node

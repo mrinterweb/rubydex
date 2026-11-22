@@ -6,7 +6,7 @@ use std::ptr;
 
 use crate::definition_api::{DefinitionsIter, rdx_definitions_iter_new_from_ids};
 use crate::graph_api::{GraphPointer, with_graph};
-use crate::reference_api::{CMethodReference, MethodReferencesIter};
+use crate::reference_api::{CMethodReference, MethodReferencesIter, NO_METHOD_REFERENCE_NAME};
 use rubydex::model::ids::UriId;
 
 #[derive(Debug)]
@@ -102,7 +102,10 @@ pub unsafe extern "C" fn rdx_document_method_references_iter_new(
             let entries: Vec<_> = doc
                 .method_references()
                 .iter()
-                .map(|ref_id| CMethodReference { id: **ref_id })
+                .map(|ref_id| CMethodReference {
+                    id: **ref_id,
+                    name_index: NO_METHOD_REFERENCE_NAME,
+                })
                 .collect();
 
             MethodReferencesIter::new(entries.into_boxed_slice())

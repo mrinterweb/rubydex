@@ -74,25 +74,131 @@ pub unsafe extern "C" fn rdx_constant_references_iter_free(iter: *mut ConstantRe
     unsafe { ConstantReferencesIter::free(iter) }
 }
 
+pub const NO_METHOD_REFERENCE_NAME: u32 = u32::MAX;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CMethodReference {
     pub id: u64,
+    pub name_index: u32,
 }
 
 #[derive(Debug)]
 pub struct MethodReferencesIter {
     entries: Box<[CMethodReference]>,
+    strings: Box<[Box<str>]>,
+    epoch: u64,
     index: usize,
 }
 
-iterator!(MethodReferencesIter, entries: CMethodReference);
+impl MethodReferencesIter {
+    #[must_use]
+    pub fn new(entries: Box<[CMethodReference]>) -> *mut Self {
+        Self::with_names(entries, Box::default(), 0)
+    }
+
+    #[must_use]
+    pub fn with_names(entries: Box<[CMethodReference]>, strings: Box<[Box<str>]>, epoch: u64) -> *mut Self {
+        Box::into_raw(Box::new(Self {
+            entries,
+            strings,
+            epoch,
+            index: 0,
+        }))
+    }
+
+    /// # Safety
+    /// `iter` must be a valid pointer returned by `new`/`with_names`, or null.
+    #[must_use]
+    pub unsafe fn len(iter: *const Self) -> usize {
+        if iter.is_null() {
+            return 0;
+        }
+        unsafe { (&*iter).entries.len() }
+    }
+
+    /// # Safety
+    /// - `iter` must be a valid pointer returned by `new`/`with_names`, or null.
+    /// - `out` must be a valid, writable pointer, or null.
+    pub unsafe fn next(iter: *mut Self, out: *mut CMethodReference) -> bool {
+        if iter.is_null() || out.is_null() {
+            return false;
+        }
+        let it = unsafe { &mut *iter };
+        if it.index >= it.entries.len() {
+            return false;
+        }
+        let entry = it.entries[it.index];
+        it.index += 1;
+        unsafe {
+            *out = entry;
+        }
+        true
+    }
+
+    /// # Safety
+    /// `iter` must be a valid pointer returned by `new`/`with_names`, or null.
+    pub unsafe fn free(iter: *mut Self) {
+        if !iter.is_null() {
+            unsafe { drop(Box::from_raw(iter)) };
+        }
+    }
+}
 
 /// # Safety
 /// `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_method_references_iter_len(iter: *const MethodReferencesIter) -> usize {
     unsafe { MethodReferencesIter::len(iter) }
+}
+
+/// Returns the number of deduplicated method names attached to `iter`.
+///
+/// # Safety
+/// `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_method_references_iter_strings_len(iter: *const MethodReferencesIter) -> usize {
+    if iter.is_null() {
+        return 0;
+    }
+    unsafe { (&*iter).strings.len() }
+}
+
+/// Borrows the UTF-8 bytes of the `index`-th deduplicated method name on `iter` (valid until
+/// `rdx_method_references_iter_free`), writing its byte length to `out_len`.
+///
+/// # Safety
+/// - `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`, or null.
+/// - `out_len` must be a valid writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_method_references_iter_string(
+    iter: *const MethodReferencesIter,
+    index: usize,
+    out_len: *mut usize,
+) -> *const c_char {
+    if iter.is_null() || out_len.is_null() {
+        return ptr::null();
+    }
+    let strings = unsafe { &(&*iter).strings };
+    let Some(string) = strings.get(index) else {
+        return ptr::null();
+    };
+    unsafe {
+        *out_len = string.len();
+    }
+    string.as_ptr().cast::<c_char>()
+}
+
+/// Returns the graph mutation epoch captured when `iter` was created.
+///
+/// # Safety
+/// `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_method_references_iter_epoch(iter: *const MethodReferencesIter) -> u64 {
+    if iter.is_null() {
+        return 0;
+    }
+    unsafe { (&*iter).epoch }
 }
 
 /// # Safety

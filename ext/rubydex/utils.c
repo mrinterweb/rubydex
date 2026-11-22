@@ -136,12 +136,33 @@ VALUE rdxi_method_references_yield(VALUE args) {
     VALUE graph_obj = rb_ary_entry(args, 0);
     void *iter = (void *)(uintptr_t)NUM2ULL(rb_ary_entry(args, 1));
 
+    size_t strings_len = rdx_method_references_iter_strings_len(iter);
+    VALUE names = Qnil;
+    if (strings_len > 0) {
+        names = rb_ary_new_capa((long)strings_len);
+        for (size_t i = 0; i < strings_len; i++) {
+            size_t byte_len = 0;
+            const char *ptr = rdx_method_references_iter_string(iter, i, &byte_len);
+            VALUE str = ptr ? rb_obj_freeze(rb_utf8_str_new(ptr, (long)byte_len)) : Qnil;
+            rb_ary_push(names, str);
+        }
+    }
+    uint64_t epoch = rdx_method_references_iter_epoch(iter);
+
     CMethodReference cref;
     while (rdx_method_references_iter_next(iter, &cref)) {
-        VALUE argv[] = {graph_obj, ULL2NUM(cref.id)};
-        VALUE obj = rb_class_new_instance(2, argv, cMethodReference);
+        VALUE cached_name = Qundef;
+        if (!NIL_P(names) && cref.name_index < strings_len) {
+            VALUE entry = RARRAY_AREF(names, (long)cref.name_index);
+            if (!NIL_P(entry)) {
+                cached_name = entry;
+            }
+        }
+        VALUE obj = rdxi_method_reference_new(graph_obj, cref.id, cached_name, epoch);
         rb_yield(obj);
     }
+
+    RB_GC_GUARD(names);
     return Qnil;
 }
 

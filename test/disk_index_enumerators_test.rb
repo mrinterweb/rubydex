@@ -64,5 +64,24 @@ class DiskIndexEnumeratorsTest < Minitest::Test
 
     assert_equal("foo.rb", payload.fetch("file"))
     assert_includes(payload.fetch("declarations").map { |entry| entry.fetch("name") }, "Foo")
+  ensure
+    disk&.detach_store if disk&.respond_to?(:detach_store)
+  end
+
+  def test_method_reference_cached_names_match_store_and_invalidate_on_delete
+    disk = Rubydex::Graph.configure_for_workspace(@workspace)
+    disk.index_workspace
+    disk.resolve
+
+    foo_uri = disk.path_to_uri(File.join(@workspace, "foo.rb"))
+    ref = disk.method_references.find { |r| r.name == "new" && r.document.uri == foo_uri }
+    refute_nil(ref, "store-backed method reference must expose its cached name")
+    assert_equal("new", ref.name)
+
+    disk.delete_document(foo_uri)
+    error = assert_raises(RuntimeError) { ref.name }
+    assert_equal("Method reference must exist for a valid id", error.message)
+  ensure
+    disk&.detach_store if disk&.respond_to?(:detach_store)
   end
 end

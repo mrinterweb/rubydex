@@ -161,6 +161,11 @@ pub struct Graph {
     /// Project configuration
     config: Config,
 
+    /// Monotonically incremented whenever a document is deleted or the backing store is swapped,
+    /// so handle caches (e.g. `MethodReference#name` cached during full-table scans) invalidate
+    /// immediately and fall back to live lookups.
+    mutation_epoch: u64,
+
     /// Optional disk-backed base layer holding gem/stdlib nodes. When set, reads that miss the
     /// in-memory maps above fall back to the store, keeping the bulk index off the heap.
     #[cfg(feature = "redb-store")]
@@ -188,7 +193,7 @@ pub struct Graph {
     removed_edge_lists: HashSet<NameId>,
 }
 #[cfg(not(feature = "redb-store"))]
-assert_mem_size!(Graph, 392);
+assert_mem_size!(Graph, 400);
 assert_send_sync!(Graph);
 
 /// Which kind of node a tombstone belongs to. IDs hash their name, so ids of different kinds for
@@ -265,6 +270,7 @@ impl Graph {
             name_dependents: IdentityHashMap::default(),
             pending_work: Vec::default(),
             config: Config::default(),
+            mutation_epoch: 0,
             #[cfg(feature = "redb-store")]
             store: None,
             #[cfg(feature = "redb-store")]
@@ -315,11 +321,18 @@ impl Graph {
         add_built_in_data(self);
     }
 
+    /// Monotonic counter bumped whenever a document is deleted or the backing store changes.
+    #[must_use]
+    pub const fn mutation_epoch(&self) -> u64 {
+        self.mutation_epoch
+    }
+
     /// Empties every in-memory node map, the tombstones and the edge ledgers, and resets the store
     /// error counter. The ledgers describe the overlay being replaced: kept against a new snapshot
     /// they would hide edges that legitimately exist again (a restored file, a branch toggle).
     #[cfg(feature = "redb-store")]
     fn clear_overlay(&mut self) {
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
         self.declarations = IdentityHashMap::default();
         self.definitions = IdentityHashMap::default();
         self.documents = IdentityHashMap::default();
@@ -640,6 +653,46 @@ impl Graph {
     pub fn for_each_store_constant_reference_with_name(
         &self,
         _visit: impl FnMut(ConstantReferenceId, ConstantReference, Option<&NameRef>),
+    ) {
+    }
+
+    /// Streams every live store-backed method reference's `(id, name_index)` in one read
+    /// transaction, interning each distinct method name into `strings`. Overlay-shadowed and
+    /// tombstoned references are skipped.
+    #[cfg(feature = "redb-store")]
+    pub fn for_each_store_method_reference_with_name(
+        &self,
+        strings: &mut Vec<Box<str>>,
+        string_indices: &mut IdentityHashMap<StringId, u32>,
+        mut visit: impl FnMut(MethodReferenceId, u32),
+    ) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let scan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.for_each_method_reference_with_name(strings, string_indices, &mut |id, name_index| {
+                if self.method_references.contains_key(&id)
+                    || self.is_tombstoned(TombstoneKind::MethodReference, id.get())
+                {
+                    return;
+                }
+                visit(id, name_index);
+            })
+        }));
+        match scan {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => record_store_error(&self.store_errors, error),
+            Err(payload) => record_store_panic(&self.store_errors, &*payload),
+        }
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[allow(clippy::unused_self)]
+    pub fn for_each_store_method_reference_with_name(
+        &self,
+        _strings: &mut Vec<Box<str>>,
+        _string_indices: &mut IdentityHashMap<StringId, u32>,
+        _visit: impl FnMut(MethodReferenceId, u32),
     ) {
     }
 
@@ -1827,6 +1880,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         self.materialize_document(uri_id);
         let document = self.documents.remove(&uri_id)?;
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
         // Tombstone so the store's copy of the deleted document is never resurrected.
         #[cfg(feature = "redb-store")]
         self.tombstone(TombstoneKind::Document, uri_id.get());

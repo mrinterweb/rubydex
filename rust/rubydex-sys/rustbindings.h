@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define NO_METHOD_REFERENCE_NAME UINT32_MAX
+
 /**
  * Tag for a structured result cell.
  */
@@ -543,6 +545,7 @@ typedef struct CKeyword {
 
 typedef struct CMethodReference {
     uint64_t id;
+    uint32_t name_index;
 } CMethodReference;
 
 /**
@@ -1631,7 +1634,17 @@ const struct CDeclaration *rdx_graph_get_declaration(GraphPointer pointer, const
 struct ConstantReferencesIter *rdx_graph_constant_references_iter_new(GraphPointer pointer);
 
 /**
- * Creates a new iterator over method references by snapshotting the current set of IDs.
+ * Returns the graph's current mutation epoch, incremented whenever a document is deleted or the
+ * backing store changes.
+ *
+ * # Safety
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+uint64_t rdx_graph_mutation_epoch(GraphPointer pointer);
+
+/**
+ * Creates a new iterator over method references by snapshotting the current set of IDs and
+ * deduplicated method names so full scans avoid millions of per-reference store transactions.
  *
  * # Safety
  * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
@@ -1843,6 +1856,34 @@ void rdx_constant_references_iter_free(struct ConstantReferencesIter *iter);
  * `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`.
  */
 size_t rdx_method_references_iter_len(const struct MethodReferencesIter *iter);
+
+/**
+ * Returns the number of deduplicated method names attached to `iter`.
+ *
+ * # Safety
+ * `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`, or null.
+ */
+size_t rdx_method_references_iter_strings_len(const struct MethodReferencesIter *iter);
+
+/**
+ * Borrows the UTF-8 bytes of the `index`-th deduplicated method name on `iter` (valid until
+ * `rdx_method_references_iter_free`), writing its byte length to `out_len`.
+ *
+ * # Safety
+ * - `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`, or null.
+ * - `out_len` must be a valid writable pointer.
+ */
+const char *rdx_method_references_iter_string(const struct MethodReferencesIter *iter,
+                                              size_t index,
+                                              size_t *out_len);
+
+/**
+ * Returns the graph mutation epoch captured when `iter` was created.
+ *
+ * # Safety
+ * `iter` must be a valid pointer previously returned by `MethodReferencesIter::new`, or null.
+ */
+uint64_t rdx_method_references_iter_epoch(const struct MethodReferencesIter *iter);
 
 /**
  * # Safety

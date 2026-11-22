@@ -19,6 +19,87 @@ VALUE cMethodReference;
 
 static VALUE cDocument;
 
+typedef struct {
+    VALUE graph_obj;
+    VALUE cached_name; // Qundef when uncached; frozen UTF-8 String valid while graph epoch matches
+    uint64_t id;
+    uint64_t cached_epoch;
+} MethodReferenceData;
+
+static void method_reference_mark(void *ptr) {
+    if (ptr) {
+        MethodReferenceData *data = (MethodReferenceData *)ptr;
+        rb_gc_mark(data->graph_obj);
+        if (data->cached_name != Qundef) {
+            rb_gc_mark(data->cached_name);
+        }
+    }
+}
+
+static void method_reference_free(void *ptr) {
+    if (ptr) {
+        xfree(ptr);
+    }
+}
+
+static const rb_data_type_t method_reference_type = {
+    .wrap_struct_name = "RubydexMethodReference",
+    .function = {
+        .dmark = method_reference_mark,
+        .dfree = method_reference_free,
+        .dsize = NULL,
+        .dcompact = NULL,
+    },
+    .parent = NULL,
+    .data = NULL,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+};
+
+static inline void *rdxi_graph_from_method_reference(VALUE self, MethodReferenceData **out_data) {
+    MethodReferenceData *data;
+    TypedData_Get_Struct(self, MethodReferenceData, &method_reference_type, data);
+
+    void *graph;
+    TypedData_Get_Struct(data->graph_obj, void *, &graph_type, graph);
+
+    *out_data = data;
+    return graph;
+}
+
+static VALUE rdxr_method_reference_alloc(VALUE klass) {
+    MethodReferenceData *data = ALLOC(MethodReferenceData);
+    *data = (MethodReferenceData) {
+        .graph_obj = Qnil,
+        .cached_name = Qundef,
+        .id = 0,
+        .cached_epoch = 0,
+    };
+    return TypedData_Wrap_Struct(klass, &method_reference_type, data);
+}
+
+static VALUE rdxr_method_reference_initialize(VALUE self, VALUE graph_obj, VALUE id_val) {
+    MethodReferenceData *data;
+    TypedData_Get_Struct(self, MethodReferenceData, &method_reference_type, data);
+    *data = (MethodReferenceData) {
+        .graph_obj = graph_obj,
+        .cached_name = Qundef,
+        .id = NUM2ULL(id_val),
+        .cached_epoch = 0,
+    };
+    return self;
+}
+
+VALUE rdxi_method_reference_new(VALUE graph_obj, uint64_t id, VALUE cached_name, uint64_t cached_epoch) {
+    MethodReferenceData *data = ALLOC(MethodReferenceData);
+    *data = (MethodReferenceData) {
+        .graph_obj = graph_obj,
+        .cached_name = cached_name,
+        .id = id,
+        .cached_epoch = cached_epoch,
+    };
+    return TypedData_Wrap_Struct(cMethodReference, &method_reference_type, data);
+}
+
 /*
  * call-seq:
  *   name -> String
@@ -83,8 +164,12 @@ static VALUE rdxr_constant_reference_document(VALUE self) {
  * Returns the referenced method name.
  */
 static VALUE rdxr_method_reference_name(VALUE self) {
-    HandleData *data;
-    void *graph = rdxi_graph_from_handle(self, &data);
+    MethodReferenceData *data;
+    void *graph = rdxi_graph_from_method_reference(self, &data);
+
+    if (data->cached_name != Qundef && data->cached_epoch == rdx_graph_mutation_epoch(graph)) {
+        return rb_str_dup(data->cached_name);
+    }
 
     OwnedString name = rdx_method_reference_name(graph, data->id);
     if (name.data == NULL) {
@@ -100,8 +185,8 @@ static VALUE rdxr_method_reference_name(VALUE self) {
  * Returns the source location for this method reference.
  */
 static VALUE rdxr_method_reference_location(VALUE self) {
-    HandleData *data;
-    void *graph = rdxi_graph_from_handle(self, &data);
+    MethodReferenceData *data;
+    void *graph = rdxi_graph_from_method_reference(self, &data);
 
     Location *loc = rdx_method_reference_location(graph, data->id);
     if (loc == NULL) {
@@ -120,8 +205,8 @@ static VALUE rdxr_method_reference_location(VALUE self) {
  * constant or cannot be resolved.
  */
 static VALUE rdxr_method_reference_receiver(VALUE self) {
-    HandleData *data;
-    void *graph = rdxi_graph_from_handle(self, &data);
+    MethodReferenceData *data;
+    void *graph = rdxi_graph_from_method_reference(self, &data);
 
     const struct CDeclaration *decl = rdx_method_reference_receiver_declaration(graph, data->id);
     if (decl == NULL) {
@@ -142,8 +227,8 @@ static VALUE rdxr_method_reference_receiver(VALUE self) {
  * Returns the document this method reference belongs to.
  */
 static VALUE rdxr_method_reference_document(VALUE self) {
-    HandleData *data;
-    void *graph = rdxi_graph_from_handle(self, &data);
+    MethodReferenceData *data;
+    void *graph = rdxi_graph_from_method_reference(self, &data);
 
     const uint64_t *uri_id = rdx_method_reference_document(graph, data->id);
     if (uri_id == NULL) {
@@ -202,8 +287,8 @@ void rdxi_initialize_reference(VALUE mRubydex) {
     rb_define_method(cResolvedConstantReference, "declaration", rdxr_resolved_constant_reference_declaration, 0);
 
     cMethodReference = rb_define_class_under(mRubydex, "MethodReference", cReference);
-    rb_define_alloc_func(cMethodReference, rdxr_handle_alloc);
-    rb_define_method(cMethodReference, "initialize", rdxr_handle_initialize, 2);
+    rb_define_alloc_func(cMethodReference, rdxr_method_reference_alloc);
+    rb_define_method(cMethodReference, "initialize", rdxr_method_reference_initialize, 2);
     rb_define_method(cMethodReference, "name", rdxr_method_reference_name, 0);
     rb_define_method(cMethodReference, "location", rdxr_method_reference_location, 0);
     rb_define_method(cMethodReference, "receiver", rdxr_method_reference_receiver, 0);
