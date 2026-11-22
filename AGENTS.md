@@ -21,6 +21,7 @@ Both the Ruby gem and Rust crate support Linux, MacOS and Windows.
   - **Reference this document** to understand Ruby behaviors that affect indexing
   - **Verify new Ruby behavior documentation** against this document when you encounter comments explaining Ruby semantics in the codebase
   - **Update this document** when discovering new Ruby behaviors or when existing documentation is incomplete or incorrect
+- `docs/disk-persisted-index/AGENTS.md`: Architecture, invariants, measured dead ends, verification commands, and doc map for the disk-persisted `redb` index. Read before changing `RedbStore` or `redb-store` feature code, layered `Graph` overlay/refresh, cache manifests or eviction, `rubydex-index-manager`, `rdx mcp` disk defaults, or store benchmarks.
 
 ## Ruby gem
 
