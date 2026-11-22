@@ -22,7 +22,8 @@
 - [x] Phase 4.1 — record `"workspace"` in `index.redb.files`
 - [x] Phase 4.2 — `prune.rs` + wiring in `rubydex-index-manager`
 - [x] Phase 4 gate — `cargo test -p rubydex-index-manager`, `rubocop`; committed
-- [ ] Final validation — `rake lint`, full `rake test`, end-to-end table in `database_diet.md`
+- [x] Final validation — `rake lint` (110 files, no offenses), full `rake test` (493 runs, 0 failures),
+      `cargo test` (1167 lib tests, default features), end-to-end table in `database_diet.md`
 
 **Measured** (30,738-file gems corpus under `Gem.dir`; redb `TableStats` page footprint, because the
 `.redb` file itself grows in redb's doubling steps — see the Phase 1 note):
