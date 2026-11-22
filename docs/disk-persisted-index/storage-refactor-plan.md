@@ -17,8 +17,8 @@
 - [x] Phase 2 — `StoreError::CorruptBlock`, front-coded codec, sharded `SEARCH_NAMES`, packed `DOCUMENT_URIS`
 - [x] Phase 2 gate — Rust + `test/disk_index_enumerators_test.rb`; measured; committed
 - [x] Phase 3A — hash-prefix bucketed node tables + parallel build
-- [ ] Phase 3B — LZ4 block compression on buckets and search shards
-- [ ] Phase 3B gate — Rust + focused Ruby tests; measured; committed
+- [x] Phase 3B — LZ4 block compression implemented, measured, **reverted**: it buys 6% of payload and
+      costs 50% of fuzzy search (see "Phase 3B outcome" below)
 - [ ] Phase 4.1 — record `"workspace"` in `index.redb.files`
 - [ ] Phase 4.2 — `prune.rs` + wiring in `rubydex-index-manager`
 - [ ] Phase 4 gate — `cargo test -p rubydex-index-manager`, `rubocop`; committed
@@ -34,6 +34,31 @@ file itself grows in redb's doubling steps — see the Phase 1 note):
 | `Store build` | 3.86 s | 3.68 s | 3.52 s | 0.69 s |
 | search exact / fuzzy | 12.6 / 61.0 ms | — | 6.2 / 62.1 ms | 10–13 / 61 ms |
 | `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | — | 0.36 / 0.81 / 6.0 ms | 0.36 / 0.81 / 6.5 ms |
+
+### Phase 3B outcome: compression rejected on measurement
+
+Implemented as specified (LZ4 behind a 4-byte length header on every bucket and shard), measured on
+the 30k-file gems corpus:
+
+| | no LZ4 (Phase 3A) | LZ4 |
+| --- | --- | --- |
+| payload stored | 292.2 MB | 277.2 MB (1.06×) |
+| leaf pages | 73,866 | 70,520 |
+| `.redb` file | 515 MB | 515 MB |
+| `Store build` | 0.69 s | 0.71 s |
+| search exact / fuzzy | 10.5 / 61.0 ms | 10.8 / 93.4 ms |
+| `resolve_constant` | 0.360 ms | 0.385 ms |
+
+Per-table ratios: `declarations` 1.18×, `documents` 1.08×, `search_names` 1.36×, and **1.00×** for
+`definitions`, `method_references`, `constant_references`, `names`, `strings`, `name_dependents`.
+
+Two facts sink it. The 2.6× compressibility measured in `database_diet.md` was mostly natural-language
+comment text (17 MB of `definitions`) and the duplicated FQN/URI projection tables — Phases 1 and 2
+already removed both, and what is left is dominated by uniformly-distributed 64-bit content hashes,
+which LZ77 cannot match. And LZ4 has to decompress a whole ~10 KB bucket to answer one point read, so
+the fuzzy search path (48k point reads) pays ~0.6 µs per read: 61 ms → 93 ms. A 6% payload cut that
+does not even move the file size (redb doubles its file; see the Phase 1 note) is not worth a 50%
+regression on search.
 
 **Background analysis:** `docs/disk-persisted-index/database_diet.md`, `docs/disk-persisted-index/perf-and-cleanup.md`, `docs/disk-persisted-index/memory-baseline.md`.
 
