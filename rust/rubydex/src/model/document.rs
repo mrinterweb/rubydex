@@ -156,6 +156,19 @@ impl Document {
         url.to_file_path().ok()
     }
 
+    /// Reads the document's source from disk, but only if it still matches this document's content
+    /// hash. A store-backed document persists byte offsets into its source (comments), so the text is
+    /// only meaningful while the file on disk is the version the store indexed.
+    ///
+    /// Returns `None` for synthetic/non-file URIs, unreadable files, and files edited since the
+    /// store was built.
+    #[must_use]
+    pub fn read_matching_source(&self) -> Option<String> {
+        let path = self.file_path()?;
+        let source = std::fs::read_to_string(path).ok()?;
+        (xxh3_64(source.as_bytes()) == self.content_hash).then_some(source)
+    }
+
     /// The base file name of this document (the last path segment), decoded from its URI.
     ///
     /// Prefers the platform file path, but falls back to the last URL path segment so it still works

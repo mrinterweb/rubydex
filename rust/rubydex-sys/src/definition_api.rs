@@ -250,11 +250,19 @@ pub unsafe extern "C" fn rdx_definition_comments(pointer: GraphPointer, definiti
             return ptr::null_mut();
         };
 
-        let mut entries = defn
-            .comments()
+        // A store-loaded comment keeps only its offset, so read the source at most once per call —
+        // and not at all for in-memory comments, which carry their text.
+        let comments = defn.comments();
+        let source = if comments.iter().any(|comment| !comment.has_inline_text()) {
+            document.read_matching_source()
+        } else {
+            None
+        };
+
+        let mut entries = comments
             .iter()
             .map(|c| CommentEntry {
-                string: OwnedString::new(c.string()),
+                string: OwnedString::new(c.resolve_text(source.as_deref())),
                 location: create_location_for_uri_and_offset(graph, &document, c.offset()),
             })
             .collect::<Vec<CommentEntry>>()

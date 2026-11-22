@@ -56,6 +56,21 @@ class DiskIndexLiveEditTest < Minitest::Test
     refute_includes(member_names, "Foo#bar()")
   end
 
+  def test_store_backed_definition_comments_are_read_from_source
+    skip("ruby subprocess unavailable; index_workspace can't build a store here") unless Process.respond_to?(:spawn)
+
+    rb = File.join(@tmp, "foo.rb")
+    File.write(rb, "# Doc comment\nclass Foo; end\n")
+
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
+    graph.index_workspace # builds + attaches the store
+
+    # The store keeps comment offsets only, so the text has to come back from the source file.
+    foo = graph["Foo"]
+    refute_nil(foo, "graph[\"Foo\"] should read from the store")
+    assert_equal(["# Doc comment"], foo.definitions.first.comments.map(&:string))
+  end
+
   def test_failed_store_build_cleans_up_temp_files
     ws = File.join(@tmp, "ws")
     FileUtils.mkdir_p(ws)

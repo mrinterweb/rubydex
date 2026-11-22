@@ -17,7 +17,9 @@ use rubydex::{
     model::{
         declaration::{Ancestor, Namespace},
         graph::Graph,
-        ids::{DeclarationId, NameId},
+        definitions::Definition,
+        ids::{DeclarationId, DefinitionId, NameId},
+        comment::Comment,
         store::RedbStore,
     },
     resolution::Resolver,
@@ -143,6 +145,35 @@ fn check_declaration(memory: &Graph, store_backed: &Graph, id: DeclarationId, fa
     }
 }
 
+/// The store keeps comment offsets only, so a loaded comment's text must come back from the source
+/// file that the comment's offset points into.
+fn check_comments(
+    store_backed: &Graph,
+    id: DefinitionId,
+    expected: &Definition,
+    actual: &Definition,
+    failures: &mut Vec<String>,
+) {
+    if expected.comments().is_empty() {
+        return;
+    }
+    let source = store_backed
+        .document(*expected.uri_id())
+        .and_then(|document| document.read_matching_source());
+    let before: Vec<&str> = expected.comments().iter().map(Comment::string).collect();
+    let after: Vec<&str> = actual
+        .comments()
+        .iter()
+        .map(|comment| comment.resolve_text(source.as_deref()))
+        .collect();
+    if before != after {
+        failures.push(format!(
+            "definition {} comment text differs: {before:?} vs {after:?}",
+            id.get()
+        ));
+    }
+}
+
 #[test]
 fn every_node_type_round_trips_through_the_store() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -162,6 +193,7 @@ fn every_node_type_round_trips_through_the_store() {
     }
 
     // Definitions.
+    let mut inline_comments = 0;
     for (id, definition) in memory.definitions() {
         let Some(loaded) = store_backed.definition(*id) else {
             failures.push(format!("definition {} missing", id.get()));
@@ -172,7 +204,14 @@ fn every_node_type_round_trips_through_the_store() {
         {
             failures.push(format!("definition {} differs", id.get()));
         }
+
+        check_comments(&store_backed, *id, definition, &loaded, &mut failures);
+        inline_comments += loaded.comments().iter().filter(|c| c.has_inline_text()).count();
     }
+    assert_eq!(
+        inline_comments, 0,
+        "a store-loaded comment must keep its offset only, not a copy of the source text"
+    );
 
     // Strings (value + reference count).
     for (id, string) in memory.strings() {
@@ -258,6 +297,52 @@ fn every_node_type_round_trips_through_the_store() {
     }
 
     assert!(failures.is_empty(), "round-trip mismatches:\n{}", failures.join("\n"));
+}
+
+/// A source file edited behind the store's back shifts every comment offset, so the text must come
+/// back empty rather than slice (or panic on) the wrong bytes across the FFI boundary.
+#[test]
+fn comments_resolve_to_empty_text_when_the_source_changed_on_disk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("commented.rb");
+    let source = "# Doc comment\nclass Foo; end\n";
+    std::fs::write(&path, source).expect("write");
+
+    let mut memory = Graph::new();
+    let _ = index_files(&mut memory, vec![path.clone()], IndexerBackend::RubyIndexer);
+    Resolver::new(&mut memory).resolve();
+    let store_path = dir.path().join("comments.redb");
+    RedbStore::build(&store_path, &memory).expect("build store");
+    let foo = memory
+        .definitions()
+        .iter()
+        .find(|(_, definition)| !definition.comments().is_empty())
+        .map(|(id, _)| *id)
+        .expect("a definition with a comment");
+    drop(memory);
+
+    let graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+    let definition = graph.definition(foo).expect("definition from store");
+    let document = graph.document(*definition.uri_id()).expect("document from store");
+
+    let unchanged = document.read_matching_source().expect("the unedited file resolves");
+    assert_eq!(unchanged.len(), source.len());
+    let texts: Vec<&str> = definition
+        .comments()
+        .iter()
+        .map(|comment| comment.resolve_text(Some(&unchanged)))
+        .collect();
+    assert_eq!(texts, ["# Doc comment"]);
+
+    // Rewrite the file so every byte offset in the store is stale.
+    std::fs::write(&path, format!("\n\n{source}")).expect("rewrite");
+    assert!(
+        document.read_matching_source().is_none(),
+        "a changed file no longer matches the document's content hash"
+    );
+    for comment in definition.comments() {
+        assert_eq!(comment.resolve_text(None), "");
+    }
 }
 
 #[test]

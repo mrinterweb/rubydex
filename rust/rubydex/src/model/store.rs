@@ -117,7 +117,7 @@ impl std::error::Error for StoreError {
 /// scheme, or the set of tables changes — anything that makes an older store unreadable or
 /// semantically stale. The gem version deliberately does NOT participate: a release that does not
 /// touch the layout would otherwise force every user to re-index.
-pub const STORE_FORMAT_VERSION: u32 = 2;
+pub const STORE_FORMAT_VERSION: u32 = 3;
 
 /// Page cache the builder runs with. redb defaults to 1 GiB, which a build fills with pages it
 /// never reads back. Measured on the Ruby 4.0 gems tree (28k files, 1.1 GB store): 1 GiB = 7.1 s /

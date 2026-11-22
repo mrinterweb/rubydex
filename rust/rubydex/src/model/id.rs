@@ -91,20 +91,23 @@ impl<T, const N: usize> From<[&[u8]; N]> for Id<T> {
 }
 
 // Manual serde impls (not derived) so that the zero-sized `PhantomData<T>` marker does not force a
-// `T: Serialize`/`T: Deserialize` bound on every ID marker type. An `Id<T>` is serialized purely as
-// its underlying `u64`, which is also exactly the key we store in redb.
+// `T: Serialize`/`T: Deserialize` bound on every ID marker type.
+//
+// Serialized as a fixed `[u8; 8]` (exactly 8 bytes in postcard). `serialize_u64` is a LEB128
+// varint, which averages 9.49 bytes for uniformly-distributed 64-bit hashes, and
+// `serialize_bytes` prefixes the slice with a length byte (9 bytes total).
 #[cfg(feature = "redb-store")]
 impl<T> serde::Serialize for Id<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(self.value.get())
+        <[u8; 8] as serde::Serialize>::serialize(&self.value.get().to_le_bytes(), serializer)
     }
 }
 
 #[cfg(feature = "redb-store")]
 impl<'de, T> serde::Deserialize<'de> for Id<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = u64::deserialize(deserializer)?;
-        Ok(Self::new(value))
+        let bytes = <[u8; 8] as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self::new(u64::from_le_bytes(bytes)))
     }
 }
 
@@ -179,5 +182,15 @@ mod tests {
     fn zero_hash_maps_to_nonzero() {
         let id = TestId::new(0);
         assert_eq!(id.get(), u64::MAX);
+    }
+
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn id_serializes_to_exactly_eight_bytes_in_postcard() {
+        let id = TestId::from("Object");
+        let encoded = postcard::to_allocvec(&id).expect("encode");
+        assert_eq!(encoded.len(), 8, "a variable-width encoding wastes a byte per edge");
+        let decoded: TestId = postcard::from_bytes(&encoded).expect("decode");
+        assert_eq!(decoded, id);
     }
 }
