@@ -221,7 +221,9 @@ fn main() {
     // Persist the resolved graph to an on-disk redb store.
     #[cfg(feature = "redb-store")]
     if let Some(path) = args.build_store.as_deref() {
-        rubydex::model::store::RedbStore::build(std::path::Path::new(path), &graph).expect("build store");
+        time_it!(store_build, {
+            rubydex::model::store::RedbStore::build(std::path::Path::new(path), &graph).expect("build store");
+        });
         println!("Built redb store at {path}");
     }
 
