@@ -152,6 +152,9 @@ fn main() {
     #[cfg(feature = "redb-store")]
     if let Some(path) = args.open_store.as_deref() {
         let store = rubydex::model::store::RedbStore::open(std::path::Path::new(path)).expect("open store");
+        if args.stats {
+            print_store_stats(&store, std::path::Path::new(path));
+        }
         let graph = rubydex::model::graph::Graph::with_store(store);
         if let Some(fqn) = args.query.as_deref() {
             let id = rubydex::model::ids::DeclarationId::from(fqn);
@@ -221,10 +224,13 @@ fn main() {
     // Persist the resolved graph to an on-disk redb store.
     #[cfg(feature = "redb-store")]
     if let Some(path) = args.build_store.as_deref() {
-        time_it!(store_build, {
-            rubydex::model::store::RedbStore::build(std::path::Path::new(path), &graph).expect("build store");
+        let store = time_it!(store_build, {
+            rubydex::model::store::RedbStore::build(std::path::Path::new(path), &graph).expect("build store")
         });
         println!("Built redb store at {path}");
+        if args.stats {
+            print_store_stats(&store, std::path::Path::new(path));
+        }
     }
 
     // Integrity check
@@ -283,4 +289,45 @@ fn main() {
 
     // Forget the graph so we don't have to wait for deallocation and let the system reclaim the memory at exit
     mem::forget(graph);
+}
+
+#[cfg(feature = "redb-store")]
+#[allow(clippy::cast_precision_loss)]
+fn print_store_stats(store: &rubydex::model::store::RedbStore, path: &std::path::Path) {
+    const MIB: f64 = 1_048_576.0;
+    let Ok(tables) = store.table_stats() else {
+        return;
+    };
+    let file_bytes = fs::metadata(path).map_or(0, |meta| meta.len());
+    let (mut rows, mut leaves, mut stored, mut fragmented, mut metadata) = (0, 0, 0, 0, 0);
+
+    println!("\nStore statistics");
+    println!(
+        "  {:<22} {:>9} {:>8} {:>10} {:>10} {:>9}",
+        "Table", "Rows", "Leaves", "Stored", "Frag", "Meta"
+    );
+    for t in &tables {
+        println!(
+            "  {:<22} {:>9} {:>8} {:>7.2} MB {:>7.2} MB {:>6.2} MB",
+            t.name,
+            t.rows,
+            t.leaf_pages,
+            t.stored_bytes as f64 / MIB,
+            t.fragmented_bytes as f64 / MIB,
+            t.metadata_bytes as f64 / MIB,
+        );
+        rows += t.rows;
+        leaves += t.leaf_pages;
+        stored += t.stored_bytes;
+        fragmented += t.fragmented_bytes;
+        metadata += t.metadata_bytes;
+    }
+    let footprint = stored + fragmented + metadata;
+    println!("  Total rows:         {rows}");
+    println!("  Total leaf pages:   {leaves}");
+    println!("  Stored bytes:       {stored} ({:.2} MB)", stored as f64 / MIB);
+    println!("  Fragmented bytes:   {fragmented} ({:.2} MB)", fragmented as f64 / MIB);
+    println!("  Metadata bytes:     {metadata} ({:.2} MB)", metadata as f64 / MIB);
+    println!("  Live footprint:     {footprint} ({:.2} MB)", footprint as f64 / MIB);
+    println!("  File size:          {file_bytes} ({:.2} MB)", file_bytes as f64 / MIB);
 }

@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use redb::{Builder, Database, ReadOnlyDatabase, ReadableDatabase, TableDefinition};
+use redb::{Builder, Database, ReadOnlyDatabase, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
 use serde::de::DeserializeOwned;
 
@@ -1438,6 +1438,52 @@ impl RedbStore {
     pub fn get_name_dependents(&self, id: NameId) -> Result<Option<Vec<NameDependent>>, StoreError> {
         self.get_node(NAME_DEPENDENTS, self.bits.name_dependents, "name_dependents", id.get())
     }
+
+    /// Returns per-table size and page counts for every data table in the store.
+    ///
+    /// # Errors
+    /// Returns an error if the `redb` read transaction or table stat lookup fails.
+    pub fn table_stats(&self) -> Result<Vec<TableSizeStats>, StoreError> {
+        const TABLES: [(&str, TableDefinition<u32, &[u8]>); 10] = [
+            ("strings", STRINGS),
+            ("declarations", DECLARATIONS),
+            ("definitions", DEFINITIONS),
+            ("names", NAMES),
+            ("constant_references", CONSTANT_REFERENCES),
+            ("method_references", METHOD_REFERENCES),
+            ("documents", DOCUMENTS),
+            ("name_dependents", NAME_DEPENDENTS),
+            ("search_names", SEARCH_NAMES),
+            ("document_uris", DOCUMENT_URIS),
+        ];
+
+        let read_txn = self.begin_read()?;
+        let mut out = Vec::with_capacity(TABLES.len());
+        for (name, def) in TABLES {
+            let table = read_txn.open_table(def)?;
+            let stats = table.stats()?;
+            out.push(TableSizeStats {
+                name,
+                rows: table.len()?,
+                leaf_pages: stats.leaf_pages(),
+                stored_bytes: stats.stored_bytes(),
+                fragmented_bytes: stats.fragmented_bytes(),
+                metadata_bytes: stats.metadata_bytes(),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Per-table size metrics read from `redb`'s `TableStats`.
+#[derive(Debug, Clone, Copy)]
+pub struct TableSizeStats {
+    pub name: &'static str,
+    pub rows: u64,
+    pub leaf_pages: u64,
+    pub stored_bytes: u64,
+    pub fragmented_bytes: u64,
+    pub metadata_bytes: u64,
 }
 
 #[cfg(test)]
@@ -2706,5 +2752,21 @@ mod tests {
             !graph.all_diagnostics().is_empty(),
             "store-backed document diagnostics must surface after attach"
         );
+    }
+
+    #[test]
+    fn table_stats_reports_every_data_table() {
+        use crate::test_utils::GraphTest;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.redb");
+        let mut context = GraphTest::new();
+        context.index_uri("file:///foo.rb", "class Foo; def bar; baz; end; end");
+        let store = RedbStore::build(&path, context.graph()).expect("build store");
+
+        let stats = store.table_stats().expect("table stats");
+        assert_eq!(stats.len(), 10);
+        assert!(stats.iter().any(|t| t.name == "declarations" && t.stored_bytes > 0));
+        assert!(stats.iter().any(|t| t.name == "search_names" && t.rows > 0));
     }
 }

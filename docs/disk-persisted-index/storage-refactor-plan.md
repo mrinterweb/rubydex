@@ -25,8 +25,26 @@
 - [x] Final validation — `rake lint` (110 files, no offenses), full `rake test` (493 runs, 0 failures),
       `cargo test` (1167 lib tests, default features), end-to-end table in `database_diet.md`
 
-**Measured** (30,738-file gems corpus under `Gem.dir`; redb `TableStats` page footprint, because the
-`.redb` file itself grows in redb's doubling steps — see the Phase 1 note):
+**Reproducible reference benchmark** (`bundle exec ruby utils/bench_store.rb ~/source/discourse`,
+Discourse `ba3bd0d0d47` + bundled gem `lib/` paths + `rbs-4.2.0` core/stdlib on Ruby 4.0.10:
+**25,865 indexed files**, 336,697 declarations, 359,217 definitions):
+
+| | Phase 0 | Final (Phase 3A + 4) |
+| --- | --- | --- |
+| `.redb` file | 1028.0 MiB | 514.0 MiB (−50%) |
+| `stored + fragmented + metadata` | 587.1 MiB | 352.1 MiB (−40%) |
+| `  stored / fragmented / metadata` | 298.3 / 265.1 / 23.6 MiB | 254.5 / 95.2 / 2.4 MiB |
+| leaf pages | 136,728 | 64,984 (−52%) |
+| B-tree rows | 4,949,103 | 112,673 (44× fewer) |
+| `Store build` | 3.60 s | 0.65 s (**5.5× faster**) |
+| total cold build (`--build-store`) | 5.29 s | 2.38–2.59 s |
+| peak RSS | 1051 MB | 1084–1114 MB |
+| search exact / fuzzy | 12.6 / 50.9 ms | 7.7–10.2 / 49.4–50.5 ms |
+| `resolve_constant` / comments / `require_paths` | 0.70 / 1.44 / 9.56 ms | 0.43 / 0.89 / 4.08 ms |
+
+**Phase-by-phase measurements** (measured during implementation on a local 30,738-file Ruby 4.0.5
+`Gem.dir/gems` cache; redb `TableStats` page footprint, because the `.redb` file itself grows in
+redb's doubling steps — see the note below):
 
 | | Phase 0 | Phase 1 | Phase 2 | Phase 3A (final) |
 | --- | --- | --- | --- | --- |

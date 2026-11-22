@@ -24,39 +24,44 @@ what the reference project shows. The size is not one bug; it is four separate m
 
 ## What changed (implementation outcome)
 
-The plan in `storage-refactor-plan.md` was implemented through Phase 4. Measured on a 30,738-file gems
-tree (`$(ruby -e 'puts Gem.dir')/gems`, 1.5× the corpus used above, and a superset of it):
+The plan in `storage-refactor-plan.md` was implemented through Phase 4. Measured with
+`bundle exec ruby utils/bench_store.rb ~/source/discourse` against Discourse (`ba3bd0d0d47`, Ruby
+4.0.10) plus its bundled gem `lib/` paths and `rbs-4.2.0` core/stdlib (**25,865 indexed files**,
+336,697 declarations, 359,217 definitions):
 
-| | before | after |
+| | before (Phase 0) | after (HEAD) |
 | --- | --- | --- |
-| `.redb` file | 1028 MB | 515 MB (−50%) |
-| live leaf pages | 673 MB | 288 MB (−57%) |
-| `stored + fragmented + metadata` | 723 MB | 415 MB (−43%) |
-| `Store build` | 3.86 s | 0.67 s (**5.8× faster**) |
-| total cold build (`--build-store`) | 5.87 s | 2.45 s (2.4× faster) |
-| search exact / fuzzy | 12.6 / 61.0 ms | 6.7 / 61.3 ms |
-| `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | 0.36 / 0.83 / 6.4 ms |
-| peak RSS | 1222 MB | 1252 MB |
+| `.redb` file | 1028.0 MiB | 514.0 MiB (−50%) |
+| `stored + fragmented + metadata` | 587.1 MiB | 352.1 MiB (−40%) |
+| `  stored / fragmented / metadata` | 298.3 / 265.1 / 23.6 MiB | 254.5 / 95.2 / 2.4 MiB |
+| leaf pages | 136,728 | 64,984 (−52%) |
+| B-tree rows | 4,949,103 | 112,673 (44× fewer) |
+| `Store build` | 3.60 s | 0.65 s (**5.5× faster**) |
+| total cold build (`--build-store`) | 5.29 s | 2.38–2.59 s (~2.1× faster) |
+| search exact (`String`) / fuzzy (`arbs`, 38,957 hits) | 12.6 / 50.9 ms | 7.7–10.2 / 49.4–50.5 ms |
+| `resolve_constant` / comments / `require_paths` | 0.70 / 1.44 / 9.56 ms | 0.43 / 0.89 / 4.08 ms |
+| peak RSS | 1051 MB | 1084–1114 MB |
 
 Landed: comment text is no longer stored (offsets only, re-read from source); `Id<T>` is a fixed 8
-bytes; `search_names` and `document_uris` are front-coded into shards (11.3 MB of 32 leaf pages and
-1.1 MB of one page, against 56.9 MB and 8.6 MB of 11,594 and 2,111 rows); every node table is
-hash-prefix bucketed, ~64 nodes to a row, so redb indexes 7.5k rows instead of 535k and the build
-encodes buckets in parallel.
+bytes; `search_names` and `document_uris` are front-coded into shards (8.3 MiB across 32 leaf pages
+and 1.0 MiB on 1 leaf page, down from 38.0 MiB / 9,588 leaves and 6.0 MiB / 1,518 leaves on
+Discourse); every node table is hash-prefix bucketed (~64 nodes per row, 16 for documents), so redb
+indexes 112.7k rows instead of 4.95M and the build encodes buckets in parallel.
 
 Not landed, with the measurements behind each call:
 
 - **Compression (plan step 4).** LZ4 on buckets and shards buys 6% of payload and costs 50% of fuzzy
-  search (61 ms → 93 ms), because a point read must decompress a whole ~10 KB bucket. Only
-  `declarations` (1.18×), `documents` (1.08×) and the projection shards (1.36×) compress at all; the
-  rest are 1.00×. The 2.6× headroom measured below was the comment text and the duplicated
-  projections that steps 1 and 2 removed, and the payload that remains is dominated by
+  search (61 ms → 93 ms on the 30k-file gems tree), because a point read must decompress a whole
+  ~10 KB bucket. Only `declarations` (1.18×), `documents` (1.08×) and the projection shards (1.36×)
+  compress at all; the rest are 1.00×. The 2.6× headroom measured below was the comment text and the
+  duplicated projections that steps 1 and 2 removed, and the payload that remains is dominated by
   uniformly-distributed 64-bit content hashes.
 - **Dropping one edge direction (plan step 3) and the shared library store (plan step 5).** Out of
   scope: both change read paths the live-edit overlay depends on.
-- **The 65–73% file-size target.** The file is 1.8× the live data because redb doubles its file as it
-  grows; 288 MB of live pages sits just above a 256 MB step, so the file lands at 515 MB. Crossing it
-  needs ~27 MB less live data (per-entry bucket keys and offsets are the nearest term at 55 MB).
+- **The 65–73% file-size target.** redb doubles its file as it grows, so 352.1 MiB of live footprint
+  (`stored + fragmented + metadata`) sits above redb's 256 MiB step and lands at 514.0 MiB. Crossing
+  down to the next step requires trimming ~97 MiB of live footprint (fragmentation and per-entry
+  edges/offsets are the largest remaining terms).
 
 ## What is stored
 
