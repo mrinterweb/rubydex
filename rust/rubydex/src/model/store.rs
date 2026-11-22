@@ -33,13 +33,23 @@ const METHOD_REFERENCES: TableDefinition<u64, &[u8]> = TableDefinition::new("met
 const DOCUMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("documents");
 const NAME_DEPENDENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("name_dependents");
 
-/// Declaration FQN names for search: `declaration_id -> FQN string`. A compact projection so
-/// name-based search scans short strings instead of deserializing full declaration nodes.
-const SEARCH_NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("search_names");
+/// Declaration FQN names for search, as `shard index -> front-coded (declaration_id, FQN) block`.
+/// A compact projection so name-based search scans short strings instead of deserializing full
+/// declaration nodes. Sharding it gives the parallel scan `SEARCH_SHARD_COUNT` independent units
+/// and front-coding removes the shared prefix of neighbouring FQNs (`ActiveRecord::Associations::
+/// CollectionAssociation` and `...CollectionProxy` share most of their bytes).
+///
+/// Written sorted by FQN, so contiguous shard ranges decode to the lexicographic order.
+const SEARCH_NAMES: TableDefinition<u32, &[u8]> = TableDefinition::new("search_names");
 
-/// Document URIs for require-path resolution: `uri_id -> URI string`. A compact projection so
-/// require completion can enumerate file paths without deserializing full document nodes.
-const DOCUMENT_URIS: TableDefinition<u64, &[u8]> = TableDefinition::new("document_uris");
+/// How many contiguous blocks `SEARCH_NAMES` is split into. A fixed count (rather than one shard
+/// per thread) keeps the store layout independent of the machine that built it.
+const SEARCH_SHARD_COUNT: usize = 32;
+
+/// Document URIs for require-path resolution: key `0` -> front-coded `(uri_id, URI)` block. A compact
+/// projection so require completion can enumerate file paths without deserializing full document
+/// nodes.
+const DOCUMENT_URIS: TableDefinition<u32, &[u8]> = TableDefinition::new("document_uris");
 const STORE_METADATA: TableDefinition<u8, u32> = TableDefinition::new("store_metadata");
 
 /// Failure modes of the on-disk store.
@@ -66,6 +76,16 @@ pub enum StoreError {
         /// The underlying decode failure.
         source: postcard::Error,
     },
+    /// A packed block or shard failed structural validation: a truncated header, an out-of-range
+    /// offset, an invalid UTF-8 sequence, or a bad length.
+    CorruptBlock {
+        /// Logical table the block was read from.
+        table: &'static str,
+        /// Shard or bucket key of the block.
+        key: u32,
+        /// What was wrong with the block.
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -76,6 +96,9 @@ impl std::fmt::Display for StoreError {
             StoreError::IncompatibleFormat(version) => write!(f, "unsupported store format version {version}"),
             StoreError::Corrupt { table, id, source } => {
                 write!(f, "corrupt node in table `{table}` (id {id}): {source}")
+            }
+            StoreError::CorruptBlock { table, key, reason } => {
+                write!(f, "corrupt block in table `{table}` (key {key}): {reason}")
             }
         }
     }
@@ -108,9 +131,162 @@ impl std::error::Error for StoreError {
         match self {
             StoreError::Open(error) => Some(error),
             StoreError::Encode(source) | StoreError::Corrupt { source, .. } => Some(source),
-            StoreError::IncompatibleFormat(_) => None,
+            StoreError::IncompatibleFormat(_) | StoreError::CorruptBlock { .. } => None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Front-coded blocks
+//
+// A block packs a lexicographically sorted run of `(text, id)` pairs, storing each entry as its
+// shared prefix length with the previous entry, then only the differing suffix. Two FQNs in the
+// same namespace share almost everything, and so do two URIs in the same directory, which is why
+// the shared prefix is worth its two varints.
+//
+// Wire format:
+//   [entry_count: u32 LE]
+//   entry_count times: [shared_prefix_len: LEB128 u32][suffix_len: LEB128 u32][suffix][id: u64 LE]
+// ---------------------------------------------------------------------------------------------
+
+#[allow(clippy::cast_possible_truncation)] // masked to 7 bits, so the value always fits a byte
+fn write_varint_u32(out: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        out.push((value & 0x7f) as u8 | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_varint_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let mut result: u32 = 0;
+    let mut shift: u32 = 0;
+    loop {
+        let byte = *bytes.get(*pos)?;
+        *pos += 1;
+        // Reject a varint that would overflow `u32` (or run past 5 bytes) instead of wrapping.
+        if shift >= 32 || (shift == 28 && byte > 0x0f) {
+            return None;
+        }
+        result |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(result);
+        }
+        shift += 7;
+    }
+}
+
+/// Encodes `entries` into `out`. The caller must have sorted them by `text` ascending: front-coding
+/// is only meaningful neighbour-to-neighbour, and the readers rely on the order.
+fn encode_front_coded(entries: &[(&[u8], u64)], out: &mut Vec<u8>) -> Result<(), StoreError> {
+    out.clear();
+    let count = u32::try_from(entries.len()).map_err(|_| StoreError::CorruptBlock {
+        table: "front_coded",
+        key: 0,
+        reason: "block entry count exceeds u32::MAX",
+    })?;
+    out.extend_from_slice(&count.to_le_bytes());
+    let mut previous: &[u8] = &[];
+    let too_long = |reason| StoreError::CorruptBlock {
+        table: "front_coded",
+        key: 0,
+        reason,
+    };
+    for &(text, id) in entries {
+        let shared = previous
+            .iter()
+            .zip(text)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let shared = u32::try_from(shared).map_err(|_| too_long("shared prefix exceeds u32::MAX"))?;
+        let suffix = text.get(shared as usize..).unwrap_or_default();
+        let suffix_len = u32::try_from(suffix.len()).map_err(|_| too_long("suffix exceeds u32::MAX"))?;
+        write_varint_u32(out, shared);
+        write_varint_u32(out, suffix_len);
+        out.extend_from_slice(suffix);
+        out.extend_from_slice(&id.to_le_bytes());
+        previous = text;
+    }
+    Ok(())
+}
+
+/// Calls `visit(id, text)` for every entry of a front-coded block.
+///
+/// Never panics on a corrupt block: every read is bounds-checked and every assembled string is
+/// validated as UTF-8. A bad block returns [`StoreError::CorruptBlock`], which the caller records
+/// and degrades on rather than aborting the host process.
+fn decode_front_coded(
+    table: &'static str,
+    key: u32,
+    bytes: &[u8],
+    mut visit: impl FnMut(u64, &str),
+) -> Result<(), StoreError> {
+    let error = |reason| StoreError::CorruptBlock { table, key, reason };
+    let count_bytes: [u8; 4] = bytes
+        .get(0..4)
+        .ok_or_else(|| error("truncated header"))?
+        .try_into()
+        .unwrap();
+    let count = u32::from_le_bytes(count_bytes);
+    let mut pos = 4usize;
+    // Reused across entries: one allocation per block rather than one per string.
+    let mut assembled = Vec::<u8>::with_capacity(256);
+
+    for _ in 0..count {
+        let shared = read_varint_u32(bytes, &mut pos).ok_or_else(|| error("truncated shared prefix length"))? as usize;
+        let suffix_len = read_varint_u32(bytes, &mut pos).ok_or_else(|| error("truncated suffix length"))? as usize;
+        if shared > assembled.len() {
+            return Err(error("shared prefix exceeds the previous entry"));
+        }
+        let end = pos
+            .checked_add(suffix_len)
+            .ok_or_else(|| error("suffix length overflow"))?;
+        let suffix = bytes.get(pos..end).ok_or_else(|| error("truncated suffix"))?;
+        pos = end;
+        let id_end = pos.checked_add(8).ok_or_else(|| error("id offset overflow"))?;
+        let id_bytes: [u8; 8] = bytes
+            .get(pos..id_end)
+            .ok_or_else(|| error("truncated id"))?
+            .try_into()
+            .unwrap();
+        pos = id_end;
+
+        // Truncating a `Vec<u8>` at a multi-byte character boundary is fine: the suffix completes
+        // the sequence before `from_utf8` looks at it. `String::truncate` would panic here.
+        assembled.truncate(shared);
+        assembled.extend_from_slice(suffix);
+        let text = std::str::from_utf8(&assembled).map_err(|_| error("invalid UTF-8 in entry"))?;
+        visit(u64::from_le_bytes(id_bytes), text);
+    }
+    Ok(())
+}
+
+/// Encodes `entries` into up to [`SEARCH_SHARD_COUNT`] front-coded blocks, one per shard, encoding
+/// on all available cores. Shards stay in ascending FQN order.
+fn encode_search_shards(entries: &[(&[u8], u64)]) -> Result<Vec<Vec<u8>>, StoreError> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let chunk_size = entries.len().div_ceil(SEARCH_SHARD_COUNT).max(1);
+    let chunks: Vec<&[(&[u8], u64)]> = entries.chunks(chunk_size).collect();
+    let encode = |chunk: &[(&[u8], u64)]| -> Result<Vec<u8>, StoreError> {
+        let mut out = Vec::with_capacity(chunk.len() * 24);
+        encode_front_coded(chunk, &mut out)?;
+        Ok(out)
+    };
+    if chunks.len() < 2 {
+        return Ok(vec![encode(chunks[0])?]);
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| scope.spawn(move || encode(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("front-coding worker panicked"))
+            .collect()
+    })
 }
 
 /// Layout version of the persisted store. Bump this when a node's serialized shape, a table's key
@@ -251,28 +427,35 @@ impl RedbStore {
             write_map!(DOCUMENTS, graph.documents());
             write_map!(NAME_DEPENDENTS, graph.name_dependents());
             {
-                let mut entries: Vec<_> = graph
+                // Sorted by FQN, not by id: front-coding pays off between neighbours, and the
+                // search scan reads the block in this order anyway.
+                let mut entries: Vec<(&[u8], u64)> = graph
                     .declarations()
                     .iter()
-                    .map(|(id, declaration)| (id.get(), declaration.name().as_bytes()))
+                    .map(|(id, declaration)| (declaration.name().as_bytes(), id.get()))
                     .collect();
-                entries.sort_unstable_by_key(|(key, _)| *key);
+                entries.sort_unstable_by_key(|(name, _)| *name);
+                let shards = encode_search_shards(&entries)?;
                 let mut table = write_txn.open_table(SEARCH_NAMES)?;
-                for (key, name) in entries {
-                    table.insert(key, name)?;
+                for (shard, blob) in shards.iter().enumerate() {
+                    let shard = u32::try_from(shard).map_err(|_| StoreError::CorruptBlock {
+                        table: "search_names",
+                        key: 0,
+                        reason: "shard count exceeds u32::MAX",
+                    })?;
+                    table.insert(shard, blob.as_slice())?;
                 }
             }
             {
-                let mut entries: Vec<_> = graph
+                let mut entries: Vec<(&[u8], u64)> = graph
                     .documents()
                     .iter()
-                    .map(|(id, document)| (id.get(), document.uri().as_bytes()))
+                    .map(|(id, document)| (document.uri().as_bytes(), id.get()))
                     .collect();
-                entries.sort_unstable_by_key(|(key, _)| *key);
-                let mut table = write_txn.open_table(DOCUMENT_URIS)?;
-                for (key, uri) in entries {
-                    table.insert(key, uri)?;
-                }
+                entries.sort_unstable_by_key(|(uri, _)| *uri);
+                let mut blob = Vec::with_capacity(entries.len() * 32);
+                encode_front_coded(&entries, &mut blob)?;
+                write_txn.open_table(DOCUMENT_URIS)?.insert(0, blob.as_slice())?;
             }
 
             write_txn.commit()?;
@@ -480,38 +663,34 @@ impl RedbStore {
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
     #[cfg(test)]
-    pub fn search_names(&self) -> Result<Vec<(DeclarationId, String)>, redb::Error> {
+    pub fn search_names(&self) -> Result<Vec<(DeclarationId, String)>, StoreError> {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(SEARCH_NAMES)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<(DeclarationId, String), redb::Error> {
-                let (id, name) = entry?;
-                Ok((
-                    DeclarationId::new(id.value()),
-                    String::from_utf8_lossy(name.value()).into_owned(),
-                ))
-            })
-            .collect()
+        let mut names = Vec::new();
+        for entry in table.range(0..=u32::MAX)? {
+            let (shard, blob) = entry?;
+            decode_front_coded("search_names", shard.value(), blob.value(), |id, name| {
+                names.push((DeclarationId::new(id), name.to_owned()));
+            })?;
+        }
+        Ok(names)
     }
 
     /// Reads all `(uri_id, URI)` pairs for require-path resolution.
     ///
     /// # Errors
     /// Returns an error if the redb read transaction or table iteration fails.
-    pub fn document_uris(&self) -> Result<Vec<(UriId, String)>, redb::Error> {
+    pub fn document_uris(&self) -> Result<Vec<(UriId, String)>, StoreError> {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(DOCUMENT_URIS)?;
-        table
-            .range(..=u64::MAX)?
-            .map(|entry| -> Result<(UriId, String), redb::Error> {
-                let (id, uri) = entry?;
-                Ok((
-                    UriId::new(id.value()),
-                    String::from_utf8_lossy(uri.value()).into_owned(),
-                ))
-            })
-            .collect()
+        let Some(blob) = table.get(0)? else {
+            return Ok(Vec::new());
+        };
+        let mut uris = Vec::new();
+        decode_front_coded("document_uris", 0, blob.value(), |id, uri| {
+            uris.push((UriId::new(id), uri.to_owned()));
+        })?;
+        Ok(uris)
     }
 
     /// Streams `range` of the `SEARCH_NAMES` table, returning the ids whose FQN passes `predicate`.
@@ -522,18 +701,22 @@ impl RedbStore {
     /// Returns an error if the redb read transaction or table iteration fails.
     fn matching_ids(
         &self,
-        range: std::ops::RangeInclusive<u64>,
+        shards: std::ops::Range<u32>,
         predicate: &dyn Fn(&DeclarationId, &str) -> bool,
-    ) -> Result<Vec<DeclarationId>, redb::Error> {
+    ) -> Result<Vec<DeclarationId>, StoreError> {
         let read_txn = self.begin_read()?;
         let table = read_txn.open_table(SEARCH_NAMES)?;
         let mut ids = Vec::new();
-        for entry in table.range(range)? {
-            let (key, name) = entry?;
-            let id = DeclarationId::new(key.value());
-            if predicate(&id, &String::from_utf8_lossy(name.value())) {
-                ids.push(id);
-            }
+        for shard in shards {
+            let Some(blob) = table.get(shard)? else {
+                continue;
+            };
+            decode_front_coded("search_names", shard, blob.value(), |raw_id, name| {
+                let id = DeclarationId::new(raw_id);
+                if predicate(&id, name) {
+                    ids.push(id);
+                }
+            })?;
         }
         Ok(ids)
     }
@@ -550,8 +733,8 @@ impl RedbStore {
     pub fn declaration_ids_matching(
         &self,
         predicate: &dyn Fn(&DeclarationId, &str) -> bool,
-    ) -> Result<Vec<DeclarationId>, redb::Error> {
-        self.matching_ids(0..=u64::MAX, predicate)
+    ) -> Result<Vec<DeclarationId>, StoreError> {
+        self.matching_ids(0..u32::try_from(SEARCH_SHARD_COUNT).unwrap_or(u32::MAX), predicate)
     }
 
     /// Streams `SEARCH_NAMES` across `available_parallelism()` key ranges, each on its
@@ -570,30 +753,37 @@ impl RedbStore {
     pub fn declaration_ids_matching_parallel(
         &self,
         predicate: &(dyn Fn(&DeclarationId, &str) -> bool + Sync),
-    ) -> Result<Vec<DeclarationId>, redb::Error> {
-        let shards = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-        let shard_width = u64::MAX / shards as u64;
+    ) -> Result<Vec<DeclarationId>, StoreError> {
+        let shard_count = u32::try_from(SEARCH_SHARD_COUNT).unwrap_or(u32::MAX);
+        let workers = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        // Contiguous shard ranges, so joining the workers in order yields each shard's ascending
+        // FQN order back with no re-sort and no duplicate.
+        let mut ranges = Vec::with_capacity(workers);
+        let mut start = 0_u32;
+        for worker in 0..workers {
+            let remaining_workers = u32::try_from(workers - worker).unwrap_or(1);
+            let take = (shard_count - start).div_ceil(remaining_workers);
+            ranges.push(start..start + take);
+            start += take;
+        }
         let results = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..shards)
-                .map(|shard| {
-                    let start = shard as u64 * shard_width;
-                    // The last shard takes the remainder, including u64::MAX itself.
-                    let end = if shard == shards - 1 {
-                        u64::MAX
-                    } else {
-                        (shard as u64 + 1) * shard_width - 1
-                    };
-                    scope.spawn(move || self.matching_ids(start..=end, predicate))
-                })
+            let handles: Vec<_> = ranges
+                .into_iter()
+                .filter(|range| !range.is_empty())
+                .map(|range| scope.spawn(move || self.matching_ids(range, predicate)))
                 .collect::<Vec<_>>();
             handles
                 .into_iter()
                 .map(|handle| handle.join().expect("search shard panicked"))
                 .collect::<Result<Vec<_>, _>>()
         });
-        // Each shard walks an ascending, disjoint key range and the shards are joined in order, so
-        // the concatenation is already strictly ascending: re-sorting it was a wasted full pass.
-        Ok(results?.concat())
+        // Sorted by id, not by the FQN order the shards are written in: the caller fetches each
+        // match's declaration node from `DECLARATIONS`, which is keyed by id, so id order turns
+        // ~48k random point reads into a sequential walk (measured: 77ms -> 59ms on the gems
+        // corpus). The sort itself is ~1ms.
+        let mut ids = results?.concat();
+        ids.sort_unstable_by_key(DeclarationId::get);
+        Ok(ids)
     }
 
     /// Every key of `table`, as ids. Enumeration needs the ids only and throws the values away, so
@@ -945,18 +1135,16 @@ mod tests {
             let parallel = store
                 .declaration_ids_matching_parallel(&|_, name| name.contains(query))
                 .expect("parallel scan");
-            assert_eq!(
-                serial.len(),
-                parallel.len(),
-                "a shard boundary must not list a node twice"
-            );
-            assert!(
-                parallel.windows(2).all(|pair| pair[0] < pair[1]),
-                "shards cover ascending disjoint key ranges, so the merge is already sorted (query {query:?})"
-            );
+            // The parallel scan sorts ids for sequential point reads; the serial one keeps the
+            // shard order. Same set, no duplicates.
             let serial: BTreeSet<_> = serial.into_iter().map(|id| id.get()).collect();
-            let parallel: BTreeSet<_> = parallel.into_iter().map(|id| id.get()).collect();
-            assert_eq!(serial, parallel, "scans disagree for query {query:?}");
+            let unique: BTreeSet<_> = parallel.iter().map(DeclarationId::get).collect();
+            assert_eq!(serial, unique, "scans disagree for query {query:?}");
+            assert_eq!(
+                unique.len(),
+                parallel.len(),
+                "a shard boundary listed a node twice (query {query:?})"
+            );
         }
     }
 
@@ -1155,6 +1343,84 @@ mod tests {
         assert!(
             saw_resolved,
             "the store reference must still be streamed with its overlay name"
+        );
+    }
+
+    #[test]
+    fn front_coded_blocks_round_trip_multibyte_prefixes() {
+        // These pairs share leading bytes *inside* a multi-byte character (`Caf` + `0xC3`),
+        // which is exactly where a `String::truncate`-based decoder would panic.
+        let entries: Vec<(&[u8], u64)> = vec![
+            ("Café".as_bytes(), 1),
+            ("Cafè".as_bytes(), 2),
+            ("Cafê::Inner".as_bytes(), 3),
+            ("日本語::A".as_bytes(), 4),
+            ("日本語::B".as_bytes(), 5),
+            ("日本語::B::Nested".as_bytes(), 6),
+        ];
+        let mut block = Vec::new();
+        encode_front_coded(&entries, &mut block).expect("encode");
+
+        let mut decoded = Vec::new();
+        decode_front_coded("test", 0, &block, |id, text| decoded.push((id, text.to_owned()))).expect("decode");
+        let expected: Vec<(u64, String)> = entries
+            .iter()
+            .map(|(text, id)| (*id, String::from_utf8(text.to_vec()).expect("utf-8")))
+            .collect();
+        assert_eq!(decoded, expected);
+        assert!(
+            block.len() < entries.iter().map(|(text, _)| text.len() + 10).sum::<usize>(),
+            "front-coding must be smaller than storing the strings in full"
+        );
+    }
+
+    #[test]
+    fn corrupt_front_coded_blocks_are_errors_not_panics() {
+        let cases: Vec<(&[u8], &str)> = vec![
+            (&[], "truncated header"),
+            (&[1, 0, 0, 0], "truncated shared prefix length"),
+            // count 1, shared 0, suffix length 4, only 2 suffix bytes, no id.
+            (&[1, 0, 0, 0, 0, 4, b'a', b'b'], "truncated suffix"),
+            // count 1, shared 5 but the previous entry is empty.
+            (&[1, 0, 0, 0, 5, 1, b'a'], "shared prefix exceeds the previous entry"),
+            // A complete entry whose suffix is not valid UTF-8.
+            (
+                &[1, 0, 0, 0, 0, 1, 0xff, 0, 0, 0, 0, 0, 0, 0, 1],
+                "invalid UTF-8 in entry",
+            ),
+        ];
+        for (block, expected) in cases {
+            let error = decode_front_coded("test", 0, block, |_, _| {}).expect_err("corrupt block");
+            assert!(
+                matches!(error, StoreError::CorruptBlock { reason, .. } if reason == expected),
+                "expected {expected:?}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_search_shard_is_recorded_without_panicking() {
+        let graph = Graph::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        drop(RedbStore::build(&path, &graph).expect("build store"));
+
+        let db = Database::builder().open(&path).expect("open for corruption");
+        let txn = db.begin_write().expect("write transaction");
+        {
+            let mut table = txn.open_table(SEARCH_NAMES).expect("search names table");
+            // A header claiming one entry, with no entry behind it.
+            table.insert(0, &[1_u8, 0, 0, 0][..]).expect("corrupt shard");
+        }
+        txn.commit().expect("commit corruption");
+        drop(db);
+
+        let graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+        let found = graph.store_declaration_ids_matching(&|_, _| true);
+        assert!(found.is_empty(), "a corrupt shard answers nothing");
+        assert!(
+            graph.store_error_count() > 0,
+            "the corrupt shard must be recorded, not panicked on"
         );
     }
 

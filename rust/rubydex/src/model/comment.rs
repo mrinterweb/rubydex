@@ -43,9 +43,10 @@ impl Comment {
     /// The comment's text length in bytes, without materializing a store-loaded comment's text.
     #[must_use]
     pub fn byte_len(&self) -> usize {
-        self.string
-            .as_deref()
-            .map_or_else(|| self.offset.end().saturating_sub(self.offset.start()) as usize, str::len)
+        self.string.as_deref().map_or_else(
+            || self.offset.end().saturating_sub(self.offset.start()) as usize,
+            str::len,
+        )
     }
 
     /// The comment's text, preferring the in-memory copy and falling back to slicing the source at

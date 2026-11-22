@@ -1394,7 +1394,10 @@ impl CommentGroup {
     fn add_comment(&mut self, comment: &ruby_prism::Comment) {
         self.end_offset = comment.location().end() as usize;
         let slice = comment.location().as_slice();
-        if slice.split(|&byte| byte == b'\n').any(|line| line.starts_with(b"# @deprecated")) {
+        if slice
+            .split(|&byte| byte == b'\n')
+            .any(|line| line.starts_with(b"# @deprecated"))
+        {
             self.deprecated = true;
         }
         self.comments.push(Comment::new(

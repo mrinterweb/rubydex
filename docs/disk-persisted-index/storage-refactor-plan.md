@@ -6,6 +6,35 @@
 
 **Why both size and upfront indexing speed improve together:** On the 5,002-file gems corpus, listing + indexing + resolution takes only `0.214s`, whereas `RedbStore::build` alone takes `~1.11s` (**80% of cold build wall time**), writing 535,399 individual small B-tree entries sequentially on one thread with 535k `postcard::to_allocvec` heap allocations and 32% redb leaf-page slack. Removing redundant bytes and collapsing 535k B-tree rows into ~7.5k parallel-encoded, compressed hash-prefix buckets fixes both size and build time simultaneously.
 
+## Progress
+
+- [x] Phase 0.1 — `store_build` phase in `Timer` + `time_it!` around `RedbStore::build`
+- [x] Phase 0.2 — Phase 0 baseline recorded (see below)
+- [x] Phase 0.3 — clippy both feature sets; committed
+- [x] Phase 1A — comment offsets only; `Comment::resolve_text` reads the source on demand
+- [x] Phase 1B — fixed 8-byte `Id<T>` encoding; `STORE_FORMAT_VERSION = 3`
+- [x] Phase 1 gate — Rust + focused Ruby tests; measured; committed
+- [x] Phase 2 — `StoreError::CorruptBlock`, front-coded codec, sharded `SEARCH_NAMES`, packed `DOCUMENT_URIS`
+- [x] Phase 2 gate — Rust + `test/disk_index_enumerators_test.rb`; measured; committed
+- [ ] Phase 3A — hash-prefix bucketed node tables + parallel build
+- [ ] Phase 3B — LZ4 block compression on buckets and search shards
+- [ ] Phase 3B gate — Rust + focused Ruby tests; measured; committed
+- [ ] Phase 4.1 — record `"workspace"` in `index.redb.files`
+- [ ] Phase 4.2 — `prune.rs` + wiring in `rubydex-index-manager`
+- [ ] Phase 4 gate — `cargo test -p rubydex-index-manager`, `rubocop`; committed
+- [ ] Final validation — `rake lint`, full `rake test`, end-to-end table in `database_diet.md`
+
+**Measured so far** (30,738-file gems corpus; redb `TableStats` page footprint, because the `.redb`
+file itself grows in redb's doubling steps — see the Phase 1 note):
+
+| | Phase 0 | Phase 1 | Phase 2 |
+| --- | --- | --- | --- |
+| `stored + fragmented + metadata` | 723 MB | 646 MB | 539 MB |
+| `.redb` file | 1028 MB | 1028 MB | 515 MB |
+| `Store build` | 3.86 s | 3.68 s | 3.52 s |
+| search exact / fuzzy | 12.6 / 61.0 ms | — | 6.2 / 62.1 ms |
+| `resolve_constant` / comments / `require_paths` | 0.64 / 1.35 / 12.4 ms | — | 0.36 / 0.81 / 6.0 ms |
+
 **Background analysis:** `docs/disk-persisted-index/database_diet.md`, `docs/disk-persisted-index/perf-and-cleanup.md`, `docs/disk-persisted-index/memory-baseline.md`.
 
 ---

@@ -2463,7 +2463,12 @@ impl Graph {
                     declarations_with_docs += 1;
                     let doc_size: usize = definitions
                         .iter()
-                        .map(|def| def.comments().iter().map(crate::model::comment::Comment::byte_len).sum::<usize>())
+                        .map(|def| {
+                            def.comments()
+                                .iter()
+                                .map(crate::model::comment::Comment::byte_len)
+                                .sum::<usize>()
+                        })
                         .sum();
                     total_doc_size += doc_size;
                 }
