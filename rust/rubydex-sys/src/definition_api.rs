@@ -117,7 +117,19 @@ fn raw_name_for_name(graph: &Graph, name_id: NameId) -> Option<String> {
     append_raw_name(graph, name_id, &mut raw_name).then_some(raw_name)
 }
 
+/// How far a parent-scope chain may go. A resolved name cascades are a handful of levels deep; a
+/// crafted store can make `parent_scope` cyclic, which without a bound would overflow the stack
+/// inside `extern "C"` and abort the host process instead of returning an error.
+const MAX_NAME_DEPTH: usize = 128;
+
 fn append_raw_name(graph: &Graph, name_id: NameId, raw_name: &mut String) -> bool {
+    append_raw_name_at(graph, name_id, raw_name, 0)
+}
+
+fn append_raw_name_at(graph: &Graph, name_id: NameId, raw_name: &mut String, depth: usize) -> bool {
+    if depth > MAX_NAME_DEPTH {
+        return false;
+    }
     let Some(name) = graph.name(name_id) else {
         return false;
     };
@@ -129,7 +141,7 @@ fn append_raw_name(graph: &Graph, name_id: NameId, raw_name: &mut String) -> boo
         ParentScope::None => {}
         ParentScope::TopLevel => raw_name.push_str("::"),
         ParentScope::Some(parent_id) | ParentScope::Attached(parent_id) => {
-            if !append_raw_name(graph, *parent_id, raw_name) {
+            if !append_raw_name_at(graph, *parent_id, raw_name, depth + 1) {
                 return false;
             }
             raw_name.push_str("::");
@@ -663,4 +675,27 @@ pub unsafe extern "C" fn rdx_method_alias_definition_target(
             },
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rubydex::model::ids::StringId;
+
+    #[test]
+    fn a_parent_scope_chain_past_the_cap_is_refused_instead_of_overflowing_the_stack() {
+        let mut graph = Graph::new();
+        let mut deepest = None;
+        for depth in 0..super::MAX_NAME_DEPTH + 2 {
+            let parent_scope = deepest.map_or(ParentScope::None, ParentScope::Some);
+            deepest = Some(graph.add_name(StringId::from(format!("N{depth}").as_str()), parent_scope, None));
+        }
+
+        let mut raw_name = String::new();
+        assert!(
+            !append_raw_name(&graph, deepest.expect("a chain"), &mut raw_name),
+            "a chain past the cap must be refused"
+        );
+        assert!(raw_name.is_empty(), "and report nothing rather than a truncated prefix");
+    }
 }

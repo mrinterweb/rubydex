@@ -122,12 +122,12 @@ pub unsafe extern "C" fn free_c_string_array(ptr: *const *const c_char, count: u
 /// Converts a Rust `&str` to an owned C string (`*const c_char`), suitable for returning across the
 /// FFI boundary. The caller is responsible for freeing it with `free_c_string`.
 ///
-/// # Panics
-///
-/// Panics if `value` contains an interior null byte, which should never occur in rubydex data.
+/// Returns null for a value with an interior null byte, which has no C string form: a panic here
+/// would unwind across `extern "C"` and abort the host process. Callers already handle null (a
+/// missing name or message), so the malformed value degrades to absence.
 #[must_use]
 pub fn cstring_raw(value: &str) -> *const c_char {
-    CString::new(value).unwrap().into_raw().cast_const()
+    CString::new(value).map_or(ptr::null(), |string| string.into_raw().cast_const())
 }
 
 /// Rust uses backslashes as separators on Windows, but Ruby prefers forward slashes everywhere. We need to make sure

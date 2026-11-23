@@ -8,7 +8,9 @@
 VALUE cLocation;
 
 VALUE rdxi_build_location_value(Location *loc) {
-    if (loc == NULL) {
+    // A URI that cannot be a C string (an interior NUL in a store-written value) is reported as an
+    // absent location rather than a crash: `rb_utf8_str_new_cstr` reads until the terminator.
+    if (loc == NULL || loc->uri == NULL) {
         return Qnil;
     }
 

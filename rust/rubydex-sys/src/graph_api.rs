@@ -1509,6 +1509,35 @@ mod tests {
 
     use super::*;
 
+    /// A URI from a crafted store can hold an interior NUL, which has no C string form. It must read
+    /// back as absent rather than panic across `extern "C"` and abort the host process.
+    #[test]
+    fn a_uri_with_an_interior_nul_is_absent_instead_of_panicking() {
+        let mut graph = Graph::new();
+        let uri = "file:///foo\u{0}bar.rb";
+        indexing::index_source(&mut graph, uri.into(), "class Foo; end\n", &LanguageId::Ruby);
+        let uri_id = UriId::from(uri);
+        let definition_id = graph
+            .definitions()
+            .iter()
+            .find(|(_, definition)| definition.uri_id().get() == uri_id.get())
+            .map(|(id, _)| *id)
+            .expect("a definition in the document");
+
+        let graph_ptr = Box::into_raw(Box::new(std::sync::RwLock::new(graph))) as GraphPointer;
+        unsafe {
+            assert!(
+                crate::document_api::rdx_document_uri(graph_ptr, uri_id.get()).is_null(),
+                "a NUL URI has no C string form"
+            );
+            assert!(
+                crate::definition_api::rdx_definition_location(graph_ptr, definition_id.get()).is_null(),
+                "a location whose URI cannot be a C string is absent, not a crash"
+            );
+        }
+        drop(unsafe { Box::from_raw(graph_ptr.cast::<std::sync::RwLock<Graph>>()) });
+    }
+
     #[cfg(feature = "redb-store")]
     #[test]
     fn document_getters_find_store_backed_nodes() {

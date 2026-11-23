@@ -54,11 +54,11 @@ pub unsafe extern "C" fn rdx_graph_documents_iter_free(iter: *mut DocumentsIter)
 pub unsafe extern "C" fn rdx_document_uri(pointer: GraphPointer, uri_id: u64) -> *const c_char {
     with_graph(pointer, |graph| {
         let uri_id = UriId::new(uri_id);
-        if let Some(doc) = graph.document(uri_id) {
-            CString::new(doc.uri()).unwrap().into_raw().cast_const()
-        } else {
-            ptr::null()
-        }
+        // A URI read back from a store is untrusted: an interior NUL has no C string form, so the
+        // caller gets null (and a Ruby nil) instead of a panic across the boundary.
+        graph.document(uri_id).map_or(ptr::null(), |doc| {
+            CString::new(doc.uri()).map_or(ptr::null(), |uri| uri.into_raw().cast_const())
+        })
     })
 }
 

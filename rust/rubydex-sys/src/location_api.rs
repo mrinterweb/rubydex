@@ -5,6 +5,7 @@ use rubydex::model::document::Document;
 use rubydex::model::graph::Graph;
 use rubydex::offset::Offset;
 use std::ffi::CString;
+use std::ptr;
 
 /// C-compatible struct representing a definition location with offsets and line/column positions.
 #[repr(C)]
@@ -36,12 +37,20 @@ pub(crate) fn create_location_for_uri_and_offset(graph: &Graph, document: &Docum
     let start_pos = line_index.line_col(offset.start().min(max_offset).into());
     let end_pos = line_index.line_col(offset.end().min(max_offset).into());
 
+    // A URI from the store is untrusted: one with an interior NUL cannot be a C string, and the
+    // resulting location is reported as absent rather than taking the host process down with a panic
+    // that has no way back across the boundary.
+    let Ok(uri) = CString::new(document.uri()) else {
+        return ptr::null_mut();
+    };
+    let uri = uri.into_raw().cast_const();
+
     let loc = if let Some(wide_encoding) = graph.encoding().to_wide() {
         let wide_start_pos = line_index.to_wide(wide_encoding, start_pos).unwrap();
         let wide_end_pos = line_index.to_wide(wide_encoding, end_pos).unwrap();
 
         Location {
-            uri: CString::new(document.uri()).unwrap().into_raw().cast_const(),
+            uri,
             start_line: wide_start_pos.line,
             end_line: wide_end_pos.line,
             start_column: wide_start_pos.col,
@@ -49,7 +58,7 @@ pub(crate) fn create_location_for_uri_and_offset(graph: &Graph, document: &Docum
         }
     } else {
         Location {
-            uri: CString::new(document.uri()).unwrap().into_raw().cast_const(),
+            uri,
             start_line: start_pos.line,
             end_line: end_pos.line,
             start_column: start_pos.col,
