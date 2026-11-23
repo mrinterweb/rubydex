@@ -265,14 +265,13 @@ impl<'a> Resolver<'a> {
     /// Clears and re-enqueues the ancestors of a declaration's singleton class and all of its higher-order singleton
     /// classes. A later class or module definition can change their parent hierarchy.
     fn relinearize_singleton_hierarchy(&mut self, declaration_id: DeclarationId) {
-        let Some(singleton_id) = self
-            .graph
-            .declarations()
-            .get(&declaration_id)
-            .and_then(|declaration| declaration.as_namespace())
-            .and_then(|namespace| namespace.singleton_class())
-            .copied()
-        else {
+        // Layered lookup: the declaration may be defined only in the store.
+        let Some(singleton_id) = self.graph.declaration(declaration_id).and_then(|declaration| {
+            declaration
+                .as_namespace()
+                .and_then(|namespace| namespace.singleton_class())
+                .copied()
+        }) else {
             return;
         };
 
@@ -740,12 +739,11 @@ impl<'a> Resolver<'a> {
             for ancestor in namespace.ancestors() {
                 match ancestor {
                     Ancestor::Complete(ancestor_id) => {
+                        // Layered lookup: an ancestor can be a store-backed declaration.
                         let has_member = self
                             .graph
-                            .declarations()
-                            .get(ancestor_id)
-                            .and_then(|decl| decl.as_namespace())
-                            .and_then(|ns| ns.member(&str_id))
+                            .declaration(*ancestor_id)
+                            .and_then(|decl| decl.as_namespace().and_then(|ns| ns.member(&str_id)).copied())
                             .is_some();
 
                         if has_member {
@@ -1787,23 +1785,27 @@ impl<'a> Resolver<'a> {
     /// Search for a member in a declaration's ancestor chain.
     fn search_ancestors(&mut self, declaration_id: DeclarationId, str_id: StringId) -> Outcome {
         match self.linearize_ancestors(declaration_id) {
-            Ancestors::Complete(ids) | Ancestors::Cyclic(ids) => ids
-                .iter()
-                .find_map(|ancestor_id| {
-                    if let Ancestor::Complete(ancestor_id) = ancestor_id {
-                        self.graph
-                            .declarations()
+            Ancestors::Complete(ids) | Ancestors::Cyclic(ids) => {
+                // One store read for the whole chain: a store-backed graph has none of these
+                // declarations in the overlay, and the chain can be ~80 ancestors long.
+                let ancestors: Vec<DeclarationId> = ids
+                    .iter()
+                    .filter_map(|ancestor| match ancestor {
+                        Ancestor::Complete(ancestor_id) => Some(*ancestor_id),
+                        Ancestor::Partial(_) => None,
+                    })
+                    .collect();
+                let declarations = self.graph.declarations_in_bulk(&ancestors);
+                ancestors
+                    .iter()
+                    .find_map(|ancestor_id| {
+                        declarations
                             .get(ancestor_id)
-                            .unwrap()
-                            .as_namespace()
-                            .unwrap()
-                            .member(&str_id)
-                            .map(|id| Outcome::Resolved(*id))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(Outcome::Unresolved),
+                            .and_then(|decl| decl.as_namespace().and_then(|ns| ns.member(&str_id)).copied())
+                            .map(Outcome::Resolved)
+                    })
+                    .unwrap_or(Outcome::Unresolved)
+            }
             Ancestors::Partial(ids) => {
                 for ancestor_id in ids {
                     match ancestor_id {
@@ -1819,14 +1821,10 @@ impl<'a> Resolver<'a> {
                         Ancestor::Complete(ancestor_id) => {
                             if let Some(id) = self
                                 .graph
-                                .declarations()
-                                .get(&ancestor_id)
-                                .unwrap()
-                                .as_namespace()
-                                .unwrap()
-                                .member(&str_id)
+                                .declaration(ancestor_id)
+                                .and_then(|decl| decl.as_namespace().and_then(|ns| ns.member(&str_id)).copied())
                             {
-                                return Outcome::Resolved(*id);
+                                return Outcome::Resolved(id);
                             }
                         }
                     }

@@ -1159,8 +1159,9 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         if !missing.is_empty()
             && let Some(store) = &self.store
-            && let Some(declarations) =
-                read_store(store, &self.store_errors, |store| store.declarations(&missing).map(Some))
+            && let Some(declarations) = read_store(store, &self.store_errors, |store| {
+                store.declarations(&missing).map(Some)
+            })
         {
             for (id, declaration) in declarations {
                 if self.is_tombstoned(TombstoneKind::Declaration, id) {
@@ -2906,6 +2907,48 @@ mod tests {
 
     fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
         definitions.into_iter().map(Definition::id).collect()
+    }
+
+    /// Resolution of a live edit searches the ancestors through the layered accessor: the superclass
+    /// it has to walk lives only in the store, and an overlay-only map made every store-backed
+    /// ancestor look absent, so a constant inherited from one never resolved.
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn a_live_edit_resolves_a_constant_inherited_from_a_store_backed_ancestor() {
+        use crate::indexing::LanguageId;
+        use crate::model::store::RedbStore;
+        use crate::resolution::Resolver;
+
+        let mut base = GraphTest::new();
+        base.index_uri(
+            "file:///base.rb",
+            "class Base\n  CONST = 1\nend\nclass Child < Base\nend\n",
+        );
+        base.resolve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("index.redb");
+        let base_graph = base.into_graph();
+        RedbStore::build(&store_path, &base_graph).expect("build store");
+        drop(base_graph);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        crate::indexing::index_source(
+            &mut graph,
+            "file:///extra.rb".into(),
+            "class Extra < Child\n  def go\n    CONST\n  end\nend\n",
+            &LanguageId::Ruby,
+        );
+        Resolver::new(&mut graph).resolve();
+
+        let expected = DeclarationId::from("Base::CONST");
+        assert!(
+            graph.constant_references().values().any(|reference| {
+                graph.name(*reference.name_id()).is_some_and(
+                    |name| matches!(&*name, NameRef::Resolved(resolved) if *resolved.declaration_id() == expected),
+                )
+            }),
+            "the inherited constant must resolve to the store-backed declaration"
+        );
     }
 
     /// The FFI layers cache derived data (a method reference's name, an ancestor chain) keyed on the
