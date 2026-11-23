@@ -447,6 +447,36 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
+  # Attaching the new store can fail (a Windows reader still holds the generation, a corrupt file).
+  # Committing its manifest first would leave this session claiming an index it never loaded, and the
+  # surgical diff against it would treat every edit in between as applied.
+  def test_a_failed_attach_does_not_claim_the_new_manifest
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      before = graph.instance_variable_get(:@applied_files).dup
+      store_file = graph.send(:active_store_path)
+
+      # A rebuild by another session published this manifest; attaching it fails in this one.
+      graph.define_singleton_method(:attach_store_generation) { |_path| raise "attach failed" }
+      graph.instance_variable_set(:@session_signature, nil)
+      File.write(
+        "#{cache}.files",
+        JSON.generate(
+          { "lockfile" => graph.send(:lockfile_hash), "files" => graph.send(:source_scan), "store" => File.basename(store_file) },
+        ),
+      )
+      File.write("#{cache}.hash", graph.send(:store_signature))
+
+      refute(graph.refresh_if_stale, "the refresh reports the failure it recovered from")
+      assert_equal(
+        before,
+        graph.instance_variable_get(:@applied_files),
+        "a manifest whose store could not be attached is not claimed",
+      )
+    end
+  end
+
   # A repository can commit the lock path as a non-empty directory, which `Dir.rmdir` never reclaims:
   # without handling ENOTEMPTY every rebuild of that store is suppressed forever.
   def test_a_non_empty_directory_at_the_rebuild_lock_path_does_not_suppress_rebuilds

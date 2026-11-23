@@ -117,7 +117,7 @@ module Rubydex
       if adopted
         # One walk and one digest for the whole boot: the marker is exactly the signature this
         # session would publish, and `adopt_manifest` already parsed the sidecar that
-        # `store_published?` would parse again.
+        # `published_manifest` would parse again.
         expected_marker = store_signature
         marker = "#{cache}.hash"
         if File.exist?(marker) && File.read(marker) == expected_marker
@@ -182,8 +182,11 @@ module Rubydex
       return false if @session_signature == signature
 
       marker = "#{cache}.hash"
-      if store_published?(marker, expected_marker, cache)
-        attach_store_generation(@manifest_store_path || cache)
+      if (publish = published_manifest(marker, expected_marker, cache))
+        # Commit the manifest only once the new store is attached: committing first and failing the
+        # attach would claim the new manifest against the old snapshot and drop the edits in between.
+        attach_store_generation(publish.last)
+        commit_manifest(*publish)
       elsif File.exist?(marker) && (changes = surgical_changes(scan))
         apply_changes(changes)
         @applied_files = scan
@@ -206,14 +209,16 @@ module Rubydex
         end
 
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.1
-        until store_published?(marker, expected_marker, cache)
+        until published_manifest(marker, expected_marker, cache)
           break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
 
           sleep(0.02)
         end
-        return false unless store_published?(marker, expected_marker, cache)
+        publish = published_manifest(marker, expected_marker, cache)
+        return false unless publish
 
-        attach_store_generation(@manifest_store_path || cache)
+        attach_store_generation(publish.last)
+        commit_manifest(*publish)
       end
       @session_signature = signature
       true
@@ -358,6 +363,14 @@ module Rubydex
       files, lockfile, store_file = read_manifest("#{cache}.files")
       return false unless files && store_file && File.exist?(store_file)
 
+      commit_manifest(files, lockfile, store_file)
+    end
+
+    # Records the manifest this session is serving. Call it only once that manifest's store is
+    # attached: `@applied_files` is the baseline a surgical refresh diffs against, so claiming a
+    # manifest this session cannot read would silently drop every edit between the two.
+    #: (Hash[String, String] files, String? lockfile, String store_file) -> true
+    def commit_manifest(files, lockfile, store_file)
       # What the attached store holds, kept apart from `@applied_files` (what this session is serving)
       # so the overlay can be measured against the store it sits on.
       @manifest_files = files
@@ -813,23 +826,29 @@ module Rubydex
     #: (String) -> bool
     def store_fresh?(cache)
       marker = "#{cache}.hash"
-      store_published?(marker, store_signature, cache)
+      !published_manifest(marker, store_signature, cache).nil?
     end
 
-    # Whether `cache` holds the store this session asked for: the marker says it was built from this
-    # source, *and* its manifest is readable. A workspace can commit the store, the marker and the
-    # sidecar (`[disk_index] location = "tmp"`), so the manifest is also the provenance check — a
-    # snapshot without one is rebuilt rather than trusted. Adopting it here is what a caller wants
-    # next anyway: the manifest is the baseline a surgical refresh diffs against.
-    #: (String marker, String expected_marker, String cache) -> bool
-    def store_published?(marker, expected_marker, cache)
-      return false unless File.exist?(marker)
+    # The manifest of the store `cache` holds when it is the one this session asked for: the marker
+    # says it was built from this source, *and* the manifest is readable. A workspace can commit the
+    # store, the marker and the sidecar (`[disk_index] location = "tmp"`), so the manifest is also
+    # the provenance check — a snapshot without one is rebuilt rather than trusted.
+    #
+    # Returns `[files, lockfile, store_file]` so the caller commits it (see `commit_manifest`) only
+    # after the store is attached, rather than before an attach that could fail. Deliberately does
+    # not touch this session's state: the poll loops call it on every tick.
+    #: (String marker, String expected_marker, String cache) -> [Hash[String, String], String?, String]?
+    def published_manifest(marker, expected_marker, cache)
+      return unless File.exist?(marker) && File.read(marker) == expected_marker
 
-      File.read(marker) == expected_marker && adopt_manifest(cache)
+      files, lockfile, store_file = read_manifest("#{cache}.files")
+      return unless files && store_file && File.exist?(store_file)
+
+      [files, lockfile, store_file]
     rescue SystemCallError
       # A Windows builder renaming the marker at this instant can fail the read transiently; the
       # caller's poll loop retries on the next tick.
-      false
+      nil
     end
 
     # Path of the actual `.redb` data file this session is attached to (or that the manifest names),
