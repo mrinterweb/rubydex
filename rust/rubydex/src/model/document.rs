@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::io::Read;
 use std::path::PathBuf;
 
 use line_index::LineIndex;
@@ -40,6 +41,34 @@ thread_local! {
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// Largest source a store-backed document reads back. The URI comes from the store, so it is
+/// untrusted: a crafted document can name a device or a huge file. No Ruby source is this large, and
+/// a larger one is refused rather than allocated.
+const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Reads the file a store-backed document names, for the positions and comments it needs to rebuild.
+///
+/// The URI is untrusted, so the read is confined: only a regular file of at most
+/// [`MAX_SOURCE_BYTES`] is read (a device or FIFO would read forever or block), and the caller
+/// compares the content against the hash the store recorded, which is also what keeps the read from
+/// disclosing a file the index never contained.
+pub(crate) fn read_source(path: &std::path::Path) -> Option<String> {
+    // Metadata first: opening a FIFO blocks until a writer appears, and a character device has no
+    // end. `is_file` excludes both.
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
+
+    let mut source = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_SOURCE_BYTES)
+        .read_to_string(&mut source)
+        .ok()?;
+    Some(source)
+}
+
 #[cfg(feature = "redb-store")]
 fn rebuilt_line_index(document: &Document) -> Option<LineIndex> {
     let key = (document.uri().to_string(), document.content_hash());
@@ -47,7 +76,12 @@ fn rebuilt_line_index(document: &Document) -> Option<LineIndex> {
         return Some(index);
     }
     let path = document.file_path()?;
-    let source = std::fs::read_to_string(path).ok()?;
+    let source = read_source(&path)?;
+    // The cache is keyed by the content hash, so an index built from a file that is not the version
+    // the store indexed would be served for the version that is.
+    if xxh3_64(source.as_bytes()) != document.content_hash() {
+        return None;
+    }
     let index = LineIndex::new(&source);
     REBUILT_LINE_INDEXES.with(|cache| cache.borrow_mut().insert(key, index.clone()));
     Some(index)
@@ -165,7 +199,7 @@ impl Document {
     #[must_use]
     pub fn read_matching_source(&self) -> Option<String> {
         let path = self.file_path()?;
-        let source = std::fs::read_to_string(path).ok()?;
+        let source = read_source(&path)?;
         (xxh3_64(source.as_bytes()) == self.content_hash).then_some(source)
     }
 
@@ -292,6 +326,70 @@ mod tests {
 
         assert_eq!(document.method_references(), &[method_ref]);
         assert_eq!(document.constant_references(), &[constant_ref]);
+    }
+
+    /// `read_matching_source` reads a path that came from a store, so it must not follow it anywhere
+    /// a crafted document could send it: a directory, a device, a FIFO or a huge file all read as
+    /// absent, and content that is not the version the store indexed is not returned either.
+    #[test]
+    fn read_matching_source_reads_only_the_indexed_version_of_a_regular_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let missing = Document::new(
+            super::path_to_uri(dir.path().join("missing.rb").to_str().unwrap())
+                .unwrap()
+                .into(),
+            "class Foo; end",
+        );
+        assert_eq!(None, missing.read_matching_source(), "a missing file has no source");
+
+        let directory = Document::new(
+            super::path_to_uri(dir.path().join("dir.rb").to_str().unwrap())
+                .unwrap()
+                .into(),
+            "class Foo; end",
+        );
+        std::fs::create_dir(dir.path().join("dir.rb")).expect("dir");
+        assert_eq!(None, directory.read_matching_source(), "a directory has no source");
+
+        let device = Document::new("file:///dev/zero".into(), "class Foo; end");
+        assert_eq!(
+            None,
+            device.read_matching_source(),
+            "a character device is not a source file"
+        );
+
+        let path = dir.path().join("foo.rb");
+        std::fs::write(&path, "class Foo; end\n").expect("write");
+        let uri = super::path_to_uri(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            Some("class Foo; end\n".to_string()),
+            Document::new(uri.clone().into(), "class Foo; end\n").read_matching_source(),
+            "the indexed version is read back"
+        );
+        assert_eq!(
+            None,
+            Document::new(uri.into(), "class Other; end\n").read_matching_source(),
+            "a file edited since the store was built does not match the recorded hash"
+        );
+    }
+
+    /// The position cache is keyed by content hash, so an index built from a file that is not the
+    /// version the store indexed must not be cached under that hash.
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn a_rebuilt_line_index_refuses_source_that_does_not_match_the_document_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("foo.rb");
+        std::fs::write(&path, "class Foo; end\n").expect("write");
+        let uri = super::path_to_uri(path.to_str().unwrap()).unwrap();
+        let edited = Document::new(uri.into(), "class Edited; end\n");
+
+        assert_eq!(
+            None,
+            super::rebuilt_line_index(&edited),
+            "an index for another version of the file is not built"
+        );
     }
 
     #[test]
