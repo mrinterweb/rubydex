@@ -9,14 +9,25 @@ Dir[File.join(__dir__, "mcp_server", "tools", "*_tool.rb")].sort.each { |file| r
 
 module Rubydex
   module MCPServer
-    SERVER_INSTRUCTIONS = <<~TEXT
-      Tools query a static index of workspace code, available bundle dependencies, and available Ruby core and standard-library RBS definitions.
-      Out-of-band edits are checked before tool calls. A full rebuild may take longer than 100 ms; during it a usable previous snapshot can answer until a later call attaches the new store.
-    TEXT
-
     class Server
       WORKER_COUNT = 4
       SHUTDOWN_JOIN_TIMEOUT = 2
+
+      PREFIX = "Tools query a static index of workspace code, available bundle dependencies, " \
+        "and available Ruby core and standard-library RBS definitions."
+
+      # An out-of-band edit (a formatter, `sed`, a script) is only seen if the session re-checks the
+      # tree, which is exactly what disk-backed indexing buys and in-memory indexing does not. The
+      # instructions have to say which one is running, or an agent is promised a refresh it cannot get.
+      DISK_BACKED_INSTRUCTIONS = <<~TEXT
+        #{PREFIX}
+        Out-of-band edits are checked before every tool call, and one is picked up once the check expires (#{Graph::REFRESH_TTL} seconds) or immediately when the commit moves, so a query can answer from a slightly stale index. A full rebuild may take longer than 100 ms; during it a usable previous snapshot can answer until a later call attaches the new store.
+      TEXT
+
+      IN_MEMORY_INSTRUCTIONS = <<~TEXT
+        #{PREFIX}
+        Edits arrive through the editor's own save path: a write made outside the editor (a formatter, `sed`, a script) is not seen until the session restarts.
+      TEXT
 
       #: (root_path: String, ?transport: StdioTransport) -> void
       def initialize(root_path:, transport: nil)
@@ -109,7 +120,7 @@ module Rubydex
               name: "rubydex_mcp",
               version: Rubydex::VERSION,
             },
-            instructions: SERVER_INSTRUCTIONS,
+            instructions: instructions,
           }
         when "tools/list"
           { tools: Tool.tools.map(&:to_h) }
@@ -142,6 +153,11 @@ module Rubydex
       end
 
       private
+
+      #: -> String
+      def instructions
+        @graph.send(:disk_index_enabled?) ? DISK_BACKED_INSTRUCTIONS : IN_MEMORY_INSTRUCTIONS
+      end
 
       #: -> void
       def run_shutdown

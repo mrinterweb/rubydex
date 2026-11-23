@@ -51,6 +51,11 @@ background daemon keeps stores fresh.
 - **Defaults stay opt-in.** Only `rdx mcp` defaults to disk-backed indexing (`RUBYDEX_DISK_INDEX=0`
   must still force in-memory); Ruby LSP and `rdx query` keep their existing defaults, and
   `RUBYDEX_INDEX_MANAGER` remains opt-in.
+- **MCP instructions are built from the running mode.** `initialize` returns disk-backed
+  instructions (out-of-band edits checked before each call, picked up within `Graph::REFRESH_TTL`
+  = 2 s or immediately after a commit moves HEAD, previous snapshot serving during a rebuild) only
+  when `Graph#disk_index_enabled?` holds; otherwise it says out-of-band writes are not seen until the
+  session restarts. Change the mode and the instructions change with it.
 - **Git config isolation in Ruby tests.** Run disk-index Ruby tests with
   `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` so local git config cannot affect
   subprocess tests.

@@ -64,6 +64,32 @@ class MCPServerTest < Minitest::Test
     assert_match(/retry/, payload.fetch("suggestion"))
   end
 
+  # What an out-of-band edit costs depends on the mode, so the advertised instructions have to match
+  # the session instead of promising a refresh an in-memory graph never does.
+  def test_initialize_describes_the_in_memory_mode_when_disk_indexing_is_off
+    instructions = initialize_instructions("0")
+
+    assert_match(/not seen until the session restarts/, instructions)
+    refute_match(/seconds/, instructions, "in-memory must not advertise the freshness window")
+  end
+
+  def test_initialize_describes_the_freshness_window_when_disk_indexing_is_on
+    skip_unless_store_feature
+
+    instructions = initialize_instructions("1")
+
+    assert_match(/#{Rubydex::Graph::REFRESH_TTL} seconds/, instructions)
+    refute_match(/not seen until the session restarts/, instructions)
+  end
+
+  def initialize_instructions(disk_index)
+    ENV["RUBYDEX_DISK_INDEX"] = disk_index
+    server = Rubydex::MCPServer::Server.new(root_path: Dir.pwd)
+    server.handle({ jsonrpc: "2.0", id: 1, method: "initialize" }).dig(:result, :instructions)
+  ensure
+    ENV.delete("RUBYDEX_DISK_INDEX")
+  end
+
   def test_ping_returns_empty_result
     server = Rubydex::MCPServer::Server.new(root_path: Dir.pwd)
 
