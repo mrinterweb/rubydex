@@ -49,9 +49,18 @@ Rejected:
 - **Rename/move** while watched is platform-dependent (notify issues #165/#166);
   the adapter treats every reported path as changed, and the indexer re-reads the
   file, so a rename costs two reindexes rather than being missed.
-- **inotify watch count**: one watch per watched root (recursive), so the limit
-  scales with worktrees, not files. Measured on this machine: 2,005 dirs ≈ 9 ms
-  setup, ~2 MB RSS; stock distro default is 8,192 watches.
+- **inotify watch count**: one watch per directory, so the limit scales with the tree.
+  Measured on this machine: 2,005 dirs ≈ 9 ms setup, ~2 MB RSS; stock distro default
+  is 8,192 watches. `NotifySource` therefore watches each root without recursion and
+  each top-level directory with it, skipping the excluded directories (`node_modules`,
+  `tmp`, `log`, ...) that hold most of a large checkout's directories. A top-level
+  directory created after startup is only covered by the root's non-recursive watch,
+  so a burst into it is picked up by the sessions' own freshness walk instead.
+- **Event filtering**: an event only reaches the batch when it names an indexable file
+  (`.rb`, `.rake`, `.rbs`, `.ru`, `Gemfile.lock`, `rubydex.toml`) outside an excluded
+  top-level directory and the store's own cache. Unrelated writes (an editor's swap
+  file, `node_modules` churn, log rotation) would otherwise count towards the rebuild
+  threshold.
 - **Debounce is ours, not notify's**: notify v9 dropped its debouncers, so
   `NotifySource` coalesces events that have been quiet for `debounce`.
 - **Access events** are filtered out via `EventKindMask::CREATE | ALL_MODIFY | REMOVE`.

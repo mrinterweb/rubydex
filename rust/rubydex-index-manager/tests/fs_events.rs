@@ -222,3 +222,64 @@ fn the_store_cache_and_git_metadata_are_ignored() {
         "git metadata must not feed back as source events: {batch:?}"
     );
 }
+
+/// Only a write that can change the index reaches the batch. A burst of unrelated files — an
+/// editor's swap file, `node_modules` churn, a log rotation, a `.rb` under `tmp` — otherwise counts
+/// towards the rebuild threshold and forces a rebuild of a workspace nobody edited.
+#[test]
+fn only_writes_that_can_change_the_index_are_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    for excluded in ["node_modules/pkg", "log", "tmp", "assets"] {
+        std::fs::create_dir_all(root.join(excluded)).expect("dirs");
+    }
+    let source = event_source(&root, 50);
+
+    for noise in [
+        "README.md",
+        "assets/app.css",
+        "node_modules/pkg/index.js",
+        "log/development.log",
+        "tmp/cache.rb",
+    ] {
+        std::fs::write(root.join(noise), "ignored").expect("write");
+    }
+    let source_file = root.join("a.rb");
+    let lockfile = root.join("Gemfile.lock");
+    std::fs::write(&source_file, "class A; end").expect("write");
+    std::fs::write(&lockfile, "GEM\n").expect("write");
+
+    let batch = source.try_next_batch(Duration::from_secs(3));
+    assert!(
+        batch.contains(&source_file),
+        "a source write must be reported: {batch:?}"
+    );
+    assert!(
+        batch.contains(&lockfile),
+        "a lockfile write must be reported: {batch:?}"
+    );
+    assert!(
+        batch.iter().all(|path| path
+            .extension()
+            .is_some_and(|extension| { extension == "rb" || extension == "lock" })),
+        "unrelated writes must not reach the batch: {batch:?}"
+    );
+}
+
+/// The root is watched without recursion and its top-level directories with it, so a write deeper
+/// in the tree still arrives.
+#[test]
+fn a_write_in_a_subdirectory_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("app/models")).expect("dirs");
+    let mut source = event_source(&root, 50);
+
+    let file = root.join("app/models/user.rb");
+    std::fs::write(&file, "class User; end").expect("write");
+
+    assert!(
+        batch_contains(&mut source, &file),
+        "a nested source write must be reported"
+    );
+}
