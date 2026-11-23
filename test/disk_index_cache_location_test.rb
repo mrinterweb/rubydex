@@ -94,6 +94,52 @@ class DiskIndexCacheLocationTest < Minitest::Test
     end
   end
 
+  # The store directory bounds a delete, a rename and a quarantine move, so it is resolved through
+  # symlinks before it is trusted: a committed `tmp` or `disk_index.location` that links elsewhere
+  # would otherwise aim all three at a directory the workspace does not own.
+  def test_a_symlinked_tmp_does_not_redirect_the_store_out_of_the_workspace
+    skip("symlinks require elevated privileges on Windows") if Gem.win_platform?
+
+    with_symlinked_workspace("tmp") do |graph, dir, outside|
+      store = graph.send(:store_cache_path)
+
+      refute(store.start_with?(outside), "a committed tmp symlink must not aim the store outside the workspace")
+      refute(store.start_with?(dir), "the fallback is the platform cache")
+    end
+  end
+
+  def test_a_dangling_symlinked_tmp_is_not_trusted_either
+    skip("symlinks require elevated privileges on Windows") if Gem.win_platform?
+
+    Dir.mktmpdir do |root|
+      dir = File.join(File.realpath(root), "ws")
+      FileUtils.mkdir_p(dir)
+      File.symlink(File.join(root, "does-not-exist"), File.join(dir, "tmp"))
+      File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"tmp\"\n")
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+
+      refute(graph.send(:store_cache_path).start_with?(dir), "an unresolvable tmp must not be used at all")
+    end
+  end
+
+  def test_an_absolute_location_that_reaches_out_through_a_symlink_is_ignored
+    skip("symlinks require elevated privileges on Windows") if Gem.win_platform?
+
+    Dir.mktmpdir do |root|
+      root = File.realpath(root)
+      outside = File.join(root, "outside")
+      dir = File.join(root, "ws")
+      FileUtils.mkdir_p([outside, dir])
+      File.symlink(outside, File.join(dir, "link"))
+      File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"#{File.join(dir, "link", "store")}\"\n")
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+      store = graph.send(:store_cache_path)
+
+      refute(store.start_with?(outside), "a symlinked parent directory must not carry the store out of the workspace")
+      refute(store.start_with?(dir), "and the fallback is the platform cache")
+    end
+  end
+
   def test_the_context_default_uses_the_workspace_tmp_when_one_exists
     with_workspace(tmp: true) do |graph, dir|
       assert_equal(File.join(dir, "tmp", "rubydex", "index.redb"), graph.send(:store_cache_path))
@@ -103,6 +149,19 @@ class DiskIndexCacheLocationTest < Minitest::Test
   def test_the_context_default_falls_back_to_the_platform_cache_dir
     with_workspace do |graph, dir|
       refute(graph.send(:store_cache_path).start_with?(dir.to_s), "no tmp/: the store stays out of the workspace")
+    end
+  end
+
+  # Yields a workspace whose `link` entry is a symlink to a directory outside it, plus that directory.
+  def with_symlinked_workspace(link, location: "tmp")
+    Dir.mktmpdir do |root|
+      root = File.realpath(root)
+      outside = File.join(root, "outside")
+      dir = File.join(root, "ws")
+      FileUtils.mkdir_p([outside, dir])
+      File.symlink(outside, File.join(dir, link))
+      File.write(File.join(dir, "rubydex.toml"), "[disk_index]\nlocation = \"#{location}\"\n")
+      yield(Rubydex::Graph.configure_for_workspace(dir), dir, outside)
     end
   end
 

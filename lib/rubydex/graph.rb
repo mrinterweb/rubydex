@@ -234,9 +234,15 @@ module Rubydex
 
       warn("rubydex: disk-backed index returned errors; quarantining the store and indexing in memory")
       store_file = @attached_store_path || cache
+      corrupt = "#{cache}.corrupt"
       detach_attached_store
       begin
-        FileUtils.mv(store_file, "#{cache}.corrupt", force: true) if File.exist?(store_file)
+        # A committed symlink at `.corrupt` would have `mv` treat whatever it names as the
+        # destination, so the store stays put: dropping the marker and manifest below is what makes
+        # the next run rebuild, and the unquarantined file costs only another failed read.
+        if File.exist?(store_file) && !File.symlink?(corrupt)
+          FileUtils.mv(store_file, corrupt, force: true)
+        end
       rescue SystemCallError
         # Another session on Windows may still hold the corrupt file open; dropping the marker
         # and manifest below is still enough to make the next run rebuild cleanly.
@@ -554,19 +560,52 @@ module Rubydex
     end
 
     # Whether `path` is `root` or inside it, with both expanded so ".." and a trailing separator cannot
-    # pass the check. Deliberately not `realpath`: the directory is usually created by the caller.
+    # pass the check, and symlinks resolved so a committed one cannot point the store outside either.
     #: (String, String) -> bool
     def within?(path, root)
-      path = File.expand_path(path)
-      root = File.expand_path(root)
+      path = resolve_symlinks(path)
+      root = resolve_symlinks(root)
+      return false unless path && root
+
       path == root || path.start_with?("#{root}#{File::SEPARATOR}")
     end
 
+    # `File.realpath` of `path`'s deepest existing ancestor with the tail that does not exist yet
+    # re-appended — the store directory is usually created by the caller, but the components above it
+    # exist and carry the symlinks that matter. Returns nil for a dangling symlink: a path that cannot
+    # be resolved (`tmp` committed as a link to a directory that is not there) must fail a confinement
+    # check rather than pass as its own lexical spelling.
+    #: (String) -> String?
+    def resolve_symlinks(path)
+      path = File.expand_path(path)
+      tail = []
+      until File.exist?(path)
+        return if File.symlink?(path)
+
+        parent = File.dirname(path)
+        return if parent == path
+
+        tail.unshift(File.basename(path))
+        path = parent
+      end
+      resolved = File.realpath(path)
+      tail.empty? ? resolved : File.join(resolved, *tail)
+    rescue SystemCallError
+      nil
+    end
+
     # The workspace's own `tmp/`, which Rails generates and gitignores. rubydex never indexes it
-    # (`tmp` is a built-in exclusion), so a store there cannot feed back into the index.
+    # (`tmp` is a built-in exclusion), so a store there cannot feed back into the index. A repository
+    # can commit a symlink at `tmp` or `tmp/rubydex` though, which would aim the store build, its
+    # generation deletes and its quarantine moves at a directory the workspace does not own, so the
+    # directory is used only while it resolves inside the workspace.
     #: -> String
     def workspace_store_dir
-      File.join(workspace_path, "tmp", "rubydex")
+      dir = File.join(workspace_path, "tmp", "rubydex")
+      return dir if within?(dir, workspace_path)
+
+      warn("rubydex: ignoring workspace store directory #{dir.inspect}: it resolves outside the workspace")
+      platform_store_dir
     end
 
     # Name for a store kept outside the workspace: the workspace name leads so `du -sh` on the

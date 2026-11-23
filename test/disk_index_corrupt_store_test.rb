@@ -189,6 +189,32 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     assert(File.exist?("#{cache}.hash"), "the rebuild republished the marker too")
   end
 
+  # The quarantine destination is a path the workspace controls, so a committed symlink there must not
+  # become the `mv` destination. Leaving the corrupt store in place costs another failed read; writing
+  # through the link could clobber a file the workspace does not own.
+  def test_quarantine_does_not_move_the_store_onto_a_symlinked_destination
+    skip("symlinks require elevated privileges on Windows") if Gem.win_platform?
+
+    graph = Rubydex::Graph.configure_for_workspace(@tmp)
+    @graphs << graph
+    cache = graph.send(:store_cache_path)
+    FileUtils.mkdir_p(File.dirname(cache))
+    File.write(cache, "corrupt store")
+    target = File.join(@tmp, "target.bin")
+    File.write(target, "keep me")
+    File.symlink(target, "#{cache}.corrupt")
+    File.write("#{cache}.hash", "stale")
+    File.write("#{cache}.files", "{}")
+    graph.define_singleton_method(:store_errors) { 1 }
+
+    assert(graph.quarantine_if_untrustworthy(cache))
+
+    assert_equal("keep me", File.read(target), "the symlink's target is not a quarantine destination")
+    assert(File.exist?(cache), "the corrupt store stays in place when it cannot be moved safely")
+    refute(File.exist?("#{cache}.hash"), "the marker is dropped so the next run rebuilds")
+    refute(File.exist?("#{cache}.files"), "the manifest is dropped too")
+  end
+
   def test_quarantine_removes_manifest_when_move_fails_and_next_boot_rebuilds
     graph, cache = write_store("foo.rb" => "class Foo; end\n")
     graph.index_workspace
