@@ -294,23 +294,33 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
     nesting: *const *const c_char,
     count: usize,
 ) -> *const CDeclaration {
-    with_mut_graph(pointer, |graph| {
-        let nesting: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(nesting, count).unwrap() };
-        let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
+    let nesting: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(nesting, count).unwrap() };
+    let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
 
-        // Store-backed graphs answer from the pre-resolved snapshot instead of running the in-memory
-        // resolver, which materializes the name chain it resolves through. Both paths share one
-        // resolution (`query::resolve_constant_read_only`), so the two cannot drift.
-        #[cfg(feature = "redb-store")]
-        if graph.is_store_backed() {
-            let scopes = lexical_scope_ids(&nesting);
-            return query::resolve_constant_read_only(graph, &const_name, &scopes).map_or(ptr::null(), |id| {
-                graph.declaration(id).map_or(ptr::null(), |declaration| {
-                    Box::into_raw(Box::new(CDeclaration::from_declaration(id, &declaration))).cast_const()
+    // Store-backed graphs answer from the pre-resolved snapshot instead of running the in-memory
+    // resolver, which materializes the name chain it resolves through. Both paths share one
+    // resolution (`query::resolve_constant_read_only`), so the two cannot drift.
+    //
+    // That path is read-only, so it runs under the shared lock: an exclusive guard would serialize
+    // every concurrent reader of one store (a Ractor-shared graph answers several of them at once).
+    #[cfg(feature = "redb-store")]
+    {
+        let store_answer = with_graph(pointer, |graph| {
+            graph.is_store_backed().then(|| {
+                let scopes = lexical_scope_ids(&nesting);
+                query::resolve_constant_read_only(graph, &const_name, &scopes).map_or(ptr::null(), |id| {
+                    graph.declaration(id).map_or(ptr::null(), |declaration| {
+                        Box::into_raw(Box::new(CDeclaration::from_declaration(id, &declaration))).cast_const()
+                    })
                 })
-            });
+            })
+        });
+        if let Some(declaration) = store_answer {
+            return declaration;
         }
+    }
 
+    with_mut_graph(pointer, |graph| {
         let Some(tracked_name) = name_api::name_from_nesting_names(graph, &const_name, nesting) else {
             return ptr::null();
         };
@@ -395,8 +405,42 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant_from_definition(
     const_name: *const c_char,
     definition_id: u64,
 ) -> CDefinitionConstantResolutionResult {
+    let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
+
+    #[cfg(feature = "redb-store")]
+    {
+        let store_answer = with_graph(pointer, |graph| {
+            graph.is_store_backed().then(|| {
+                let nesting = match class_or_module_definition_name_id(graph, DefinitionId::new(definition_id)) {
+                    Ok(nesting) => nesting,
+                    Err(status) => {
+                        return CDefinitionConstantResolutionResult {
+                            status,
+                            declaration: ptr::null(),
+                        };
+                    }
+                };
+                let scopes = lexical_scopes_of_name(graph, nesting);
+                let declaration =
+                    query::resolve_constant_read_only(graph, &const_name, &scopes).map_or(ptr::null(), |id| {
+                        graph.declaration(id).map_or(ptr::null(), |declaration| {
+                            Box::into_raw(Box::new(CDeclaration::from_declaration(id, &declaration))).cast_const()
+                        })
+                    });
+                let status = if declaration.is_null() {
+                    CDefinitionConstantResolution::NotFound
+                } else {
+                    CDefinitionConstantResolution::Resolved
+                };
+                CDefinitionConstantResolutionResult { status, declaration }
+            })
+        });
+        if let Some(result) = store_answer {
+            return result;
+        }
+    }
+
     with_mut_graph(pointer, |graph| {
-        let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
         let nesting = match class_or_module_definition_name_id(graph, DefinitionId::new(definition_id)) {
             Ok(nesting) => nesting,
             Err(status) => {
@@ -406,25 +450,6 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant_from_definition(
                 };
             }
         };
-
-        // Same store-backed path as `rdx_graph_resolve_constant`: one resolution for both entry
-        // points, so a definition and a nesting cannot answer differently for the same scope.
-        #[cfg(feature = "redb-store")]
-        if graph.is_store_backed() {
-            let scopes = lexical_scopes_of_name(graph, nesting);
-            let declaration =
-                query::resolve_constant_read_only(graph, &const_name, &scopes).map_or(ptr::null(), |id| {
-                    graph.declaration(id).map_or(ptr::null(), |declaration| {
-                        Box::into_raw(Box::new(CDeclaration::from_declaration(id, &declaration))).cast_const()
-                    })
-                });
-            let status = if declaration.is_null() {
-                CDefinitionConstantResolution::NotFound
-            } else {
-                CDefinitionConstantResolution::Resolved
-            };
-            return CDefinitionConstantResolutionResult { status, declaration };
-        }
 
         let Some(tracked_name) = name_api::name_from_lexical_nesting(graph, &const_name, Some(nesting)) else {
             return CDefinitionConstantResolutionResult {
