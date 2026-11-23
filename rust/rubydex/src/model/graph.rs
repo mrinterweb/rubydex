@@ -2396,20 +2396,24 @@ impl Graph {
 
                 self.remove_name_dependent(*constant_ref.name_id(), NameDependent::Reference(*ref_id));
                 self.untrack_name(*constant_ref.name_id());
-            }
-            #[cfg(feature = "redb-store")]
-            if let Some(stored) = self.constant_reference(*ref_id) {
-                // The reference lives only in the store, so the detach above never saw it: its
-                // target declaration still lists it. Detach there, or a re-resolve of the edited
-                // document adds the same reference id a second time.
-                let name_id = *stored.name_id();
-                self.materialize_name(name_id);
-                if let Some(NameRef::Resolved(resolved)) = self.names.get(&name_id) {
-                    let declaration_id = *resolved.declaration_id();
-                    self.materialize_declaration(declaration_id);
-                    if let Some(declaration) = self.declarations.get_mut(&declaration_id) {
-                        declaration.remove_constant_reference(ref_id);
+            } else {
+                #[cfg(feature = "redb-store")]
+                if let Some(stored) = self.constant_reference(*ref_id) {
+                    // The reference lives only in the store, so the branch above never saw it: its
+                    // target declaration still lists it, and its name still counts it as a
+                    // dependent. Detach both, or a re-resolve of the edited document adds the same
+                    // reference id a second time.
+                    let name_id = *stored.name_id();
+                    self.materialize_name(name_id);
+                    if let Some(NameRef::Resolved(resolved)) = self.names.get(&name_id) {
+                        let declaration_id = *resolved.declaration_id();
+                        self.materialize_declaration(declaration_id);
+                        if let Some(declaration) = self.declarations.get_mut(&declaration_id) {
+                            declaration.remove_constant_reference(ref_id);
+                        }
                     }
+                    self.remove_name_dependent(name_id, NameDependent::Reference(*ref_id));
+                    self.untrack_name(name_id);
                 }
             }
             #[cfg(feature = "redb-store")]
@@ -2437,6 +2441,10 @@ impl Graph {
                     declaration.remove_definition(def_id);
                 }
             }
+            // shortcut: an owner that lives only in the store keeps listing these definition ids. The
+            // id is tombstoned, so every reader sees the definition as absent; finding the owner would
+            // mean resolving the definition's owner chain against the store, upgrade if a dangling id
+            // in a materialized declaration is ever observed.
         }
 
         for def_id in document.definitions() {
@@ -2933,6 +2941,52 @@ mod tests {
 
     fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
         definitions.into_iter().map(Definition::id).collect()
+    }
+
+    /// A constant reference that lives only in the store still counts itself as a dependent of its
+    /// name (and its target declaration still lists it). Deleting the document that owns it has to
+    /// undo both, or a re-resolve adds the same reference id to the target a second time.
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn deleting_a_store_backed_document_untracks_its_reference_name_dependents() {
+        use crate::model::store::RedbStore;
+
+        let mut base = GraphTest::new();
+        base.index_uri("file:///base.rb", "class Base\n  CONST = 1\nend\n");
+        base.index_uri("file:///user.rb", "class User\n  def go\n    Base::CONST\n  end\nend\n");
+        base.resolve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("index.redb");
+        let base_graph = base.into_graph();
+        RedbStore::build(&store_path, &base_graph).expect("build store");
+        drop(base_graph);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        let references: Vec<ConstantReferenceId> = graph
+            .document(UriId::from("file:///user.rb"))
+            .expect("the store document reads")
+            .constant_references()
+            .to_vec();
+        let names: Vec<NameId> = references
+            .iter()
+            .filter_map(|reference| {
+                graph
+                    .constant_reference(*reference)
+                    .map(|reference| *reference.name_id())
+            })
+            .collect();
+        assert!(!references.is_empty(), "the document holds constant references");
+
+        graph.delete_document("file:///user.rb");
+
+        for (reference, name_id) in references.iter().zip(names) {
+            graph.materialize_name_dependents(name_id);
+            let dependents = graph.name_dependents.get(&name_id).cloned().unwrap_or_default();
+            assert!(
+                !dependents.contains(&NameDependent::Reference(*reference)),
+                "a reference whose document was deleted must not stay a dependent of its name: {dependents:?}"
+            );
+        }
     }
 
     /// A read must not hand back a resolution to a declaration a live edit removed: the store's name
