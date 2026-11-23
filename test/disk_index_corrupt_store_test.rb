@@ -217,10 +217,13 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     assert(File.exist?("#{cache}.files"), "rebuild republished the manifest")
   end
 
+  # The marker is dropped by quarantine while a rebuild is in flight, so the source state has moved
+  # too: a signature-equal refresh returns before this branch and never exercises it.
   def test_refresh_if_stale_does_not_take_surgical_path_without_marker
     graph, cache = write_store("foo.rb" => "class Foo; end\n")
     graph.index_workspace
     FileUtils.rm_f("#{cache}.hash")
+    File.write(File.join(@tmp, "foo.rb"), "class Foo\n  def m; end\nend\n")
 
     surgical_called = false
     graph.define_singleton_method(:surgical_changes) do |*args|

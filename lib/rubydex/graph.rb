@@ -150,9 +150,7 @@ module Rubydex
       warn("rubydex: disk-backed index unavailable (#{e.class}: #{e.message}); falling back to in-memory")
       # `index_all` is a no-op while a store is attached, so a failure after `attach_store` (a
       # corrupt manifest sidecar, an unreadable scan) has to detach before the fallback is real.
-      # No store feature compiled in means nothing was ever attached, and `detach_store` raises
-      # rather than no-op there — which would replace the failure being recovered from.
-      detach_attached_store if respond_to?(:detach_store) && self.class.store_format_version.positive?
+      detach_attached_store
       index_all(workspace_paths)
     end
 
@@ -491,6 +489,11 @@ module Rubydex
     # configuration — and otherwise the workspace's `[disk_index] enabled` decides.
     #: -> bool
     def disk_index_enabled?
+      # A build without the `redb-store` feature can neither write nor open a store, so configuration
+      # asking for one is unsatisfiable rather than merely stale: every boot would spawn a child that
+      # fails and raise out of the first tool call.
+      return false unless self.class.store_format_version.positive?
+
       env = ENV["RUBYDEX_DISK_INDEX"]
       return env == "1" || env == "true" if env
 
@@ -775,6 +778,10 @@ module Rubydex
 
     #: -> void
     def detach_attached_store
+      # Nothing was ever attached without the store feature compiled in, and `detach_store` raises
+      # there instead of no-op, which would replace the failure being recovered from.
+      return unless self.class.store_format_version.positive?
+
       detach_store
       @attached_store_path = nil
     end
