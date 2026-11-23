@@ -421,7 +421,25 @@ module Rubydex
         return lock if make_lock_dir(lock)
       end
 
-      return false unless File.directory?(lock) && (Time.now - File.mtime(lock)) > REBUILD_LOCK_TIMEOUT
+      # A lock we own is always an empty directory, so a non-empty one is not a lock at all: a
+      # workspace can commit the path as a directory with files in it, and `Dir.rmdir` would never
+      # reclaim it, which suppresses every rebuild of that store. Replaced without following any
+      # symlink inside it (`rm_rf` unlinks those).
+      if File.directory?(lock) && !empty_directory?(lock)
+        FileUtils.rm_rf(lock)
+        return lock if make_lock_dir(lock)
+
+        return false
+      end
+
+      expired = begin
+        File.directory?(lock) && (Time.now - File.mtime(lock)) > REBUILD_LOCK_TIMEOUT
+      rescue Errno::ENOENT
+        # A competing builder released the lock between the check and the stat; it is not ours to
+        # reclaim and there is nothing to wait for.
+        false
+      end
+      return false unless expired
 
       # Reclaiming is racy: a competing session may have reclaimed and re-created the lock
       # between the check and here, in which case this session lost and someone else is
@@ -433,8 +451,26 @@ module Rubydex
         Dir.mkdir(lock)
       rescue Errno::ENOENT, Errno::EEXIST, Errno::ENOTDIR
         return false
+      rescue Errno::ENOTEMPTY
+        # Our own lock is always an empty directory, so a non-empty one can never expire into a
+        # claimable lock — it can only come from the workspace (someone committed the directory), and
+        # leaving it wedges every rebuild of this store. It is removed the way a committed *file* at
+        # the same path already is; `rm_rf` unlinks a symlink inside rather than following it.
+        FileUtils.rm_rf(lock)
+        return lock if make_lock_dir(lock)
+
+        false
       end
       lock
+    end
+
+    # Whether `path` is a directory with nothing in it. An unreadable one answers yes: it is then
+    # treated as a lock (which can expire) rather than deleted on a failed probe.
+    #: (String path) -> bool
+    def empty_directory?(path)
+      Dir.empty?(path)
+    rescue SystemCallError
+      true
     end
 
     #: (String lock) -> bool

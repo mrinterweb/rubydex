@@ -447,6 +447,23 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
+  # A repository can commit the lock path as a non-empty directory, which `Dir.rmdir` never reclaims:
+  # without handling ENOTEMPTY every rebuild of that store is suppressed forever.
+  def test_a_non_empty_directory_at_the_rebuild_lock_path_does_not_suppress_rebuilds
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      lock = "#{cache}.rebuild"
+      FileUtils.mkdir_p(lock)
+      File.write(File.join(lock, "committed.txt"), "from the repository")
+
+      claimed = graph.send(:claim_rebuild, cache)
+      assert_equal(lock, claimed, "a committed lock directory must not wedge rebuilds")
+      assert_empty(Dir.children(lock), "and is replaced by this session's own empty lock")
+      graph.send(:release_rebuild_lock, lock)
+    end
+  end
+
   # The lock directory is removed by the detached builder's `ensure`; a builder killed before it runs
   # one must degrade the indexer to "not fresh" instead of spinning until the lock's mtime expiry.
   def test_waiting_for_a_lost_builder_is_bounded
