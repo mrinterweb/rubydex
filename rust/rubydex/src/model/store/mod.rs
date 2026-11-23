@@ -392,6 +392,32 @@ fn read_metadata<E: ReadableDatabase>(db: &E) -> Result<BucketBits, StoreError> 
     Ok(bits)
 }
 
+/// Streams `(reference id, string id)` for every method reference, decoding only what each pass
+/// needs.
+fn for_each_method_reference_meta(
+    read_txn: &redb::ReadTransaction,
+    visit: &mut dyn FnMut(u64, u64) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    let references = read_txn.open_table(NodeTable::MethodReferences.def())?;
+    for entry in references.range(0..=u32::MAX)? {
+        let (bucket_key, bucket) = entry?;
+        iter_bucket_entries(
+            NodeTable::MethodReferences.name(),
+            bucket_key.value(),
+            bucket.value(),
+            |id, bytes| {
+                let reference = postcard::from_bytes::<MethodRef>(bytes).map_err(|source| StoreError::Corrupt {
+                    table: NodeTable::MethodReferences.name(),
+                    id,
+                    source,
+                })?;
+                visit(id, reference.str().get())
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Reads and decodes a single node by id from an already-opened bucketed table.
 fn decode_node_from_table<V: DeserializeOwned>(
     table: &redb::ReadOnlyTable<u32, &[u8]>,
@@ -789,6 +815,10 @@ impl RedbStore {
     /// method name into `strings` in the same read transaction so whole-table scans (e.g.
     /// `Graph#method_references`) avoid millions of per-node transactions.
     ///
+    /// Both table scans are sequential by design. Looking the names up per reference instead (one
+    /// random bucket read each, ~78k distinct names on Discourse) made a cold scan take ~3.9 s,
+    /// because every lookup missed the page cache; a sequential pass over `STRINGS` prefetches.
+    ///
     /// Returns `u32::MAX` as `name_index` when a reference's string is missing or the string table
     /// exceeds `u32::MAX` entries.
     ///
@@ -802,45 +832,56 @@ impl RedbStore {
         visit: &mut dyn FnMut(MethodReferenceId, u32),
     ) -> Result<(), StoreError> {
         let read_txn = self.begin_read()?;
-        let references = read_txn.open_table(NodeTable::MethodReferences.def())?;
-        let strings_table = read_txn.open_table(NodeTable::Strings.def())?;
-        let string_bits = self.bits.get(NodeTable::Strings);
-        for entry in references.range(0..=u32::MAX)? {
-            let (bucket_key, bucket) = entry?;
-            iter_bucket_entries(
-                NodeTable::MethodReferences.name(),
-                bucket_key.value(),
-                bucket.value(),
-                |id, bytes| {
-                    let reference = postcard::from_bytes::<MethodRef>(bytes).map_err(|source| StoreError::Corrupt {
-                        table: NodeTable::MethodReferences.name(),
-                        id,
-                        source,
-                    })?;
-                    let str_id = *reference.str();
-                    let name_index = if let Some(&idx) = string_indices.get(&str_id) {
-                        idx
-                    } else if let Some(string_ref) = decode_node_from_table::<StringRef>(
-                        &strings_table,
-                        NodeTable::Strings,
-                        string_bits,
-                        str_id.get(),
-                    )? {
+
+        // Pass 1: which strings does this scan need? Only the ids, so the string sweep below can
+        // skip everything else without decoding it.
+        let mut needed: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for_each_method_reference_meta(&read_txn, &mut |_, str_id| {
+            needed.insert(str_id);
+            Ok(())
+        })?;
+
+        // Pass 2: one sequential sweep of `STRINGS`, interning just those ids.
+        {
+            let table = read_txn.open_table(NodeTable::Strings.def())?;
+            for entry in table.range(0..=u32::MAX)? {
+                let (bucket_key, bucket) = entry?;
+                iter_bucket_entries(
+                    NodeTable::Strings.name(),
+                    bucket_key.value(),
+                    bucket.value(),
+                    |id, bytes| {
+                        let str_id = StringId::new(id);
+                        if !needed.contains(&id) || string_indices.contains_key(&str_id) {
+                            return Ok(());
+                        }
+                        let string_ref =
+                            postcard::from_bytes::<StringRef>(bytes).map_err(|source| StoreError::Corrupt {
+                                table: NodeTable::Strings.name(),
+                                id,
+                                source,
+                            })?;
                         let idx = u32::try_from(strings.len()).unwrap_or(u32::MAX);
                         if idx < u32::MAX {
                             strings.push(string_ref.as_str().into());
                             string_indices.insert(str_id, idx);
                         }
-                        idx
-                    } else {
-                        u32::MAX
-                    };
-                    visit(MethodReferenceId::new(id), name_index);
-                    Ok(())
-                },
-            )?;
+                        Ok(())
+                    },
+                )?;
+            }
         }
-        Ok(())
+
+        // Pass 3: stream the references, now with every name already interned. Re-scanning keeps
+        // peak memory at the string table instead of a 37 MB copy of every reference id.
+        let indices = &*string_indices;
+        for_each_method_reference_meta(&read_txn, &mut |id, str_id| {
+            visit(
+                MethodReferenceId::new(id),
+                indices.get(&StringId::new(str_id)).copied().unwrap_or(u32::MAX),
+            );
+            Ok(())
+        })
     }
 
     /// Reads all `(declaration_id, FQN name)` pairs for name-based search.
