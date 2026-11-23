@@ -41,6 +41,10 @@ pub fn groups(sessions: &[Session]) -> Vec<Group> {
     for session in sorted {
         if let Some(index) = grouped.iter().position(|group| group.store == session.store) {
             grouped[index].workspaces.push(session.workspace);
+            // The burst threshold is judged against the manifest, and the sessions of one store may
+            // disagree (a workspace that grew since it registered). The largest is the one a rebuild
+            // would produce, so it is the one that decides full-versus-surgical.
+            grouped[index].manifest = grouped[index].manifest.max(session.docs);
         } else {
             grouped.push(Group {
                 store: session.store.clone(),
@@ -52,26 +56,34 @@ pub fn groups(sessions: &[Session]) -> Vec<Group> {
     }
     for group in &mut grouped {
         group.workspaces.sort();
+        // Two sessions of one store in one workspace are one workspace to watch. Without this the
+        // list differs from the watch's on every sibling join or exit, which replaces the watcher set
+        // (and, before the builder was preserved, its indexer) for nothing.
+        group.workspaces.dedup();
     }
     grouped
 }
 
-/// Reconcile the watcher sets with the current sessions. A store whose session set changed gets
-/// its watchers and indexer **replaced**: appending would leave the stale watcher set running
-/// alongside the new one, which grows one watcher set per change forever and lets several indexers
-/// for one store run at once.
+/// Reconcile the watcher sets with the current sessions. A store whose workspace set changed gets
+/// its watchers **rebuilt**: appending would leave the stale watcher set running alongside the new
+/// one, which grows one watcher set per change forever.
+///
+/// Only the watchers are rebuilt: the indexer is kept, because dropping a `Builder` drops its child
+/// un-reaped (a zombie on Unix), forgets the burst counts that decide full-versus-surgical, and lets a
+/// second indexer for the same store start before the first one exits.
 pub fn sync(watches: &mut Vec<Watch>, grouped: Vec<Group>, debounce: Duration) {
     watches.retain(|watch| grouped.iter().any(|group| group.store == watch.store));
     for group in grouped {
         if let Some(index) = watches.iter().position(|watch| watch.store == group.store) {
-            if watches[index].workspaces == group.workspaces {
-                // The manifest count is what decides full-vs-surgical for a burst, and a session that
-                // re-registered with a grown workspace reports a new one. Keeping the boot-time count
-                // would compare every later burst against a stale baseline.
-                watches[index].manifest = group.manifest;
-            } else {
-                watches[index] = watch_for(group, debounce);
+            let watch = &mut watches[index];
+            if watch.workspaces != group.workspaces {
+                watch.source = source_for(&group, debounce);
+                watch.workspaces = group.workspaces;
             }
+            // The manifest count is what decides full-vs-surgical for a burst, and a session that
+            // re-registered with a grown workspace reports a new one. Keeping the boot-time count
+            // would compare every later burst against a stale baseline.
+            watch.manifest = group.manifest;
             continue;
         }
         watches.push(watch_for(group, debounce));
@@ -93,10 +105,15 @@ fn retry_unwatched_roots(watches: &mut [Watch]) {
     }
 }
 
+/// The event source for a group: its workspaces, with the store's own directory ignored.
+fn source_for(group: &Group, debounce: Duration) -> NotifySource {
+    let ignored = group.store.parent().into_iter().map(Path::to_path_buf).collect();
+    NotifySource::new(group.workspaces.as_ref(), ignored, debounce)
+}
+
 #[must_use]
 pub fn watch_for(group: Group, debounce: Duration) -> Watch {
-    let ignored = group.store.parent().into_iter().map(Path::to_path_buf).collect();
-    let source = NotifySource::new(group.workspaces.as_ref(), ignored, debounce);
+    let source = source_for(&group, debounce);
 
     Watch {
         store: group.store.clone(),

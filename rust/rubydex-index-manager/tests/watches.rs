@@ -7,6 +7,7 @@ use rubydex_index_manager::watches::sync;
 
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
 
 fn debounce() -> Duration {
     Duration::from_millis(200)
@@ -43,8 +44,86 @@ fn a_store_that_gains_a_session_keeps_one_watcher_set() {
     assert_eq!(
         watches[0].workspaces.len(),
         2,
-        "the watcher set was replaced, so it covers both workspaces"
+        "the watcher set was rebuilt in place, so it covers both workspaces"
     );
+}
+
+/// Two sessions of one store in one workspace are one workspace to watch, however many of them
+/// register: a duplicated entry would differ from the watch's own list on every sibling join and exit
+/// and rebuild the watcher set for nothing.
+#[test]
+fn sessions_sharing_a_workspace_are_deduplicated() {
+    let store = "/ws/index.redb";
+    let mut first = session(store, "/ws/a");
+    first.docs = 100;
+    let mut second = session(store, "/ws/a");
+    second.docs = 250;
+
+    let mut watches: Vec<Watch> = vec![];
+    sync(&mut watches, groups(&[first.clone(), second]), debounce());
+
+    assert_eq!(watches.len(), 1, "one store, one watcher set");
+    assert_eq!(
+        watches[0].workspaces,
+        vec![PathBuf::from("/ws/a")],
+        "the shared workspace is listed once"
+    );
+    assert_eq!(
+        watches[0].manifest, 250,
+        "the largest manifest of the group is the one a rebuild would produce"
+    );
+
+    // The sibling leaves. The workspace list does not change, so nothing is rebuilt and only the
+    // manifest follows the sessions that are left.
+    sync(&mut watches, groups(&[first]), debounce());
+    assert_eq!(watches[0].workspaces, vec![PathBuf::from("/ws/a")]);
+    assert_eq!(watches[0].manifest, 100);
+}
+
+/// A workspace change rebuilds the watchers but must not drop the indexer: a dropped `Builder` leaves
+/// its child un-reaped on Unix, forgets the recorded burst, and forgets that a spawn just failed.
+#[test]
+fn a_gained_workspace_keeps_the_indexer() {
+    let store = "/ws/index.redb";
+    let mut first = session(store, "/ws/a");
+    // Exits at once, so the test holds a builder that has spawned without leaving a child behind.
+    first.builder = ["ruby", "-e", "exit 0"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let mut watches: Vec<Watch> = vec![];
+    sync(&mut watches, groups(&[first.clone()]), debounce());
+    watches[0].builder.record(1);
+    assert!(
+        watches[0].builder.start(10).is_some(),
+        "the first burst starts an indexer"
+    );
+    reap(&mut watches[0]);
+    watches[0].builder.record(1);
+
+    sync(&mut watches, groups(&[first, session(store, "/ws/b")]), debounce());
+
+    assert_eq!(
+        watches[0].workspaces.len(),
+        2,
+        "the new watcher set covers both workspaces"
+    );
+    assert!(
+        watches[0].builder.start(10).is_some(),
+        "the burst recorded before the change must survive it; a fresh builder would forget it"
+    );
+    reap(&mut watches[0]);
+}
+
+/// `Builder::reap` is non-blocking, so a test that wants the child collected has to poll for it.
+fn reap(watch: &mut Watch) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while watch.builder.is_running() && Instant::now() < deadline {
+        watch.builder.reap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!watch.builder.is_running(), "the indexer must be collected");
 }
 
 #[test]
