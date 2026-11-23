@@ -2198,6 +2198,9 @@ class GraphTest < Minitest::Test
 
       refute_nil(graph["Foo"])
       assert_nil(graph["Bar"])
+      # `ancestors` is cached, and the cache must live in Rust: a frozen graph refuses Ruby ivar
+      # writes, so caching on the graph object made this raise FrozenError.
+      assert_includes(graph["Foo"].ancestors.map(&:name), "Object")
       assert_equal(6, graph.declarations.size)
       refute_empty(graph.documents.to_a)
       refute_empty(graph.search("Foo").to_a)
@@ -2243,7 +2246,10 @@ class GraphTest < Minitest::Test
         Ractor.new(graph) do |g|
           names = []
           g.declarations { |d| names << d.name }
-          names.sort
+          # Reading a cached ancestor chain from a shareable graph must not try to write the cache
+          # into the (frozen) graph object.
+          names << g["A"].ancestors.map(&:name)
+          names.flatten.sort
         end
       end
 

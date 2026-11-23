@@ -9,6 +9,30 @@ use crate::model::{
     ids::{ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId},
 };
 
+/// Discriminant of a [`Declaration`]. Lets an FFI layer rebuild a handle from a cached
+/// [`AncestorEntry`] without re-reading the declaration body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationKind {
+    Class,
+    Module,
+    SingletonClass,
+    Constant,
+    ConstantAlias,
+    Method,
+    GlobalVariable,
+    InstanceVariable,
+    ClassVariable,
+    Todo,
+}
+
+/// One entry of a namespace's ancestor chain: its id and kind, which is all a caller needs to build
+/// the ancestor's handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AncestorEntry {
+    pub id: u64,
+    pub kind: DeclarationKind,
+}
+
 /// A single ancestor in the linearized ancestor chain
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "redb-store", derive(serde::Serialize, serde::Deserialize))]
@@ -354,6 +378,24 @@ impl Declaration {
             Declaration::GlobalVariable(_) => "GlobalVariable",
             Declaration::InstanceVariable(_) => "InstanceVariable",
             Declaration::ClassVariable(_) => "ClassVariable",
+        }
+    }
+
+    /// Discriminant of this declaration, for callers that only need the kind (see
+    /// [`DeclarationKind`]).
+    #[must_use]
+    pub fn declaration_kind(&self) -> DeclarationKind {
+        match self {
+            Declaration::Namespace(Namespace::Class(_)) => DeclarationKind::Class,
+            Declaration::Namespace(Namespace::Module(_)) => DeclarationKind::Module,
+            Declaration::Namespace(Namespace::SingletonClass(_)) => DeclarationKind::SingletonClass,
+            Declaration::Namespace(Namespace::Todo(_)) => DeclarationKind::Todo,
+            Declaration::Constant(_) => DeclarationKind::Constant,
+            Declaration::ConstantAlias(_) => DeclarationKind::ConstantAlias,
+            Declaration::Method(_) => DeclarationKind::Method,
+            Declaration::GlobalVariable(_) => DeclarationKind::GlobalVariable,
+            Declaration::InstanceVariable(_) => DeclarationKind::InstanceVariable,
+            Declaration::ClassVariable(_) => DeclarationKind::ClassVariable,
         }
     }
 

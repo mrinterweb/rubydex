@@ -6,7 +6,9 @@ use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::indexing::local_graph::LocalGraph;
 use crate::model::built_in::{OBJECT_ID, add_built_in_data};
-use crate::model::declaration::{Ancestor, Declaration, Namespace};
+#[cfg(feature = "redb-store")]
+use crate::model::declaration::DeclarationKind;
+use crate::model::declaration::{Ancestor, AncestorEntry, Declaration, Namespace};
 use crate::model::definitions::{Definition, MethodVisibilityDefinition, Receiver};
 use crate::model::document::Document;
 use crate::model::encoding::Encoding;
@@ -166,6 +168,10 @@ pub struct Graph {
     /// immediately and fall back to live lookups.
     mutation_epoch: u64,
 
+    /// Ancestor chains derived from the store, keyed by declaration id (see [`AncestorsCache`]).
+    #[cfg(feature = "redb-store")]
+    ancestors_cache: AncestorsCache,
+
     /// Optional disk-backed base layer holding gem/stdlib nodes. When set, reads that miss the
     /// in-memory maps above fall back to the store, keeping the bulk index off the heap.
     #[cfg(feature = "redb-store")]
@@ -255,6 +261,26 @@ impl<T> std::ops::Deref for NodeRef<'_, T> {
 /// A borrowed-or-owned reference to a declaration (see [`NodeRef`]).
 pub type DeclRef<'a> = NodeRef<'a, Declaration>;
 
+/// Ancestor chains as [`AncestorEntry`] lists, cached per declaration id and invalidated by
+/// [`Graph::mutation_epoch`].
+///
+/// One chain is one store point read per ancestor (~1.5 ms each, 77 for a Rails model) and callers
+/// such as `ruby-lsp`'s Find References ask for the same chain once per matching reference, which
+/// made a single request pay that tens of times. The cache lives in Rust rather than in Ruby
+/// instance variables because a `Graph` is `RUBY_TYPED_FROZEN_SHAREABLE`: Ruby refuses to write
+/// ivars on a frozen or `Ractor.make_shareable`d graph, and that has to stay a read-only operation.
+#[cfg(feature = "redb-store")]
+#[derive(Debug, Default)]
+struct AncestorsCache {
+    epoch: std::sync::atomic::AtomicU64,
+    entries: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<[AncestorEntry]>>>,
+}
+
+/// How many chains the store-backed ancestor cache holds. Enough for every receiver a Find
+/// References session touches, small enough that a full graph walk cannot pin the whole chain table.
+#[cfg(feature = "redb-store")]
+const ANCESTORS_CACHE_LIMIT: usize = 4096;
+
 impl Graph {
     #[must_use]
     pub fn new() -> Self {
@@ -271,6 +297,8 @@ impl Graph {
             pending_work: Vec::default(),
             config: Config::default(),
             mutation_epoch: 0,
+            #[cfg(feature = "redb-store")]
+            ancestors_cache: AncestorsCache::default(),
             #[cfg(feature = "redb-store")]
             store: None,
             #[cfg(feature = "redb-store")]
@@ -331,6 +359,121 @@ impl Graph {
     /// Invalidates every cache derived from graph contents.
     pub fn bump_mutation_epoch(&mut self) {
         self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+    }
+
+    /// The `(id, kind)` pairs of `id`'s ancestor chain, empty when `id` is not a namespace. The
+    /// store-backed path caches the chain until the next mutation; in memory it is cheap enough to
+    /// rebuild.
+    #[must_use]
+    pub fn ancestors_of(&self, id: DeclarationId) -> Vec<AncestorEntry> {
+        #[cfg(feature = "redb-store")]
+        if self.store.is_some() {
+            return self.ancestors_cached(id).map_or_else(Vec::new, |chain| chain.to_vec());
+        }
+        self.ancestors_uncached(id)
+    }
+
+    /// Reads `id`'s ancestor chain one store read per ancestor. On a store-backed graph prefer
+    /// [`Self::ancestors_cached`].
+    fn ancestors_uncached(&self, id: DeclarationId) -> Vec<AncestorEntry> {
+        let Some(declaration) = self.declaration(id) else {
+            return Vec::new();
+        };
+        let Some(namespace) = declaration.as_namespace() else {
+            return Vec::new();
+        };
+        let ancestor_ids: Vec<u64> = namespace
+            .ancestors()
+            .iter()
+            .filter_map(|ancestor| match ancestor {
+                Ancestor::Complete(ancestor_id) => Some(ancestor_id.get()),
+                Ancestor::Partial(_) => None,
+            })
+            .collect();
+        drop(declaration);
+
+        ancestor_ids
+            .into_iter()
+            .filter_map(|ancestor_id| {
+                let declaration = self.declaration(DeclarationId::new(ancestor_id))?;
+                Some(AncestorEntry {
+                    id: ancestor_id,
+                    kind: declaration.declaration_kind(),
+                })
+            })
+            .collect()
+    }
+
+    /// [`Self::ancestors_uncached`] behind the epoch-keyed cache, and with the chain's declarations
+    /// read in one store transaction instead of one per ancestor.
+    ///
+    /// # Panics
+    /// Panics if the cache mutex was poisoned by a panicking thread, which cannot leave it in a
+    /// usable state anyway.
+    #[cfg(feature = "redb-store")]
+    #[must_use]
+    fn ancestors_cached(&self, id: DeclarationId) -> Option<std::sync::Arc<[AncestorEntry]>> {
+        let epoch = self.mutation_epoch;
+        if self.ancestors_cache.epoch.load(std::sync::atomic::Ordering::Relaxed) == epoch
+            && let Ok(entries) = self.ancestors_cache.entries.lock()
+            && let Some(chain) = entries.get(&id.get())
+        {
+            return Some(chain.clone());
+        }
+
+        let declaration = self.declaration(id)?;
+        let namespace = declaration.as_namespace()?;
+        let ancestor_ids: Vec<u64> = namespace
+            .ancestors()
+            .iter()
+            .filter_map(|ancestor| match ancestor {
+                Ancestor::Complete(ancestor_id) => Some(ancestor_id.get()),
+                Ancestor::Partial(_) => None,
+            })
+            .collect();
+        drop(declaration);
+
+        let chain: std::sync::Arc<[AncestorEntry]> = match &self.store {
+            Some(store) => {
+                let mut entries: Vec<AncestorEntry> = Vec::with_capacity(ancestor_ids.len());
+                match read_store(store, &self.store_errors, |store| {
+                    store.declarations(&ancestor_ids).map(Some)
+                }) {
+                    Some(declarations) => {
+                        let mut kinds: std::collections::HashMap<u64, DeclarationKind> = declarations
+                            .into_iter()
+                            .map(|(id, declaration)| (id, declaration.declaration_kind()))
+                            .collect();
+                        for ancestor_id in ancestor_ids {
+                            if let Some(kind) = kinds.remove(&ancestor_id) {
+                                entries.push(AncestorEntry { id: ancestor_id, kind });
+                            }
+                        }
+                    }
+                    None => entries = self.ancestors_uncached(id),
+                }
+                entries.into()
+            }
+            None => self.ancestors_uncached(id).into(),
+        };
+
+        let mut entries = self
+            .ancestors_cache
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.ancestors_cache.epoch.load(std::sync::atomic::Ordering::Relaxed) != epoch {
+            self.ancestors_cache
+                .epoch
+                .store(epoch, std::sync::atomic::Ordering::Relaxed);
+            entries.clear();
+        }
+        if entries.len() < ANCESTORS_CACHE_LIMIT {
+            entries.insert(id.get(), chain.clone());
+        }
+        drop(entries);
+
+        Some(chain)
     }
 
     /// Empties every in-memory node map, the tombstones and the edge ledgers, and resets the store
@@ -1886,7 +2029,7 @@ impl Graph {
         #[cfg(feature = "redb-store")]
         self.materialize_document(uri_id);
         let document = self.documents.remove(&uri_id)?;
-        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+        self.bump_mutation_epoch();
         // Tombstone so the store's copy of the deleted document is never resurrected.
         #[cfg(feature = "redb-store")]
         self.tombstone(TombstoneKind::Document, uri_id.get());

@@ -1,7 +1,7 @@
 //! This file provides the C API for Cypher query parsing, schema, and structured execution.
 //! It connects to the graph through `graph_api::with_graph`.
 
-use crate::declaration_api::CDeclaration;
+use crate::declaration_api::CDeclarationKind;
 use crate::definition_api::map_definition_to_kind;
 use crate::graph_api::{GraphPointer, with_graph};
 use crate::utils;
@@ -383,7 +383,7 @@ fn build_node_cell(graph: &Graph, encoded_id: &str) -> Option<CCell> {
     match NodeRef::decode(encoded_id)? {
         NodeRef::Declaration(id) => {
             let declaration = graph.declaration(id)?;
-            let kind = CDeclaration::kind_from_declaration(&declaration);
+            let kind = CDeclarationKind::from_kind(declaration.declaration_kind());
             Some(CCell::new(
                 CCellTag::Node,
                 CCellPayload {

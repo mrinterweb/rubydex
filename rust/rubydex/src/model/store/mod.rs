@@ -392,32 +392,6 @@ fn read_metadata<E: ReadableDatabase>(db: &E) -> Result<BucketBits, StoreError> 
     Ok(bits)
 }
 
-/// Streams `(reference id, string id)` for every method reference, decoding only what each pass
-/// needs.
-fn for_each_method_reference_meta(
-    read_txn: &redb::ReadTransaction,
-    visit: &mut dyn FnMut(u64, u64) -> Result<(), StoreError>,
-) -> Result<(), StoreError> {
-    let references = read_txn.open_table(NodeTable::MethodReferences.def())?;
-    for entry in references.range(0..=u32::MAX)? {
-        let (bucket_key, bucket) = entry?;
-        iter_bucket_entries(
-            NodeTable::MethodReferences.name(),
-            bucket_key.value(),
-            bucket.value(),
-            |id, bytes| {
-                let reference = postcard::from_bytes::<MethodRef>(bytes).map_err(|source| StoreError::Corrupt {
-                    table: NodeTable::MethodReferences.name(),
-                    id,
-                    source,
-                })?;
-                visit(id, reference.str().get())
-            },
-        )?;
-    }
-    Ok(())
-}
-
 /// Reads and decodes a single node by id from an already-opened bucketed table.
 fn decode_node_from_table<V: DeserializeOwned>(
     table: &redb::ReadOnlyTable<u32, &[u8]>,
@@ -833,15 +807,12 @@ impl RedbStore {
     ) -> Result<(), StoreError> {
         let read_txn = self.begin_read()?;
 
-        // Pass 1: which strings does this scan need? Only the ids, so the string sweep below can
-        // skip everything else without decoding it.
-        let mut needed: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for_each_method_reference_meta(&read_txn, &mut |_, str_id| {
-            needed.insert(str_id);
-            Ok(())
-        })?;
-
-        // Pass 2: one sequential sweep of `STRINGS`, interning just those ids.
+        // Sweep `STRINGS` first (a few MB) into a temporary map, then make one pass over the
+        // references and move only the names they mention into `strings`. Asking the string table
+        // first is what keeps this to one reference sweep: the other order needs a second pass over
+        // `METHOD_REFERENCES` (>100 MB on Discourse) just to learn which names to decode.
+        let mut names: crate::model::identity_maps::IdentityHashMap<StringId, Box<str>> =
+            crate::model::identity_maps::IdentityHashMap::default();
         {
             let table = read_txn.open_table(NodeTable::Strings.def())?;
             for entry in table.range(0..=u32::MAX)? {
@@ -852,7 +823,7 @@ impl RedbStore {
                     bucket.value(),
                     |id, bytes| {
                         let str_id = StringId::new(id);
-                        if !needed.contains(&id) || string_indices.contains_key(&str_id) {
+                        if string_indices.contains_key(&str_id) {
                             return Ok(());
                         }
                         let string_ref =
@@ -861,27 +832,98 @@ impl RedbStore {
                                 id,
                                 source,
                             })?;
-                        let idx = u32::try_from(strings.len()).unwrap_or(u32::MAX);
-                        if idx < u32::MAX {
-                            strings.push(string_ref.as_str().into());
-                            string_indices.insert(str_id, idx);
-                        }
+                        names.insert(str_id, string_ref.as_str().into());
                         Ok(())
                     },
                 )?;
             }
         }
 
-        // Pass 3: stream the references, now with every name already interned. Re-scanning keeps
-        // peak memory at the string table instead of a 37 MB copy of every reference id.
-        let indices = &*string_indices;
-        for_each_method_reference_meta(&read_txn, &mut |id, str_id| {
-            visit(
-                MethodReferenceId::new(id),
-                indices.get(&StringId::new(str_id)).copied().unwrap_or(u32::MAX),
-            );
-            Ok(())
-        })
+        let references = read_txn.open_table(NodeTable::MethodReferences.def())?;
+        for entry in references.range(0..=u32::MAX)? {
+            let (bucket_key, bucket) = entry?;
+            iter_bucket_entries(
+                NodeTable::MethodReferences.name(),
+                bucket_key.value(),
+                bucket.value(),
+                |id, bytes| {
+                    let reference = postcard::from_bytes::<MethodRef>(bytes).map_err(|source| StoreError::Corrupt {
+                        table: NodeTable::MethodReferences.name(),
+                        id,
+                        source,
+                    })?;
+                    let str_id = *reference.str();
+                    let name_index = match string_indices.get(&str_id) {
+                        Some(index) => *index,
+                        None => match names.remove(&str_id) {
+                            Some(name) => {
+                                let index = u32::try_from(strings.len()).unwrap_or(u32::MAX);
+                                if index < u32::MAX {
+                                    strings.push(name);
+                                    string_indices.insert(str_id, index);
+                                }
+                                index
+                            }
+                            None => u32::MAX,
+                        },
+                    };
+                    visit(MethodReferenceId::new(id), name_index);
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Reads several declarations in one read transaction, decoding each bucket once. A whole
+    /// ancestor chain otherwise costs one transaction and one bucket decode per ancestor (~1.5 ms
+    /// each, 77 for a Rails model).
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction or table iteration fails, or if a node's bytes do
+    /// not decode.
+    pub fn declarations(&self, ids: &[u64]) -> Result<Vec<(u64, Declaration)>, StoreError> {
+        let bits = self.bits.get(NodeTable::Declarations);
+        let mut wanted: Vec<(u32, u64)> = ids.iter().map(|id| (bucket_id(*id, bits), *id)).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let read_txn = self.begin_read()?;
+        let table = read_txn.open_table(NodeTable::Declarations.def())?;
+        let mut found = Vec::with_capacity(wanted.len());
+        let mut index = 0;
+        while index < wanted.len() {
+            let bucket_key = wanted[index].0;
+            let mut end = index + 1;
+            while end < wanted.len() && wanted[end].0 == bucket_key {
+                end += 1;
+            }
+            let bucket_ids: Vec<u64> = wanted[index..end].iter().map(|(_, id)| *id).collect();
+            index = end;
+
+            let Some(bucket) = table.get(bucket_key)? else {
+                continue;
+            };
+            iter_bucket_entries(
+                NodeTable::Declarations.name(),
+                bucket_key,
+                bucket.value(),
+                |id, bytes| {
+                    if !bucket_ids.contains(&id) {
+                        return Ok(());
+                    }
+                    let declaration =
+                        postcard::from_bytes::<Declaration>(bytes).map_err(|source| StoreError::Corrupt {
+                            table: NodeTable::Declarations.name(),
+                            id,
+                            source,
+                        })?;
+                    found.push((id, declaration));
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(found)
     }
 
     /// Reads all `(declaration_id, FQN name)` pairs for name-based search.
@@ -1238,6 +1280,123 @@ mod tests {
         assert!(
             matches!(err, StoreError::Open(_)),
             "expected StoreError::Open, got {err}"
+        );
+    }
+
+    /// Builds an indexed graph and the store for it, plus the store path's directory.
+    fn indexed_store() -> (Graph, tempfile::TempDir, std::path::PathBuf) {
+        use crate::indexing::{LanguageId, index_source};
+        use crate::resolution::Resolver;
+
+        let mut graph = Graph::new();
+        index_source(
+            &mut graph,
+            "file:///methods.rb".into(),
+            "class Foo\n  def bar; baz; end\nend\n",
+            &LanguageId::Ruby,
+        );
+        Resolver::new(&mut graph).resolve();
+        assert!(
+            !graph.method_references().is_empty(),
+            "the fixture must contain a method reference"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        RedbStore::build(&path, &graph).expect("build store");
+        (graph, dir, path)
+    }
+
+    #[test]
+    fn for_each_method_reference_with_name_interning_every_name() {
+        let (graph, _dir, path) = indexed_store();
+        let store = RedbStore::open(&path).expect("open store");
+
+        let mut strings: Vec<Box<str>> = Vec::new();
+        let mut indices: crate::model::identity_maps::IdentityHashMap<StringId, u32> =
+            crate::model::identity_maps::IdentityHashMap::default();
+        let mut seen: Vec<(u64, u32)> = Vec::new();
+        store
+            .for_each_method_reference_with_name(&mut strings, &mut indices, &mut |id, name_index| {
+                seen.push((id.get(), name_index));
+            })
+            .expect("scan method references");
+        let seen: Vec<(u64, String)> = seen
+            .into_iter()
+            .map(|(id, name_index)| {
+                let name = strings
+                    .get(name_index as usize)
+                    .map_or_else(String::new, ToString::to_string);
+                (id, name)
+            })
+            .collect();
+
+        assert_eq!(
+            graph.method_references().len(),
+            seen.len(),
+            "every reference must be streamed once"
+        );
+        assert!(
+            seen.iter().any(|(_, name)| name == "baz"),
+            "the referenced method name must be interned, got {seen:?}"
+        );
+        assert!(
+            !indices.is_empty() && indices.len() <= strings.len(),
+            "the string index must point at the interned names"
+        );
+    }
+
+    #[test]
+    fn for_each_method_reference_with_name_reuses_a_warm_index() {
+        let (_graph, _dir, path) = indexed_store();
+        let store = RedbStore::open(&path).expect("open store");
+        let mut strings: Vec<Box<str>> = Vec::new();
+        let mut indices: crate::model::identity_maps::IdentityHashMap<StringId, u32> =
+            crate::model::identity_maps::IdentityHashMap::default();
+        store
+            .for_each_method_reference_with_name(&mut strings, &mut indices, &mut |_, _| {})
+            .expect("first scan");
+        let interned = strings.len();
+
+        store
+            .for_each_method_reference_with_name(&mut strings, &mut indices, &mut |_, name_index| {
+                assert!(
+                    (name_index as usize) < interned,
+                    "a second scan must reuse the caller's index, not append to it"
+                );
+            })
+            .expect("second scan");
+        assert_eq!(interned, strings.len(), "a warm index must not grow");
+    }
+
+    #[test]
+    fn declarations_reads_a_chain_in_one_transaction() {
+        use crate::indexing::{LanguageId, index_source};
+        use crate::resolution::Resolver;
+
+        let mut graph = Graph::new();
+        index_source(
+            &mut graph,
+            "file:///chain.rb".into(),
+            "class A; end\nclass B < A; end\n",
+            &LanguageId::Ruby,
+        );
+        Resolver::new(&mut graph).resolve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.redb");
+        RedbStore::build(&path, &graph).expect("build store");
+        let store = RedbStore::open(&path).expect("open store");
+
+        let ids = vec![DeclarationId::from("A").get(), DeclarationId::from("B").get(), u64::MAX];
+        let found = store.declarations(&ids).expect("batch read");
+
+        assert_eq!(2, found.len(), "only the existing declarations come back");
+        assert!(
+            found
+                .iter()
+                .any(|(id, declaration)| *id == DeclarationId::from("A").get()
+                    && declaration.declaration_kind() == crate::model::declaration::DeclarationKind::Class),
+            "the chain's class declaration must be decoded with its kind"
         );
     }
 

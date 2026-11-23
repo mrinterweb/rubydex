@@ -1,7 +1,7 @@
 //! This file provides the C API for the Graph object
 
 use libc::c_char;
-use rubydex::model::declaration::{Ancestor, Declaration, Namespace};
+use rubydex::model::declaration::{Declaration, DeclarationKind};
 use std::ptr;
 
 use crate::definition_api::{DefinitionsIter, rdx_definitions_iter_new_from_ids};
@@ -43,25 +43,32 @@ impl CDeclaration {
 
     #[must_use]
     pub fn from_declaration(id: DeclarationId, decl: &Declaration) -> Self {
-        Self {
-            id: *id,
-            kind: Self::kind_from_declaration(decl),
-        }
+        Self::from_kind(id, decl.declaration_kind())
     }
 
     #[must_use]
-    pub fn kind_from_declaration(decl: &Declaration) -> CDeclarationKind {
-        match decl {
-            Declaration::Namespace(Namespace::Class(_)) => CDeclarationKind::Class,
-            Declaration::Namespace(Namespace::Module(_)) => CDeclarationKind::Module,
-            Declaration::Namespace(Namespace::SingletonClass(_)) => CDeclarationKind::SingletonClass,
-            Declaration::Namespace(Namespace::Todo(_)) => CDeclarationKind::Todo,
-            Declaration::Constant(_) => CDeclarationKind::Constant,
-            Declaration::ConstantAlias(_) => CDeclarationKind::ConstantAlias,
-            Declaration::Method(_) => CDeclarationKind::Method,
-            Declaration::GlobalVariable(_) => CDeclarationKind::GlobalVariable,
-            Declaration::InstanceVariable(_) => CDeclarationKind::InstanceVariable,
-            Declaration::ClassVariable(_) => CDeclarationKind::ClassVariable,
+    pub fn from_kind(id: DeclarationId, kind: DeclarationKind) -> Self {
+        Self {
+            id: *id,
+            kind: CDeclarationKind::from_kind(kind),
+        }
+    }
+}
+
+impl CDeclarationKind {
+    #[must_use]
+    pub const fn from_kind(kind: DeclarationKind) -> Self {
+        match kind {
+            DeclarationKind::Class => Self::Class,
+            DeclarationKind::Module => Self::Module,
+            DeclarationKind::SingletonClass => Self::SingletonClass,
+            DeclarationKind::Constant => Self::Constant,
+            DeclarationKind::ConstantAlias => Self::ConstantAlias,
+            DeclarationKind::Method => Self::Method,
+            DeclarationKind::GlobalVariable => Self::GlobalVariable,
+            DeclarationKind::InstanceVariable => Self::InstanceVariable,
+            DeclarationKind::ClassVariable => Self::ClassVariable,
+            DeclarationKind::Todo => Self::Todo,
         }
     }
 }
@@ -342,24 +349,10 @@ pub unsafe extern "C" fn free_c_declaration(ptr: *const CDeclaration) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_declaration_ancestors(pointer: GraphPointer, decl_id: u64) -> *mut DeclarationsIter {
     let declarations = with_graph(pointer, |graph| {
-        let declaration_id = DeclarationId::new(decl_id);
-
-        let Some(declaration) = graph.declaration(declaration_id) else {
-            return Vec::new();
-        };
-        let Some(namespace) = declaration.as_namespace() else {
-            return Vec::new();
-        };
-
-        namespace
-            .ancestors()
+        graph
+            .ancestors_of(DeclarationId::new(decl_id))
             .into_iter()
-            .filter_map(|ancestor| match ancestor {
-                Ancestor::Complete(id) => graph
-                    .declaration(*id)
-                    .map(|decl| CDeclaration::from_declaration(*id, &decl)),
-                Ancestor::Partial(_) => None,
-            })
+            .map(|ancestor| CDeclaration::from_kind(DeclarationId::new(ancestor.id), ancestor.kind))
             .collect::<Vec<_>>()
     });
 

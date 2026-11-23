@@ -124,11 +124,14 @@ impl<'a> Resolver<'a> {
     ///
     /// Can panic if there's inconsistent data in the graph
     pub fn resolve(&mut self) {
-        // Resolution is the only step that can change ancestor chains, so it invalidates the
-        // derived caches the FFI layer keys on the graph's mutation epoch (ancestors, method
-        // reference names).
-        self.graph.bump_mutation_epoch();
         let other_ids = self.prepare_units();
+        // Resolution is the only step that can change ancestor chains, so it has to invalidate the
+        // caches derived from them (keyed on the graph's mutation epoch). A pass with no queued
+        // work changes nothing, and callers do call it after a no-op edit, so bumping then would
+        // only throw away chains that are still right.
+        if !self.unit_queue.is_empty() || !other_ids.is_empty() {
+            self.graph.bump_mutation_epoch();
+        }
 
         loop {
             // Flag to ensure the end of the resolution loop. We go through all items in the queue based on its current
