@@ -84,9 +84,15 @@ class MCPServerIntegrationTest < Minitest::Test
   def test_mcp_server_e2e
     with_context do |context|
       context.write!("app.rb", "class Dog; end")
+      cache_dir = context.absolute_path_to(".rubydex-cache")
+      env = {
+        "RUBYDEX_DISK_INDEX" => nil,
+        "RUBYDEX_INDEX_MANAGER" => "0",
+        "RUBYDEX_CACHE_DIR" => cache_dir,
+      }
 
       stderr_output = +""
-      Open3.popen3(RbConfig.ruby, "-rbundler/setup", executable_path, "mcp", context.absolute_path) do |stdin, stdout, stderr, wait_thr|
+      Open3.popen3(env, RbConfig.ruby, "-rbundler/setup", executable_path, "mcp", context.absolute_path) do |stdin, stdout, stderr, wait_thr|
         stderr_reader = Thread.new do
           stderr_output << stderr.read
         rescue IOError
@@ -100,6 +106,11 @@ class MCPServerIntegrationTest < Minitest::Test
         stats, request_id = wait_for_indexing_to_complete(stdin, stdout, 3)
         assert_operator(stats.fetch("files"), :>=, 1)
         assert_operator(stats.fetch("declarations"), :>, 0)
+
+        if Rubydex::Graph.store_format_version.positive?
+          stores = Dir.glob(File.join(cache_dir, "rubydex", "*", "index.*.redb"))
+          refute_empty(stores, "expected rdx mcp to default to disk-backed indexing")
+        end
 
         search_response = call_tool(stdin, stdout, request_id + 1, "search_declarations", { query: "Dog", match_mode: "exact" })
         assert_equal(["Dog"], search_response.fetch("results").map { |result| result.fetch("name") })

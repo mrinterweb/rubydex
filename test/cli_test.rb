@@ -744,6 +744,60 @@ class CLITest < Minitest::Test
     end
   end
 
+  def test_mcp_defaults_disk_index_when_unset_and_store_is_compiled
+    with_mcp_env(nil, "0") do
+      require "rubydex/mcp_server"
+      Rubydex::Graph.stubs(:store_format_version).returns(3)
+      observed_disk_index = nil
+      observed_manager = nil
+      Rubydex::MCPServer.expects(:run).with("/tmp/ws").with do
+        observed_disk_index = ENV["RUBYDEX_DISK_INDEX"]
+        observed_manager = ENV["RUBYDEX_INDEX_MANAGER"]
+        true
+      end
+
+      result = rdx("mcp", "/tmp/ws")
+
+      assert_success_status(result)
+      assert_equal("1", observed_disk_index)
+      assert_equal("0", observed_manager)
+    end
+  end
+
+  def test_mcp_preserves_explicit_disk_index_opt_out
+    with_mcp_env("0", nil) do
+      require "rubydex/mcp_server"
+      Rubydex::Graph.stubs(:store_format_version).returns(3)
+      observed_disk_index = nil
+      Rubydex::MCPServer.expects(:run).with("/tmp/ws").with do
+        observed_disk_index = ENV["RUBYDEX_DISK_INDEX"]
+        true
+      end
+
+      result = rdx("mcp", "/tmp/ws")
+
+      assert_success_status(result)
+      assert_equal("0", observed_disk_index)
+    end
+  end
+
+  def test_mcp_does_not_enable_disk_index_when_store_feature_is_absent
+    with_mcp_env(nil, nil) do
+      require "rubydex/mcp_server"
+      Rubydex::Graph.stubs(:store_format_version).returns(0)
+      observed_disk_index = :unset
+      Rubydex::MCPServer.expects(:run).with("/tmp/ws").with do
+        observed_disk_index = ENV["RUBYDEX_DISK_INDEX"]
+        true
+      end
+
+      result = rdx("mcp", "/tmp/ws")
+
+      assert_success_status(result)
+      assert_nil(observed_disk_index)
+    end
+  end
+
   def test_skill_reports_a_library_with_no_skills_for_an_unknown_id
     with_empty_skill_library do
       result = rdx("skill", "alpha")
@@ -781,5 +835,38 @@ class CLITest < Minitest::Test
     error = LoadError.new("cannot load such file -- #{path}")
     error.instance_variable_set(:@path, path)
     error
+  end
+
+  def with_mcp_env(disk_index, index_manager)
+    had_disk = ENV.key?("RUBYDEX_DISK_INDEX")
+    prev_disk = ENV["RUBYDEX_DISK_INDEX"]
+    had_manager = ENV.key?("RUBYDEX_INDEX_MANAGER")
+    prev_manager = ENV["RUBYDEX_INDEX_MANAGER"]
+
+    if disk_index.nil?
+      ENV.delete("RUBYDEX_DISK_INDEX")
+    else
+      ENV["RUBYDEX_DISK_INDEX"] = disk_index
+    end
+
+    if index_manager.nil?
+      ENV.delete("RUBYDEX_INDEX_MANAGER")
+    else
+      ENV["RUBYDEX_INDEX_MANAGER"] = index_manager
+    end
+
+    yield
+  ensure
+    if had_disk
+      ENV["RUBYDEX_DISK_INDEX"] = prev_disk
+    else
+      ENV.delete("RUBYDEX_DISK_INDEX")
+    end
+
+    if had_manager
+      ENV["RUBYDEX_INDEX_MANAGER"] = prev_manager
+    else
+      ENV.delete("RUBYDEX_INDEX_MANAGER")
+    end
   end
 end

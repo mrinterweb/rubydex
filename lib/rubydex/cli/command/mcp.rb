@@ -22,6 +22,9 @@ module Rubydex
           # The MCP server manages its own graph lifecycle for the given workspace, so it does not go
           # through `build_graph`.
           require "rubydex/mcp_server"
+          if !ENV.key?("RUBYDEX_DISK_INDEX") && Rubydex::Graph.store_format_version.positive?
+            ENV["RUBYDEX_DISK_INDEX"] = "1"
+          end
           Rubydex::MCPServer.run(path)
         end
       end
