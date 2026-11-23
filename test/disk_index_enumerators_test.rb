@@ -65,7 +65,7 @@ class DiskIndexEnumeratorsTest < Minitest::Test
     assert_equal("foo.rb", payload.fetch("file"))
     assert_includes(payload.fetch("declarations").map { |entry| entry.fetch("name") }, "Foo")
   ensure
-    disk&.detach_store if disk&.respond_to?(:detach_store)
+    detach_if_store_backed(disk)
   end
 
   def test_method_reference_cached_names_match_store_and_invalidate_on_delete
@@ -73,15 +73,25 @@ class DiskIndexEnumeratorsTest < Minitest::Test
     disk.index_workspace
     disk.resolve
 
-    foo_uri = disk.path_to_uri(File.join(@workspace, "foo.rb"))
-    ref = disk.method_references.find { |r| r.name == "new" && r.document.uri == foo_uri }
+    # `Baz.new` is the only `new` call in the workspace. The URI comes from the reference itself
+    # because macOS tmpdirs live behind the `/var` -> `/private/var` symlink and the store keys
+    # documents by their real path, so `path_to_uri(@workspace/...)` need not match.
+    ref = disk.method_references.find { |reference| reference.name == "new" }
     refute_nil(ref, "store-backed method reference must expose its cached name")
-    assert_equal("new", ref.name)
+    assert_equal("new", ref.name, "the cached name must survive a second read")
 
-    disk.delete_document(foo_uri)
+    disk.delete_document(ref.document.uri)
     error = assert_raises(RuntimeError) { ref.name }
     assert_equal("Method reference must exist for a valid id", error.message)
   ensure
-    disk&.detach_store if disk&.respond_to?(:detach_store)
+    detach_if_store_backed(disk)
+  end
+
+  private
+
+  # A build without the redb-store feature answers `detach_store` with a RuntimeError rather than
+  # no-op, and these tests run in that build too (they cover the in-memory fallback).
+  def detach_if_store_backed(graph)
+    graph&.detach_store if Rubydex::Graph.store_format_version.positive?
   end
 end
