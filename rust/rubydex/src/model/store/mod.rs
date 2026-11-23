@@ -751,6 +751,11 @@ impl RedbStore {
     /// Streams every constant reference together with its name, joining `NAMES` in the same read
     /// transaction so a whole-table consumer does not pay one transaction per reference.
     ///
+    /// `NAMES` is swept sequentially into a temporary map first. Looking each name up per
+    /// reference instead — one random bucket read each, several hundred thousand on a large store —
+    /// made a cold scan miss the page cache on every reference; see
+    /// [`Self::for_each_method_reference_with_name`], which measured the same shape at ~3.9 s.
+    ///
     /// # Errors
     /// Returns an error if the read transaction or table iteration fails, or if a node's bytes do
     /// not decode.
@@ -759,9 +764,31 @@ impl RedbStore {
         visit: &mut dyn FnMut(ConstantReferenceId, ConstantReference, Option<NameRef>),
     ) -> Result<(), StoreError> {
         let read_txn = self.begin_read()?;
+
+        let mut names_by_id: crate::model::identity_maps::IdentityHashMap<NameId, NameRef> =
+            crate::model::identity_maps::IdentityHashMap::default();
+        {
+            let table = read_txn.open_table(NodeTable::Names.def())?;
+            for entry in table.range(0..=u32::MAX)? {
+                let (bucket_key, bucket) = entry?;
+                iter_bucket_entries(
+                    NodeTable::Names.name(),
+                    bucket_key.value(),
+                    bucket.value(),
+                    |id, bytes| {
+                        let name = postcard::from_bytes::<NameRef>(bytes).map_err(|source| StoreError::Corrupt {
+                            table: NodeTable::Names.name(),
+                            id,
+                            source,
+                        })?;
+                        names_by_id.insert(NameId::new(id), name);
+                        Ok(())
+                    },
+                )?;
+            }
+        }
+
         let references = read_txn.open_table(NodeTable::ConstantReferences.def())?;
-        let names = read_txn.open_table(NodeTable::Names.def())?;
-        let name_bits = self.bits.get(NodeTable::Names);
         for entry in references.range(0..=u32::MAX)? {
             let (bucket_key, bucket) = entry?;
             iter_bucket_entries(
@@ -775,8 +802,7 @@ impl RedbStore {
                             id,
                             source,
                         })?;
-                    let name_id = reference.name_id().get();
-                    let name = decode_node_from_table::<NameRef>(&names, NodeTable::Names, name_bits, name_id)?;
+                    let name = names_by_id.get(&*reference.name_id()).cloned();
                     visit(ConstantReferenceId::new(id), reference, name);
                     Ok(())
                 },
