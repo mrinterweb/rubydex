@@ -1332,11 +1332,16 @@ impl Graph {
     /// Attaches a diagnostic to the document with the given `uri_id`. The diagnostic clears
     /// automatically when the document is deleted or re-indexed.
     ///
-    /// # Panics
-    ///
-    /// Panics if no document is registered for `uri_id`.
+    /// A document the session has not edited lives only in the store, and a live edit may have
+    /// removed it since the diagnostic was produced, so a missing document is not a bug: the
+    /// diagnostic is dropped rather than taking the host process down across the FFI boundary.
     pub fn add_document_diagnostic(&mut self, uri_id: UriId, diagnostic: Diagnostic) {
-        self.documents.get_mut(&uri_id).unwrap().add_diagnostic(diagnostic);
+        #[cfg(feature = "redb-store")]
+        self.materialize_document(uri_id);
+
+        if let Some(document) = self.documents.get_mut(&uri_id) {
+            document.add_diagnostic(diagnostic);
+        }
     }
 
     /// # Panics
@@ -2797,6 +2802,58 @@ mod tests {
 
     fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
         definitions.into_iter().map(Definition::id).collect()
+    }
+
+    /// A diagnostic targets a document that a live edit may not have materialized (it lives only in
+    /// the store) or may have removed since. Either way it must not panic across the FFI boundary.
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn a_diagnostic_can_be_added_to_a_store_backed_or_missing_document() {
+        use crate::diagnostic::Rule;
+        use crate::model::store::RedbStore;
+        use crate::offset::Offset;
+
+        let mut base = GraphTest::new();
+        base.index_uri("file:///foo.rb", "class Foo; end");
+        base.resolve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("index.redb");
+        let base_graph = base.into_graph();
+        RedbStore::build(&store_path, &base_graph).expect("build store");
+        drop(base_graph);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        let uri_id = UriId::from("file:///foo.rb");
+        graph.add_document_diagnostic(
+            uri_id,
+            Diagnostic::new(
+                Rule::UndefinedConstantVisibilityTarget,
+                uri_id,
+                Offset::new(0, 0),
+                "x".into(),
+            ),
+        );
+
+        assert_eq!(
+            1,
+            graph
+                .documents()
+                .get(&uri_id)
+                .expect("the store document was materialized")
+                .diagnostics()
+                .len(),
+            "the diagnostic lands on the store-backed document"
+        );
+
+        graph.add_document_diagnostic(
+            UriId::from("file:///deleted.rb"),
+            Diagnostic::new(
+                Rule::UndefinedConstantVisibilityTarget,
+                UriId::from("file:///deleted.rb"),
+                Offset::new(0, 0),
+                "x".into(),
+            ),
+        );
     }
 
     #[test]
