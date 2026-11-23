@@ -445,7 +445,15 @@ impl Graph {
                             .map(|(id, declaration)| (id, declaration.declaration_kind()))
                             .collect();
                         for ancestor_id in ancestor_ids {
+                            // An ancestor the store does not hold was declared by a live edit, so
+                            // read it through the layered accessor instead of dropping it: the
+                            // chain would otherwise be cached without the mixin the edit added.
                             if let Some(kind) = kinds.remove(&ancestor_id) {
+                                entries.push(AncestorEntry { id: ancestor_id, kind });
+                            } else if let Some(kind) = self
+                                .declaration(DeclarationId::new(ancestor_id))
+                                .map(|declaration| declaration.declaration_kind())
+                            {
                                 entries.push(AncestorEntry { id: ancestor_id, kind });
                             }
                         }
@@ -2168,8 +2176,10 @@ impl Graph {
         };
 
         // Skip invalidation during boot indexing (no documents have been resolved yet)
-        // or when the document is brand new (no old data to invalidate against).
-        if old_document.is_some() || !self.documents.is_empty() {
+        // or when the document is brand new (no old data to invalidate against). A store-backed
+        // graph always has resolved data to invalidate — a new file can reopen a store-backed
+        // namespace — so an empty overlay is not the same answer there.
+        if old_document.is_some() || !self.documents.is_empty() || self.is_store_backed() {
             self.invalidate(old_document.as_ref(), Some(&other));
             if let Some(doc) = &old_document {
                 self.remove_document_data(doc);
@@ -2222,9 +2232,18 @@ impl Graph {
                 // which hasn't been extended yet. Only act on names already known globally.
                 #[cfg(feature = "redb-store")]
                 self.materialize_name(*const_ref.name_id());
-                if let Some(name_ref) = self.names.get(const_ref.name_id())
-                    && let Some(nesting_id) = name_ref.nesting()
-                    && let Some(NameRef::Resolved(resolved)) = self.names.get(nesting_id)
+                let nesting_id = self
+                    .names
+                    .get(const_ref.name_id())
+                    .and_then(|name_ref| *name_ref.nesting());
+                // The nesting name can live only in the store as well, so materialize before
+                // reading its resolution.
+                #[cfg(feature = "redb-store")]
+                if let Some(nesting_id) = nesting_id {
+                    self.materialize_name(nesting_id);
+                }
+                if let Some(nesting_id) = nesting_id
+                    && let Some(NameRef::Resolved(resolved)) = self.names.get(&nesting_id)
                 {
                     items.push(InvalidationItem::Declaration(*resolved.declaration_id()));
                 }
@@ -2802,6 +2821,45 @@ mod tests {
 
     fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
         definitions.into_iter().map(Definition::id).collect()
+    }
+
+    /// A new file is not a no-op just because the overlay is empty: on a store-backed graph it can
+    /// reopen a namespace that lives only in the store, and the cached ancestor chain has to be
+    /// invalidated or the `include` never shows up.
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn a_new_file_reopening_a_store_backed_namespace_invalidates_its_ancestors() {
+        use crate::indexing::LanguageId;
+        use crate::model::store::RedbStore;
+        use crate::resolution::Resolver;
+
+        let mut base = GraphTest::new();
+        base.index_uri("file:///foo.rb", "class Foo; end");
+        base.resolve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("index.redb");
+        let base_graph = base.into_graph();
+        RedbStore::build(&store_path, &base_graph).expect("build store");
+        drop(base_graph);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        let foo = DeclarationId::from("Foo");
+        let mixin = DeclarationId::from("Mixin").get();
+        // Warm the store-backed ancestor cache at the pre-edit chain.
+        assert!(!graph.ancestors_of(foo).iter().any(|entry| entry.id == mixin));
+
+        crate::indexing::index_source(
+            &mut graph,
+            "file:///bar.rb".into(),
+            "module Mixin; end\nclass Foo\n  include Mixin\nend\n",
+            &LanguageId::Ruby,
+        );
+        Resolver::new(&mut graph).resolve();
+
+        assert!(
+            graph.ancestors_of(foo).iter().any(|entry| entry.id == mixin),
+            "the reopened namespace's ancestors must be rebuilt, not served from the stale chain"
+        );
     }
 
     /// A diagnostic targets a document that a live edit may not have materialized (it lives only in
