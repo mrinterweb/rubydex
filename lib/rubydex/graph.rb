@@ -182,7 +182,7 @@ module Rubydex
       marker = "#{cache}.hash"
       if store_published?(marker, expected_marker, cache)
         attach_store_generation(@manifest_store_path || cache)
-      elsif (changes = surgical_changes(scan))
+      elsif File.exist?(marker) && (changes = surgical_changes(scan))
         apply_changes(changes)
         @applied_files = scan
       else
@@ -241,10 +241,10 @@ module Rubydex
         FileUtils.mv(store_file, "#{cache}.corrupt", force: true) if File.exist?(store_file)
       rescue SystemCallError
         # Another session on Windows may still hold the corrupt file open; dropping the marker
-        # below is still enough to make the next run rebuild cleanly.
+        # and manifest below is still enough to make the next run rebuild cleanly.
         nil
       end
-      FileUtils.rm_f("#{cache}.hash")
+      FileUtils.rm_f(["#{cache}.hash", "#{cache}.files"])
       true
     end
 

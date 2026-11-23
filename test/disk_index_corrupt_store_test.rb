@@ -75,6 +75,7 @@ class DiskIndexCorruptStoreTest < Minitest::Test
     assert(File.exist?("#{cache}.corrupt"), "the untrustworthy store must be quarantined")
     refute(File.exist?(cache), "the corrupt store must not stay on the active cache path")
     refute(File.exist?("#{cache}.hash"), "its freshness marker must go with it, so the next run rebuilds")
+    refute(File.exist?("#{cache}.files"), "its manifest must go with it, so the next run does not adopt it")
 
     # The session must have fallen back to an in-memory index. `index_all` is a no-op while a store
     # is attached (static store-backed mode), so a file indexed after the fallback can only be found
@@ -186,5 +187,55 @@ class DiskIndexCorruptStoreTest < Minitest::Test
       assert_equal(["files", "lockfile", "store", "workspace"], JSON.parse(manifest).keys.sort)
     end
     assert(File.exist?("#{cache}.hash"), "the rebuild republished the marker too")
+  end
+
+  def test_quarantine_removes_manifest_when_move_fails_and_next_boot_rebuilds
+    graph, cache = write_store("foo.rb" => "class Foo; end\n")
+    graph.index_workspace
+    active_store = graph.send(:active_store_path)
+
+    original_mv = FileUtils.method(:mv)
+    FileUtils.define_singleton_method(:mv) { |*| raise Errno::EACCES, "open handle on Windows" }
+    begin
+      graph.define_singleton_method(:store_errors) { 1 }
+      assert(graph.quarantine_if_untrustworthy(cache))
+    ensure
+      FileUtils.define_singleton_method(:mv, original_mv)
+    end
+
+    assert(File.exist?(active_store), "the open store stayed in place when mv failed")
+    refute(File.exist?("#{cache}.hash"), "quarantine must remove the freshness marker")
+    refute(File.exist?("#{cache}.files"), "quarantine must remove the manifest sidecar")
+
+    # Next boot must not trust the remaining store without its manifest and must trigger a rebuild.
+    rebuilt = Rubydex::Graph.configure_for_workspace(@tmp)
+    @graphs << rebuilt
+    rebuilt.index_workspace
+    rebuilt.resolve
+    refute_nil(rebuilt["Foo"])
+    Timeout.timeout(120) { sleep(0.05) until rebuilt.send(:store_fresh?, cache) }
+    assert(File.exist?("#{cache}.files"), "rebuild republished the manifest")
+  end
+
+  def test_refresh_if_stale_does_not_take_surgical_path_without_marker
+    graph, cache = write_store("foo.rb" => "class Foo; end\n")
+    graph.index_workspace
+    FileUtils.rm_f("#{cache}.hash")
+
+    surgical_called = false
+    graph.define_singleton_method(:surgical_changes) do |*args|
+      surgical_called = true
+      super(*args)
+    end
+    rebuilds = 0
+    graph.define_singleton_method(:launch_rebuild) do |_c, lock|
+      rebuilds += 1
+      @rebuild_process = Process.detach(Process.spawn(Gem.ruby, "-e", "exit 0"))
+      Dir.rmdir(lock)
+    end
+
+    refute(graph.refresh_if_stale)
+    refute(surgical_called, "missing marker must require a rebuild rather than trusting surgical diff")
+    assert_equal(1, rebuilds)
   end
 end
