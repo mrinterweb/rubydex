@@ -55,7 +55,7 @@ static const rb_data_type_t method_reference_type = {
     .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
-static inline void *rdxi_graph_from_method_reference(VALUE self, MethodReferenceData **out_data) {
+static inline void *graph_from_method_reference(VALUE self, MethodReferenceData **out_data) {
     MethodReferenceData *data;
     TypedData_Get_Struct(self, MethodReferenceData, &method_reference_type, data);
 
@@ -165,7 +165,7 @@ static VALUE rdxr_constant_reference_document(VALUE self) {
  */
 static VALUE rdxr_method_reference_name(VALUE self) {
     MethodReferenceData *data;
-    void *graph = rdxi_graph_from_method_reference(self, &data);
+    void *graph = graph_from_method_reference(self, &data);
 
     if (data->cached_name != Qundef && data->cached_epoch == rdx_graph_mutation_epoch(graph)) {
         return rb_str_dup(data->cached_name);
@@ -186,7 +186,7 @@ static VALUE rdxr_method_reference_name(VALUE self) {
  */
 static VALUE rdxr_method_reference_location(VALUE self) {
     MethodReferenceData *data;
-    void *graph = rdxi_graph_from_method_reference(self, &data);
+    void *graph = graph_from_method_reference(self, &data);
 
     Location *loc = rdx_method_reference_location(graph, data->id);
     if (loc == NULL) {
@@ -206,7 +206,7 @@ static VALUE rdxr_method_reference_location(VALUE self) {
  */
 static VALUE rdxr_method_reference_receiver(VALUE self) {
     MethodReferenceData *data;
-    void *graph = rdxi_graph_from_method_reference(self, &data);
+    void *graph = graph_from_method_reference(self, &data);
 
     const struct CDeclaration *decl = rdx_method_reference_receiver_declaration(graph, data->id);
     if (decl == NULL) {
@@ -228,7 +228,7 @@ static VALUE rdxr_method_reference_receiver(VALUE self) {
  */
 static VALUE rdxr_method_reference_document(VALUE self) {
     MethodReferenceData *data;
-    void *graph = rdxi_graph_from_method_reference(self, &data);
+    void *graph = graph_from_method_reference(self, &data);
 
     const uint64_t *uri_id = rdx_method_reference_document(graph, data->id);
     if (uri_id == NULL) {

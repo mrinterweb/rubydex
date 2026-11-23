@@ -128,7 +128,7 @@
 |---|------|-------|----------|------------|
 | 46 | `ext/rubydex/reference.c:58` | File-local `static` helper uses `rdxi_` cross-file prefix | project-standards | 100 |
 
-- [ ] **#46** -- `AGENTS.md:56-57` reserves `rdxi_` for non-static C helpers shared across files and uses no prefix for file-local `static` helpers. **Fix:** Rename `rdxi_graph_from_method_reference` to `graph_from_method_reference` and update its four local call sites.
+- [x] **#46** -- `AGENTS.md:56-57` reserves `rdxi_` for non-static C helpers shared across files and uses no prefix for file-local `static` helpers. **Fix:** Rename `rdxi_graph_from_method_reference` to `graph_from_method_reference` and update its four local call sites.
 
 ### Actionable Findings
 
@@ -263,4 +263,4 @@ Run artifacts: `/tmp/compound-engineering-1000/ce-code-review/20261122-213640-05
 - [ ] **#43** [P2] `rust/rubydex/src/model/graph.rs:2141` -- `remove_document_data` misses store declarations and skips constant-ref name untrack (`manual`, `suggested_fix: yes`, confidence 75)
 - [ ] **#44** [P2] `rust/rubydex/src/model/graph.rs:860` -- Store-backed name reads can return tombstoned declaration targets (`gated_auto`, `suggested_fix: yes`, confidence 75)
 - [ ] **#45** [P2] `rust/rubydex/src/resolution.rs:742` -- `Resolver` ancestor lookups read overlay map instead of layered store (`gated_auto`, `suggested_fix: yes`, confidence 75)
-- [ ] **#46** [P3] `ext/rubydex/reference.c:58` -- File-local `static` helper uses `rdxi_` cross-file prefix (`gated_auto`, `suggested_fix: yes`, confidence 100)
+- [x] **#46** [P3] `ext/rubydex/reference.c:58` -- File-local `static` helper uses `rdxi_` cross-file prefix (`gated_auto`, `suggested_fix: yes`, confidence 100)
