@@ -65,9 +65,10 @@ The memleak task selects on that marker, and `test/integration/**` is skipped wh
 is what keeps a new spawn-heavy test from silently rejoining the traced run. The marker has to be a
 line of its own, starting at column 0; a mention mid-sentence does not count.
 
-One consequence worth knowing: the disk-index tests are the only ones that read a store-backed graph,
-and they all spawn store builds, so that read path has no valgrind coverage. It runs on the plain
-`ruby_test` task and under the FFI allocator-invariants job instead.
+One consequence worth knowing: the other disk-index tests build their store in a child, so they all
+carry the marker. `test/disk_index_store_ffi_test.rb` exists to keep the store read path covered: it
+builds and attaches the store in-process (`build_store` and `attach_store` spawn nothing) and is
+deliberately left unmarked so valgrind traces the store readers, enumerators and teardown.
 
 ## Releasing
 

@@ -38,14 +38,9 @@ class DiskIndexManagerSettingTest < Minitest::Test
 
   def test_a_build_without_the_store_feature_never_enables_disk_indexing
     with_workspace("[disk_index]\nenabled = true\n") do |graph|
-      ENV["RUBYDEX_DISK_INDEX"] = "1"
-      begin
-        assert(graph.send(:disk_index_enabled?), "the committed config asks for a store")
-        without_store_feature do
-          refute(graph.send(:disk_index_enabled?), "a build without redb-store cannot write or open one")
-        end
-      ensure
-        ENV.delete("RUBYDEX_DISK_INDEX")
+      assert(graph.send(:disk_index_enabled?), "the committed config asks for a store")
+      without_store_feature do
+        refute(graph.send(:disk_index_enabled?), "a build without redb-store cannot write or open one")
       end
     end
   end
