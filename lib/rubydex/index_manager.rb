@@ -48,7 +48,13 @@ module Rubydex
       # so two sessions spawning at the same instant cost one wasted process, never two daemons.
       #: (String registry) -> nil
       def launch_if_absent(registry)
-        handle = File.new(File.join(File.dirname(registry), "manager.lock"), "w")
+        FileUtils.mkdir_p(File.dirname(registry), mode: 0o700)
+        lock = File.join(File.dirname(registry), "manager.lock")
+        # `File.new(..., "w")` follows a symlink, so a workspace that ships one could aim the lock (and
+        # the manager it gates) at a file it does not own. Only a regular file or nothing is ours.
+        return if File.symlink?(lock)
+
+        handle = File.new(lock, File::RDWR | File::CREAT, 0o600)
         # Non-blocking is the point: a live manager holds this lock for its whole lifetime, so a
         # blocking `flock` waits for the manager to exit and the session never launches anything.
         taken = handle.flock(File::LOCK_EX | File::LOCK_NB)
@@ -66,7 +72,8 @@ module Rubydex
       # referenced for the whole session (the lock is per file descriptor).
       #: (String workspace, String store, Array<String> builder, Integer docs, String registry) -> File
       def register(workspace:, store:, builder:, docs:, registry:)
-        FileUtils.mkdir_p(registry)
+        # The registry decides which indexer the manager spawns: keep it to this user.
+        FileUtils.mkdir_p(registry, mode: 0o700)
         path = File.join(registry, "#{Process.pid}-#{SecureRandom.hex(4)}.json")
         payload = JSON.generate({ workspace:, store:, builder:, docs: })
 

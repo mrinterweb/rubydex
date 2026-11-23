@@ -23,6 +23,25 @@ pub struct Session {
 #[must_use]
 pub fn live_sessions(dir: &Path) -> Vec<Session> {
     let mut alive = Vec::<Session>::new();
+
+    // The registry decides which indexer the manager spawns, so a directory another user can write to
+    // would let them choose that argv. A per-user registry is private; anything else is refused.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Ok(metadata) = dir.metadata() else {
+            return alive;
+        };
+        if metadata.permissions().mode() & 0o022 != 0 {
+            eprintln!(
+                "rubydex-index-manager: refusing group- or world-writable registry {}",
+                dir.display()
+            );
+            return alive;
+        }
+    }
+
     let Ok(entries) = dir.read_dir() else {
         return alive;
     };
@@ -35,6 +54,11 @@ pub fn live_sessions(dir: &Path) -> Vec<Session> {
         if path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
+        // Symlinks and devices are not registry files; opening one would follow whatever the
+        // workspace linked to.
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
 
         let Ok(handle) = File::open(&path) else {
             continue;
@@ -44,9 +68,13 @@ pub fn live_sessions(dir: &Path) -> Vec<Session> {
             continue;
         }
 
-        let Ok(session) = from_reader(handle) else {
+        let Ok(session): Result<Session, _> = from_reader(handle) else {
             continue;
         };
+        // The builder argv is what the manager spawns, so a session that names none is not a session.
+        if session.builder.is_empty() {
+            continue;
+        }
         alive.push(session);
     }
 
