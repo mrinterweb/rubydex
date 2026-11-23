@@ -59,58 +59,58 @@ impl std::error::Error for IntegrityError {}
 /// Checks the integrity of the graph data
 #[must_use]
 pub fn check_integrity(graph: &Graph) -> Vec<IntegrityError> {
-    let mut errors = Vec::new();
+    let mut errors: Vec<IntegrityError> = graph
+        .declarations()
+        .iter()
+        .filter_map(|(id, declaration)| check_declaration(graph, *id, declaration))
+        .collect();
+    // A store-backed graph keeps most of its declarations in the store, not in the overlay above it;
+    // checking only the overlay reports nothing for a whole workspace.
+    graph.for_each_store_declaration(|id, declaration| {
+        errors.extend(check_declaration(graph, id, &declaration));
+    });
+    errors
+}
+
+/// The checks that need nothing but a declaration and the graph it lives in. Returns the error the
+/// declaration has, if any, so both layers of the graph can be checked by the same rules.
+fn check_declaration(graph: &Graph, id: DeclarationId, declaration: &Declaration) -> Option<IntegrityError> {
     let self_owners = [*OBJECT_ID, *BASIC_OBJECT_ID];
+    let owner_id = declaration.owner_id();
+    let error = |kind| {
+        Some(IntegrityError {
+            kind,
+            declaration_name: declaration.name().to_string(),
+            uris: collect_uris(graph, declaration),
+        })
+    };
 
-    for (id, declaration) in graph.declarations() {
-        let owner_id = declaration.owner_id();
-
-        // Check for constants that own themselves. Only `Object` and `BasicObject` own themselves and no other constant
-        if *id == *owner_id {
-            if self_owners.contains(id) {
-                continue;
-            }
-            errors.push(IntegrityError {
-                kind: IntegrityErrorKind::UnexpectedSelfOwnership,
-                declaration_name: declaration.name().to_string(),
-                uris: collect_uris(graph, declaration),
-            });
-            continue;
+    // Check for constants that own themselves. Only `Object` and `BasicObject` own themselves and no other constant
+    if id == *owner_id {
+        if self_owners.contains(&id) {
+            return None;
         }
-
-        // Check that the owner exists
-        let Some(owner) = graph.declaration(*owner_id) else {
-            errors.push(IntegrityError {
-                kind: IntegrityErrorKind::OwnerDoesNotExist,
-                declaration_name: declaration.name().to_string(),
-                uris: collect_uris(graph, declaration),
-            });
-            continue;
-        };
-
-        // Check that the owner is a namespace
-        if owner.as_namespace().is_none() {
-            errors.push(IntegrityError {
-                kind: IntegrityErrorKind::OwnerIsNotNamespace,
-                declaration_name: declaration.name().to_string(),
-                uris: collect_uris(graph, declaration),
-            });
-            continue;
-        }
-
-        // Check singleton class chain termination
-        if let Declaration::Namespace(Namespace::SingletonClass(_)) = declaration
-            && !singleton_chain_terminates(graph, *owner_id)
-        {
-            errors.push(IntegrityError {
-                kind: IntegrityErrorKind::SingletonClassChainDoesNotTerminate,
-                declaration_name: declaration.name().to_string(),
-                uris: collect_uris(graph, declaration),
-            });
-        }
+        return error(IntegrityErrorKind::UnexpectedSelfOwnership);
     }
 
-    errors
+    // Check that the owner exists
+    let Some(owner) = graph.declaration(*owner_id) else {
+        return error(IntegrityErrorKind::OwnerDoesNotExist);
+    };
+
+    // Check that the owner is a namespace
+    if owner.as_namespace().is_none() {
+        return error(IntegrityErrorKind::OwnerIsNotNamespace);
+    }
+
+    // Check singleton class chain termination
+    if let Declaration::Namespace(Namespace::SingletonClass(_)) = declaration
+        && !singleton_chain_terminates(graph, *owner_id)
+    {
+        return error(IntegrityErrorKind::SingletonClassChainDoesNotTerminate);
+    }
+
+    None
 }
 
 /// Collects the URIs where a declaration is defined, sorted and deduplicated

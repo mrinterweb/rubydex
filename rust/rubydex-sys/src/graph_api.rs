@@ -298,57 +298,17 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
         let nesting: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(nesting, count).unwrap() };
         let const_name: String = unsafe { utils::convert_char_ptr_to_string(const_name).unwrap() };
 
-        // Store-backed graphs answer from the pre-resolved snapshot instead of running the
-        // in-memory resolver, which mutates gem nodes. `materialize-on-write` covers live edits, but
-        // a full `resolve` against the store would rewrite the whole snapshot.
-        // ponytail: this reimplements lexical-scope + ancestor-walk resolution separately from
-        // Resolver::resolve_constant. The two will diverge if the resolver's resolution rules
-        // change. Replace with a store-aware resolver when full resolution against store-backed
-        // graphs is needed.
+        // Store-backed graphs answer from the pre-resolved snapshot instead of running the in-memory
+        // resolver, which materializes the name chain it resolves through. Both paths share one
+        // resolution (`query::resolve_constant_read_only`), so the two cannot drift.
         #[cfg(feature = "redb-store")]
         if graph.is_store_backed() {
-            // A rooted name (`::Foo`) is top-level by definition: `name_from_nesting_names` maps the
-            // empty parent scope to `ParentScope::TopLevel`, which the resolver resolves against
-            // `Object`'s ancestors. Qualifying it with the nesting — or looking the id up with the root
-            // marker still attached, since declaration names never carry it — would answer `null` for a
-            // name the in-memory resolver finds.
-            let rooted = const_name.starts_with("::");
-            let const_name = const_name.trim_start_matches("::");
-
-            // 1. Lexical scope: try `nesting[..depth]::name` from innermost to top level.
-            let depths: Vec<usize> = if rooted {
-                vec![0]
-            } else {
-                (0..=nesting.len()).rev().collect()
-            };
-            for depth in depths {
-                let mut parts = nesting[..depth].to_vec();
-                parts.push(const_name.to_string());
-                let id = declaration_id_from_lookup_name(&parts.join("::"));
-                if let Some(decl) = graph.declaration(id) {
-                    return Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))).cast_const();
-                }
-            }
-            // 2. Inheritance: the constant may be defined in an ancestor (parent class / included
-            // module / concern) of an enclosing namespace. Walk each enclosing scope's ancestors —
-            // which for a rooted name is `Object` alone, the top-level scope.
-            let member = rubydex::model::ids::StringId::from(const_name);
-            let scopes: Vec<DeclarationId> = if rooted {
-                vec![*rubydex::model::built_in::OBJECT_ID]
-            } else {
-                (1..=nesting.len())
-                    .rev()
-                    .map(|depth| declaration_id_from_lookup_name(&nesting[..depth].join("::")))
-                    .collect()
-            };
-            for scope_id in scopes {
-                if let Ok(member_id) = rubydex::query::find_member_in_ancestors(graph, scope_id, member, false)
-                    && let Some(decl) = graph.declaration(member_id)
-                {
-                    return Box::into_raw(Box::new(CDeclaration::from_declaration(member_id, &decl))).cast_const();
-                }
-            }
-            return ptr::null();
+            let scopes = lexical_scope_ids(&nesting);
+            return query::resolve_constant_read_only(graph, &const_name, &scopes).map_or(ptr::null(), |id| {
+                graph.declaration(id).map_or(ptr::null(), |declaration| {
+                    Box::into_raw(Box::new(CDeclaration::from_declaration(id, &declaration))).cast_const()
+                })
+            });
         }
 
         let Some(tracked_name) = name_api::name_from_nesting_names(graph, &const_name, nesting) else {
@@ -357,6 +317,50 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
 
         resolve_constant_name(tracked_name)
     })
+}
+
+/// The declaration ids a `nesting` array names, outermost first. Nesting entries are written
+/// relative to the entry before them (`["A", "B::C"]` is `A::B::C`), and a rooted entry (`"::A"`)
+/// restarts at the top level. Used by the store-backed path, which resolves through declaration ids;
+/// the in-memory path hands the names to the resolver instead.
+#[cfg(feature = "redb-store")]
+fn lexical_scope_ids(nesting: &[String]) -> Vec<DeclarationId> {
+    let mut scopes = Vec::with_capacity(nesting.len());
+    let mut prefix = String::new();
+    for entry in nesting {
+        let entry = if let Some(rooted) = entry.strip_prefix("::") {
+            prefix.clear();
+            rooted
+        } else {
+            entry.as_str()
+        };
+        if !prefix.is_empty() && !entry.is_empty() {
+            prefix.push_str("::");
+        }
+        prefix.push_str(entry);
+        scopes.push(declaration_id_from_lookup_name(&prefix));
+    }
+    scopes
+}
+
+/// The lexical scopes a name sits in, outermost first: the name's own declaration last, the `nesting`
+/// chain it records above it (`class << Foo` inside `module Bar` is `[Bar, Foo::<Foo>]`). A name that
+/// never resolved is skipped, since it cannot be a scope; the resolution then starts one level out.
+#[cfg(feature = "redb-store")]
+fn lexical_scopes_of_name(graph: &Graph, name_id: NameId) -> Vec<DeclarationId> {
+    let mut scopes = Vec::new();
+    let mut current = Some(name_id);
+    while let Some(id) = current {
+        let Some(name) = graph.name(id) else {
+            break;
+        };
+        if let NameRef::Resolved(resolved) = &*name {
+            scopes.push(*resolved.declaration_id());
+        }
+        current = *name.nesting();
+    }
+    scopes.reverse();
+    scopes
 }
 
 /// Result of resolving a constant using a namespace definition as its lexical context.
@@ -403,6 +407,25 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant_from_definition(
             }
         };
 
+        // Same store-backed path as `rdx_graph_resolve_constant`: one resolution for both entry
+        // points, so a definition and a nesting cannot answer differently for the same scope.
+        #[cfg(feature = "redb-store")]
+        if graph.is_store_backed() {
+            let scopes = lexical_scopes_of_name(graph, nesting);
+            let declaration =
+                query::resolve_constant_read_only(graph, &const_name, &scopes).map_or(ptr::null(), |id| {
+                    graph.declaration(id).map_or(ptr::null(), |declaration| {
+                        Box::into_raw(Box::new(CDeclaration::from_declaration(id, &declaration))).cast_const()
+                    })
+                });
+            let status = if declaration.is_null() {
+                CDefinitionConstantResolution::NotFound
+            } else {
+                CDefinitionConstantResolution::Resolved
+            };
+            return CDefinitionConstantResolutionResult { status, declaration };
+        }
+
         let Some(tracked_name) = name_api::name_from_lexical_nesting(graph, &const_name, Some(nesting)) else {
             return CDefinitionConstantResolutionResult {
                 status: CDefinitionConstantResolution::NotFound,
@@ -425,11 +448,12 @@ fn class_or_module_definition_name_id(
     graph: &Graph,
     definition_id: DefinitionId,
 ) -> Result<NameId, CDefinitionConstantResolution> {
-    let Some(definition) = graph.definitions().get(&definition_id) else {
+    // Layered lookup: an unedited store-backed definition is not in the overlay.
+    let Some(definition) = graph.definition(definition_id) else {
         return Err(CDefinitionConstantResolution::DefinitionNotFound);
     };
 
-    match definition {
+    match &*definition {
         Definition::Class(definition) => Ok(*definition.name_id()),
         Definition::SingletonClass(definition) => Ok(*definition.name_id()),
         Definition::Module(definition) => Ok(*definition.name_id()),

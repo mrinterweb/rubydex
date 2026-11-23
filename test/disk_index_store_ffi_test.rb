@@ -32,6 +32,94 @@ class DiskIndexStoreFfiTest < Minitest::Test
     super
   end
 
+  # `resolve_constant` answers from the store snapshot with the same read-only resolution the
+  # in-memory graph runs, from a nesting array and from a definition alike. Before that, the
+  # store-backed path reimplemented resolution and answered null for store-backed definitions.
+  def test_resolve_constant_matches_the_in_memory_graph
+    source = <<~RUBY
+      module Foo
+        OUTER_CONST = 1
+
+        class Bar
+          INNER_CONST = 2
+
+          class << self
+            SINGLETON_CONST = 3
+          end
+        end
+      end
+    RUBY
+    memory, disk = two_graphs_over(source)
+
+    cases = [
+      ["OUTER_CONST", ["Foo"]],
+      ["OUTER_CONST", ["Foo", "Bar"]],
+      ["INNER_CONST", ["Foo", "Bar"]],
+      ["Bar", ["Foo"]],
+      ["::Bar", ["Foo"]],
+      ["Foo::Bar", []],
+      ["Kernel", ["Foo"]],
+    ]
+    cases.each do |name, nesting|
+      expected = memory.resolve_constant(name, nesting)&.name
+      actual = disk.resolve_constant(name, nesting)&.name
+      label = "resolve_constant(#{name.inspect}, #{nesting.inspect})"
+      expected.nil? ? assert_nil(actual, label) : assert_equal(expected, actual, label)
+    end
+
+    overlay = memory.documents.find { |document| document.uri.end_with?("foo.rb") }.definitions.to_a
+    stored = disk.documents.find { |document| document.uri.end_with?("foo.rb") }.definitions.to_a
+    assert_equal(overlay.map(&:name), stored.map(&:name), "the store holds the same definitions")
+    overlay.zip(stored).each do |overlay_definition, stored_definition|
+      ["OUTER_CONST", "INNER_CONST", "SINGLETON_CONST", "Bar"].each do |name|
+        expected = begin
+          memory.resolve_constant(name, overlay_definition)&.name
+        rescue TypeError
+          :invalid_kind
+        end
+        actual = begin
+          disk.resolve_constant(name, stored_definition)&.name
+        rescue TypeError
+          :invalid_kind
+        end
+        label = "#{overlay_definition.name}: resolve_constant(#{name.inspect})"
+        expected.nil? ? assert_nil(actual, label) : assert_equal(expected, actual, label)
+      end
+    end
+  end
+
+  def test_check_integrity_checks_the_store_backed_declarations
+    memory, disk = two_graphs_over("module Foo\n  class Bar\n  end\nend\n")
+
+    assert_empty(disk.check_integrity, "a store this process wrote has no integrity errors")
+    assert_equal(memory.check_integrity, disk.check_integrity)
+  end
+
+  # Writes `source` into the workspace, persists it to a store from one graph, and returns the
+  # in-memory graph and a graph attached to that store.
+  def two_graphs_over(source)
+    File.write(File.join(@workspace, "foo.rb"), source)
+
+    builder = Rubydex::Graph.configure_for_workspace(@workspace)
+    builder.index_all([File.join(@workspace, "foo.rb")])
+    builder.resolve
+    store = File.join(@tmp, "index.redb")
+    builder.build_store(store)
+    builder.detach_store
+
+    memory = Rubydex::Graph.configure_for_workspace(@workspace)
+    @graphs << memory
+    memory.index_all([File.join(@workspace, "foo.rb")])
+    memory.resolve
+
+    disk = Rubydex::Graph.configure_for_workspace(@workspace)
+    @graphs << disk
+    disk.attach_store(store)
+    disk.resolve
+
+    [memory, disk]
+  end
+
   def test_store_reads_round_trip_through_the_ffi
     memory = Rubydex::Graph.configure_for_workspace(@workspace)
     # Just the two fixture files: `workspace_paths` would pull in every gem the workspace resolves.

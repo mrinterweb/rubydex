@@ -11,7 +11,9 @@ use crate::model::definitions::{Definition, Parameter};
 use crate::model::document::require_path_for_uri;
 use crate::model::graph::Graph;
 use crate::model::identity_maps::IdentityHashSet;
-use crate::model::ids::{ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId, UriId};
+use crate::model::ids::{
+    ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId, UriId, declaration_id_from_lookup_name,
+};
 use crate::model::keywords::{self, Keyword};
 use crate::model::name::NameRef;
 use crate::model::visibility::Visibility;
@@ -825,6 +827,87 @@ pub fn find_member_in_ancestors(
     }
 
     Err(FindMemberError::MemberNotFound)
+}
+
+/// Resolves a constant from a lexical scope the way `Resolver::resolve_constant` does, without
+/// materializing anything: no name is interned, nothing is recorded on the graph and no work is
+/// queued, so a store-backed snapshot can answer a `resolve_constant` call without growing the
+/// overlay above it.
+///
+/// `scopes` is the lexical nesting, outermost first, as declaration ids (the enclosing
+/// `Module.nesting`); the top-level scope, `Object`, is always searched last whatever the nesting.
+/// `name` is the constant as written: `"Foo"`, `"Foo::Bar"`, or a rooted `"::Foo"`, which skips the
+/// nesting entirely.
+///
+/// A qualified name is resolved segment by segment — `A::B` resolves `B` in `A` rather than looking
+/// up a joined string — so an inherited prefix (`A` found on a scope's ancestor chain) and a
+/// constant alias (`ALIAS::B`, `ALIAS = A`) reach the same declaration the resolver finds.
+#[must_use]
+pub fn resolve_constant_read_only(graph: &Graph, name: &str, scopes: &[DeclarationId]) -> Option<DeclarationId> {
+    let rooted = name.starts_with("::");
+    let segments: Vec<&str> = name
+        .trim_start_matches("::")
+        .split("::")
+        .filter(|part| !part.is_empty())
+        .collect();
+    let (first, rest) = segments.split_first()?;
+
+    let mut declaration = if rooted {
+        member_of(graph, *OBJECT_ID, first)?
+    } else {
+        resolve_lexically(graph, scopes, first)?
+    };
+
+    for segment in rest {
+        declaration = member_of(graph, declaration, segment)?;
+    }
+
+    Some(declaration)
+}
+
+/// Searches `Module.nesting`, innermost first, for `name`: first each scope's own constants, and only
+/// then the innermost scope's ancestors and the top level. The order matters — `class Bar` nested in
+/// `module Foo` has `Object` in its ancestor chain, so searching ancestors first would answer the
+/// top-level `Bar` where Ruby answers `Foo::Bar`.
+fn resolve_lexically(graph: &Graph, scopes: &[DeclarationId], name: &str) -> Option<DeclarationId> {
+    for &scope in scopes.iter().rev() {
+        if let Some(declaration) = own_member(graph, scope, name) {
+            return Some(declaration);
+        }
+    }
+    let inherited = scopes
+        .last()
+        .and_then(|innermost| inherited_member(graph, *innermost, name));
+    inherited.or_else(|| own_member(graph, *OBJECT_ID, name))
+}
+
+/// Looks `name` up as a member of `owner` or of one of its ancestors. The owner is a namespace or an
+/// alias for one (`ALIAS = A`, then `ALIAS::CONST`).
+fn member_of(graph: &Graph, owner: DeclarationId, name: &str) -> Option<DeclarationId> {
+    let owner = graph.resolve_alias(&owner).unwrap_or(owner);
+    if !graph.is_namespace(&owner) {
+        return None;
+    }
+
+    own_member(graph, owner, name).or_else(|| inherited_member(graph, owner, name))
+}
+
+/// A member the declaration owns, by fully qualified name. A top-level declaration (`Object`'s) is
+/// named without its owner.
+fn own_member(graph: &Graph, owner: DeclarationId, name: &str) -> Option<DeclarationId> {
+    let qualified = if owner == *OBJECT_ID {
+        name.to_string()
+    } else {
+        format!("{}::{name}", graph.declaration(owner)?.name())
+    };
+    let id = declaration_id_from_lookup_name(&qualified);
+    graph.declaration(id).map(|_| id)
+}
+
+/// A member the declaration inherits from its ancestors, which is also how a class body reaches the
+/// top level (`Object`'s own constants).
+fn inherited_member(graph: &Graph, owner: DeclarationId, name: &str) -> Option<DeclarationId> {
+    find_member_in_ancestors(graph, owner, StringId::from(name), true).ok()
 }
 
 /// Reasons [`follow_method_alias`] could not produce a target declaration.
@@ -4306,5 +4389,76 @@ mod tests {
         names.sort();
 
         assert_eq!(names, vec!["LiveUnused".to_string(), "Unused".to_string()]);
+    }
+
+    #[test]
+    fn resolve_constant_read_only_searches_the_lexical_scopes_innermost_first() {
+        let mut graph = GraphTest::new();
+        graph.index_uri(
+            "file:///foo.rb",
+            "class Foo
+               BAR = 1
+
+               class Baz
+                 def run
+                   BAR
+                 end
+               end
+             end
+            ",
+        );
+        graph.resolve();
+
+        let scopes = [DeclarationId::from("Foo"), DeclarationId::from("Foo::Baz")];
+        assert_eq!(
+            Some(DeclarationId::from("Foo::BAR")),
+            resolve_constant_read_only(graph.graph(), "BAR", &scopes),
+            "an inherited constant is found through the scope's ancestors"
+        );
+    }
+
+    #[test]
+    fn resolve_constant_read_only_falls_back_to_the_top_level() {
+        let mut graph = GraphTest::new();
+        graph.index_uri("file:///foo.rb", "class Foo\n  class Baz\n  end\nend\nTOP = 1\n");
+        graph.resolve();
+
+        let scopes = [DeclarationId::from("Foo"), DeclarationId::from("Foo::Baz")];
+        assert_eq!(
+            Some(DeclarationId::from("TOP")),
+            resolve_constant_read_only(graph.graph(), "TOP", &scopes),
+            "a module body still sees a top-level constant"
+        );
+        assert_eq!(
+            Some(DeclarationId::from("TOP")),
+            resolve_constant_read_only(graph.graph(), "::TOP", &scopes),
+            "a rooted name is the same lookup from the top level"
+        );
+    }
+
+    #[test]
+    fn resolve_constant_read_only_resolves_a_qualified_prefix() {
+        let mut graph = GraphTest::new();
+        graph.index_uri("file:///foo.rb", "class Foo\n  BAR = 1\nend\n");
+        graph.resolve();
+
+        assert_eq!(
+            Some(DeclarationId::from("Foo::BAR")),
+            resolve_constant_read_only(graph.graph(), "Foo::BAR", &[DeclarationId::from("Foo")]),
+            "the written prefix resolves, so the qualified name does not become Foo::Foo::BAR"
+        );
+    }
+
+    #[test]
+    fn resolve_constant_read_only_follows_a_constant_alias() {
+        let mut graph = GraphTest::new();
+        graph.index_uri("file:///foo.rb", "class Foo\n  BAR = 1\nend\nALIAS = Foo\n");
+        graph.resolve();
+
+        assert_eq!(
+            Some(DeclarationId::from("Foo::BAR")),
+            resolve_constant_read_only(graph.graph(), "ALIAS::BAR", &[]),
+            "a constant reached through an alias resolves to the target's own declaration"
+        );
     }
 }
