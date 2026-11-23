@@ -53,15 +53,13 @@ static VALUE document_definitions_ensure(VALUE args) {
     return Qnil;
 }
 
-// Size function for the Document#definitions enumerator
+// Size function for the Document#definitions enumerator. Counts the recorded ids instead of
+// building the enumerator, which would decode every definition of the document from the store.
 static VALUE document_definitions_size(VALUE self, VALUE _args, VALUE _eobj) {
     HandleData *data;
     void *graph = rdxi_graph_from_handle(self, &data);
-    struct DefinitionsIter *iter = rdx_document_definitions_iter_new(graph, data->id);
-    size_t len = rdx_definitions_iter_len(iter);
-    rdx_definitions_iter_free(iter);
 
-    return SIZET2NUM(len);
+    return SIZET2NUM(rdx_document_definitions_len(graph, data->id));
 }
 
 /*

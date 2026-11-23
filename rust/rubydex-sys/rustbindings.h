@@ -851,10 +851,6 @@ const struct CDeclaration *rdx_declaration_member(GraphPointer pointer,
  *
  * # Safety
  * - `member` must be a valid, null-terminated UTF-8 string
- *
- * # Panics
- *
- * Will panic if there's inconsistent graph data
  */
 const struct CDeclaration *rdx_declaration_find_member(GraphPointer pointer,
                                                        uint64_t declaration_id,
@@ -1218,10 +1214,6 @@ const uint64_t *rdx_definition_document(GraphPointer pointer, uint64_t definitio
  * # Safety
  * - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
  * - `definition_id` must be a valid definition id for a `MethodAliasDefinition`.
- *
- * # Panics
- * Panics on graph inconsistencies (the definition is not a method alias, or the alias resolved to a non-method
- * declaration).
  */
 struct CMethodAliasTargetResult rdx_method_alias_definition_target(GraphPointer pointer,
                                                                    uint64_t definition_id);
@@ -1297,6 +1289,16 @@ const char *rdx_document_uri(GraphPointer pointer, uint64_t uri_id);
  */
 struct DefinitionsIter *rdx_document_definitions_iter_new(GraphPointer pointer,
                                                           uint64_t uri_id);
+
+/**
+ * Returns the number of definitions recorded for a document, without materializing them. Counting
+ * through the iterator would decode every definition of the document from the store first.
+ *
+ * # Safety
+ *
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+size_t rdx_document_definitions_len(GraphPointer pointer, uint64_t uri_id);
 
 /**
  * Creates a new iterator over method reference IDs for a given document by snapshotting the current set of IDs.
@@ -1624,6 +1626,22 @@ struct DocumentsIter *rdx_graph_documents_iter_new(GraphPointer pointer);
  * - `name` must be a valid, null-terminated UTF-8 string
  */
 const struct CDeclaration *rdx_graph_get_declaration(GraphPointer pointer, const char *name);
+
+/**
+ * Returns the number of constant references the graph can enumerate, without materializing them.
+ *
+ * # Safety
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+size_t rdx_graph_constant_references_count(GraphPointer pointer);
+
+/**
+ * Returns the number of method references the graph can enumerate, without materializing them.
+ *
+ * # Safety
+ * - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+ */
+size_t rdx_graph_method_references_count(GraphPointer pointer);
 
 /**
  * Creates a new iterator over constant references by snapshotting the current set of IDs.

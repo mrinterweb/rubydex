@@ -923,6 +923,31 @@ impl Graph {
         Vec::new()
     }
 
+    /// Number of constant references the graph can enumerate, without decoding one: the store's id
+    /// table is read from the key side and overlay-shadowed ids are skipped, which is exactly the
+    /// set [`Self::for_each_store_constant_reference_with_name`] visits. Counting through the
+    /// enumerator instead pays a name and definition lookup per reference.
+    #[must_use]
+    pub fn constant_reference_count(&self) -> usize {
+        self.constant_references.len()
+            + self
+                .store_constant_reference_ids()
+                .iter()
+                .filter(|id| !self.constant_references.contains_key(*id))
+                .count()
+    }
+
+    /// Number of method references the graph can enumerate — see [`Self::constant_reference_count`].
+    #[must_use]
+    pub fn method_reference_count(&self) -> usize {
+        self.method_references.len()
+            + self
+                .store_method_reference_ids()
+                .iter()
+                .filter(|id| !self.method_references.contains_key(*id))
+                .count()
+    }
+
     /// `(uri_id, URI)` pairs for all documents held by the disk store. Empty when no store is
     /// attached. Used by require-path resolution and completion to cover store-backed documents.
     #[cfg(feature = "redb-store")]

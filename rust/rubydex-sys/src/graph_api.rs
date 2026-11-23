@@ -829,6 +829,24 @@ pub unsafe extern "C" fn rdx_graph_get_declaration(pointer: GraphPointer, name: 
     })
 }
 
+/// Returns the number of constant references the graph can enumerate, without materializing them.
+///
+/// # Safety
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_constant_references_count(pointer: GraphPointer) -> usize {
+    with_graph(pointer, Graph::constant_reference_count)
+}
+
+/// Returns the number of method references the graph can enumerate, without materializing them.
+///
+/// # Safety
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_method_references_count(pointer: GraphPointer) -> usize {
+    with_graph(pointer, Graph::method_reference_count)
+}
+
 /// Creates a new iterator over constant references by snapshotting the current set of IDs.
 ///
 /// # Safety

@@ -363,16 +363,13 @@ static VALUE rdxr_graph_aref(VALUE self, VALUE key) {
     return rb_class_new_instance(2, argv, decl_class);
 }
 
-// Size function for the constant_references enumerator
+// Size function for the constant_references enumerator. Counts ids instead of building the
+// enumerator, which resolves a name and a declaration per reference.
 static VALUE graph_constant_references_size(VALUE self, VALUE _args, VALUE _eobj) {
     void *graph;
     TypedData_Get_Struct(self, void *, &graph_type, graph);
 
-    struct ConstantReferencesIter *iter = rdx_graph_constant_references_iter_new(graph);
-    size_t len = rdx_constant_references_iter_len(iter);
-    rdx_constant_references_iter_free(iter);
-
-    return SIZET2NUM(len);
+    return SIZET2NUM(rdx_graph_constant_references_count(graph));
 }
 
 /*
@@ -397,16 +394,13 @@ static VALUE rdxr_graph_constant_references(VALUE self) {
     return self;
 }
 
-// Size function for the method_references enumerator
+// Size function for the method_references enumerator. Counts ids instead of building the
+// enumerator, which interns a name per reference and scans the whole store.
 static VALUE graph_method_references_size(VALUE self, VALUE _args, VALUE _eobj) {
     void *graph;
     TypedData_Get_Struct(self, void *, &graph_type, graph);
 
-    struct MethodReferencesIter *iter = rdx_graph_method_references_iter_new(graph);
-    size_t len = rdx_method_references_iter_len(iter);
-    rdx_method_references_iter_free(iter);
-
-    return SIZET2NUM(len);
+    return SIZET2NUM(rdx_graph_method_references_count(graph));
 }
 
 /*

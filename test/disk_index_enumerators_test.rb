@@ -54,6 +54,25 @@ class DiskIndexEnumeratorsTest < Minitest::Test
     )
   end
 
+  # `codebase_stats` needs lengths, not payloads: the enumerator size paths count store ids instead
+  # of decoding every definition, constant reference and method reference to count them.
+  def test_enumerator_sizes_match_the_enumerated_counts
+    disk = Rubydex::Graph.configure_for_workspace(@workspace)
+    disk.index_workspace
+    disk.resolve
+    memory = build_memory_graph
+
+    assert_equal(memory.constant_references.count, disk.constant_references.size, "constant references")
+    assert_equal(memory.method_references.count, disk.method_references.size, "method references")
+
+    store_document = disk.documents.find { |document| document.uri.end_with?("foo.rb") }
+    overlay_document = memory.documents.find { |document| document.uri.end_with?("foo.rb") }
+    refute_nil(store_document)
+    assert_equal(overlay_document.definitions.count, store_document.definitions.size, "definitions")
+  ensure
+    detach_if_store_backed(disk)
+  end
+
   def test_get_file_declarations_finds_a_store_backed_document
     disk = Rubydex::Graph.configure_for_workspace(@workspace)
     disk.index_workspace

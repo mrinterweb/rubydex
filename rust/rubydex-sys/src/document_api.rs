@@ -85,6 +85,21 @@ pub unsafe extern "C" fn rdx_document_definitions_iter_new(pointer: GraphPointer
     })
 }
 
+/// Returns the number of definitions recorded for a document, without materializing them. Counting
+/// through the iterator would decode every definition of the document from the store first.
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_document_definitions_len(pointer: GraphPointer, uri_id: u64) -> usize {
+    with_graph(pointer, |graph| {
+        graph
+            .document(UriId::new(uri_id))
+            .map_or(0, |document| document.definitions().len())
+    })
+}
+
 /// Creates a new iterator over method reference IDs for a given document by snapshotting the current set of IDs.
 ///
 /// # Safety
