@@ -321,10 +321,16 @@ impl Graph {
         add_built_in_data(self);
     }
 
-    /// Monotonic counter bumped whenever a document is deleted or the backing store changes.
+    /// Monotonic counter bumped whenever a document is deleted, the backing store changes, or the
+    /// graph is resolved; FFI layers key their derived caches on it.
     #[must_use]
     pub const fn mutation_epoch(&self) -> u64 {
         self.mutation_epoch
+    }
+
+    /// Invalidates every cache derived from graph contents.
+    pub fn bump_mutation_epoch(&mut self) {
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
     }
 
     /// Empties every in-memory node map, the tombstones and the edge ledgers, and resets the store
@@ -332,7 +338,7 @@ impl Graph {
     /// they would hide edges that legitimately exist again (a restored file, a branch toggle).
     #[cfg(feature = "redb-store")]
     fn clear_overlay(&mut self) {
-        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+        self.bump_mutation_epoch();
         self.declarations = IdentityHashMap::default();
         self.definitions = IdentityHashMap::default();
         self.documents = IdentityHashMap::default();

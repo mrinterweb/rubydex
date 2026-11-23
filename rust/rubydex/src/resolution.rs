@@ -124,6 +124,10 @@ impl<'a> Resolver<'a> {
     ///
     /// Can panic if there's inconsistent data in the graph
     pub fn resolve(&mut self) {
+        // Resolution is the only step that can change ancestor chains, so it invalidates the
+        // derived caches the FFI layer keys on the graph's mutation epoch (ancestors, method
+        // reference names).
+        self.graph.bump_mutation_epoch();
         let other_ids = self.prepare_units();
 
         loop {

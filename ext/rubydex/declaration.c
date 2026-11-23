@@ -242,6 +242,64 @@ static VALUE rdxr_declaration_owner(VALUE self) {
     return rb_class_new_instance(2, argv, decl_class);
 }
 
+// Ancestor chains are the most expensive read on a store-backed graph: each ancestor is its own
+// `redb` point read (a bucket decode), which is ~1.5 ms, and a Rails model has ~77 of them.
+// `ruby-lsp`'s Find References asks for the same receiver's ancestors once per matching reference,
+// so one request paid that tens of times (~29 s on Discourse). Cache the resolved handles on the
+// graph object, keyed by declaration id and invalidated by the graph's mutation epoch (bumped by
+// resolution, document deletion and store swap).
+#define ANCESTORS_CACHE_LIMIT 4096
+
+static ID id_ancestors_cache;
+static ID id_ancestors_cache_epoch;
+
+// Builds the ancestor handles once, outside any `rb_yield`, so a raising block cannot leak the Rust
+// iterator.
+static VALUE collect_ancestor_handles(void *graph, VALUE graph_obj, uint64_t decl_id) {
+    VALUE handles = rb_ary_new();
+    void *iter = rdx_declaration_ancestors(graph, decl_id);
+    if (iter == NULL) {
+        return handles;
+    }
+
+    CDeclaration decl;
+    while (rdx_graph_declarations_iter_next(iter, &decl)) {
+        VALUE decl_class = rdxi_declaration_class_for_kind(decl.kind);
+        VALUE argv[] = {graph_obj, ULL2NUM(decl.id)};
+        rb_ary_push(handles, rb_class_new_instance(2, argv, decl_class));
+    }
+    rdx_graph_declarations_iter_free(iter);
+
+    return handles;
+}
+
+static VALUE cached_ancestor_handles(void *graph, VALUE graph_obj, uint64_t decl_id) {
+    uint64_t epoch = rdx_graph_mutation_epoch(graph);
+    VALUE stored_epoch = rb_ivar_get(graph_obj, id_ancestors_cache_epoch);
+    if (NIL_P(stored_epoch) || NUM2ULL(stored_epoch) != epoch) {
+        rb_ivar_set(graph_obj, id_ancestors_cache_epoch, ULL2NUM(epoch));
+        rb_ivar_set(graph_obj, id_ancestors_cache, rb_hash_new());
+    }
+
+    VALUE cache = rb_ivar_get(graph_obj, id_ancestors_cache);
+    if (!RB_TYPE_P(cache, T_HASH)) {
+        cache = rb_hash_new();
+        rb_ivar_set(graph_obj, id_ancestors_cache, cache);
+    }
+
+    VALUE key = ULL2NUM(decl_id);
+    VALUE handles = rb_hash_lookup2(cache, key, Qundef);
+    if (handles == Qundef) {
+        handles = collect_ancestor_handles(graph, graph_obj, decl_id);
+        // Bounded: a full graph walk must not pin every chain in the session.
+        if (RHASH_SIZE(cache) < ANCESTORS_CACHE_LIMIT) {
+            rb_hash_aset(cache, key, handles);
+        }
+    }
+
+    return handles;
+}
+
 /*
  * call-seq:
  *   ancestors -> Enumerator[Rubydex::Namespace]
@@ -256,14 +314,12 @@ static VALUE rdxr_declaration_ancestors(VALUE self) {
     HandleData *data;
     void *graph = rdxi_graph_from_handle(self, &data);
 
-    void *iter = rdx_declaration_ancestors(graph, data->id);
-    if (iter == NULL) {
-        rb_raise(rb_eRuntimeError, "failed to create iterator");
+    VALUE handles = cached_ancestor_handles(graph, data->graph_obj, data->id);
+    for (long i = 0; i < RARRAY_LEN(handles); i++) {
+        rb_yield(rb_ary_entry(handles, i));
     }
 
-    VALUE args = rb_ary_new_from_args(2, data->graph_obj, ULL2NUM((uintptr_t)iter));
-    rb_ensure(rdxi_declarations_yield, args, rdxi_declarations_ensure, args);
-
+    RB_GC_GUARD(handles);
     return self;
 }
 
@@ -492,6 +548,8 @@ void rdxi_initialize_declaration(VALUE mRubydex) {
     rb_define_method(cNamespace, "member", rdxr_declaration_member, 1);
     rb_define_method(cNamespace, "find_member", rdxr_declaration_find_member, -1);
     rb_define_method(cNamespace, "singleton_class", rdxr_declaration_singleton_class, 0);
+    id_ancestors_cache = rb_intern("@ancestors_cache");
+    id_ancestors_cache_epoch = rb_intern("@ancestors_cache_epoch");
     rb_define_method(cNamespace, "ancestors", rdxr_declaration_ancestors, 0);
     rb_define_method(cNamespace, "descendants", rdxr_declaration_descendants, 0);
     rb_define_method(cNamespace, "members", rdxr_declaration_members, 0);
