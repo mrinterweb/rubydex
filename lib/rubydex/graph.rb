@@ -312,6 +312,29 @@ module Rubydex
       nil
     end
 
+    # Returns all workspace paths that should be indexed
+    #
+    #: -> Array[String]
+    def workspace_paths
+      paths = []
+      root = workspace_path
+
+      Dir.each_child(root) do |entry|
+        full_path = File.join(root, entry)
+
+        if File.directory?(full_path) || INDEXABLE_EXTENSIONS.include?(File.extname(entry))
+          paths << full_path
+        end
+      end
+
+      add_workspace_dependency_paths(paths)
+      add_core_rbs_definition_paths(paths)
+      paths.uniq!
+      paths
+    end
+
+    private
+
     # Files to re-index/delete to move this session from @applied_files to `scan`, or nil when a full
     # rebuild is required (no manifest, lockfile changed, or the diff exceeds REBUILD_DIFF_RATIO).
     #: (Hash[String, String]) -> Hash[Symbol, Array[String]]?
@@ -519,29 +542,6 @@ module Rubydex
       end
       true
     end
-
-    # Returns all workspace paths that should be indexed
-    #
-    #: -> Array[String]
-    def workspace_paths
-      paths = []
-      root = workspace_path
-
-      Dir.each_child(root) do |entry|
-        full_path = File.join(root, entry)
-
-        if File.directory?(full_path) || INDEXABLE_EXTENSIONS.include?(File.extname(entry))
-          paths << full_path
-        end
-      end
-
-      add_workspace_dependency_paths(paths)
-      add_core_rbs_definition_paths(paths)
-      paths.uniq!
-      paths
-    end
-
-    private
 
     # Whether the disk-backed (low-resident-memory) index is enabled for this process. The env
     # var wins when set — so CI and one-off runs can flip it without editing the committed

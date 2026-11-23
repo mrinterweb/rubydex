@@ -454,6 +454,44 @@ module Rubydex::Linter::Helpers::SourceAccessHelpers
 end
 
 # Base class for semantic lint rules, which collect their diagnostics by walking a resolved graph.
+# The machine-wide background index manager. A session registers its workspace and store and keeps an
+# exclusive OS lock on its registry file for its whole lifetime; the manager binary watches the
+# registered workspaces and keeps their stores fresh between sessions. Sessions never depend on it.
+class Rubydex::IndexManager
+  class << self
+    # The indexer the manager spawns: a Ruby process that refreshes one store and exits, so the
+    # build's peak memory is reclaimed by a process that exits.
+    sig { params(workspace: String, store: String).returns(T::Array[String]) }
+    def builder_argv(workspace, store); end
+
+    # The manager binary shipped next to the extension.
+    sig { returns(String) }
+    def manager_binary; end
+
+    # Starts the manager unless a live one already holds its lock.
+    sig { params(registry: String).void }
+    def launch_if_absent(registry); end
+
+    # Registers this session under `registry`, holding the returned handle's lock for the session's
+    # lifetime; the manager treats a registry file whose lock it can take as a dead session.
+    sig do
+      params(
+        workspace: String,
+        store: String,
+        builder: T::Array[String],
+        docs: Integer,
+        registry: String,
+      ).returns(File)
+    end
+    def register(workspace:, store:, builder:, docs:, registry:); end
+
+    # Ends every registered session in this process: closes the handles (releasing the OS locks) and
+    # removes the registry files.
+    sig { void }
+    def release_all; end
+  end
+end
+
 class Rubydex::Linter::CustomRule < Rubydex::Rule
   abstract!
 
@@ -730,6 +768,11 @@ class Rubydex::Graph
     # different tools, do not use this. Create and own a `Config` object instead.
     sig { params(workspace_path: String).returns(T.attached_class) }
     def configure_for_workspace(workspace_path); end
+
+    # Layout version of the persisted store. `0` means this build has no `redb-store` feature, so
+    # nothing is ever persisted; the disk-backed index is then unavailable rather than optional.
+    sig { returns(Integer) }
+    def store_format_version; end
   end
 
   sig { params(fully_qualified_name: String).returns(T.nilable(Rubydex::Declaration)) }
@@ -819,6 +862,54 @@ class Rubydex::Graph
 
   sig { returns(T::Enumerable[Rubydex::Declaration]) }
   def dead_code_candidates; end
+
+  # Number of store reads that failed since the graph was created or last attached a store. Non-zero
+  # means the disk index answered with holes, so the session must fall back to the in-memory index.
+  sig { returns(Integer) }
+  def store_errors; end
+
+  # Whether the workspace's `[disk_index] enabled` setting asks for the disk-backed index, as written
+  # in the configuration (the environment override is layered on top by `#disk_index_enabled?`).
+  sig { returns(T::Boolean) }
+  def disk_index_enabled; end
+
+  # The workspace's `[disk_index] location` setting: `"tmp"`, `"global"`, `""` for the default, or an
+  # absolute directory.
+  sig { returns(String) }
+  def disk_index_location; end
+
+  # Whether the workspace's `[disk_index] manager` setting asks for the machine-wide background
+  # index manager.
+  sig { returns(T::Boolean) }
+  def disk_index_manager; end
+
+  # Converts an absolute file path into the `file://` URI the graph keys documents by, or nil when the
+  # path cannot be represented.
+  sig { params(path: String).returns(T.nilable(String)) }
+  def path_to_uri(path); end
+
+  # Moves this session to the current source state, cheapest route first: a fresh marker means
+  # nothing changed, a small diff is applied to the overlay, and anything larger rebuilds the store
+  # once for every session. Leaves the graph resolved. `store` overrides the store path computed from
+  # this process's configuration, which is what the background index manager passes: it runs without
+  # the session's environment.
+  sig { params(store: T.nilable(String)).returns(T::Boolean) }
+  def refresh_if_stale(store = nil); end
+
+  # Moves an untrustworthy store (see `#store_errors`) out of the cache path and detaches it so the
+  # next `#index_all` really indexes in memory. Returns whether it quarantined anything.
+  sig { params(cache: T.nilable(String)).returns(T::Boolean) }
+  def quarantine_if_untrustworthy(cache = nil); end
+
+  # What runs before every MCP tool call: quarantine a store that started reporting read failures,
+  # then move to the current source state. Returns whether the session moved.
+  sig { returns(T::Boolean) }
+  def prepare_for_tool_call; end
+
+  # Registers this session with the machine-wide index manager so its workspace is watched between
+  # sessions. A no-op unless the workspace opted in (`[disk_index] manager` or RUBYDEX_INDEX_MANAGER).
+  sig { params(cache: String).void }
+  def register_session(cache); end
 
   sig { params(encoding: String).void }
   def encoding=(encoding); end
