@@ -982,6 +982,7 @@ impl<'a> Resolver<'a> {
                 attached_id,
             )))),
         );
+        self.graph.clear_declaration_tombstone(decl_id);
 
         self.schedule_singleton_ancestors(decl_id, mode);
 
@@ -1452,6 +1453,9 @@ impl<'a> Resolver<'a> {
 
         // Layered check: the declaration may already exist in the store, not just the overlay.
         if self.graph.declaration(declaration_id).is_none() {
+            // A Todo re-created for an id a live edit deleted has to lose the tombstone, or the
+            // layered lookup keeps answering that the declaration is gone.
+            self.graph.clear_declaration_tombstone(declaration_id);
             self.graph.declarations_mut().insert(
                 declaration_id,
                 Declaration::Namespace(Namespace::Todo(Box::new(TodoDeclaration::new(
@@ -1459,6 +1463,9 @@ impl<'a> Resolver<'a> {
                     parent_owner_id,
                 )))),
             );
+            // A Todo re-created for an id a live edit deleted has to lose the tombstone, or the
+            // layered lookup keeps answering that the declaration is gone.
+            self.graph.clear_declaration_tombstone(declaration_id);
             self.graph.add_member(&parent_owner_id, declaration_id, parent_str_id);
             // A namespace is the first entry of its own ancestor chain, and member lookups only walk that chain. Without
             // enqueueing this, the Todo keeps an empty `Partial` chain and none of its members can ever be found

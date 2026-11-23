@@ -526,6 +526,19 @@ impl Graph {
         self.removed.insert((kind, id));
     }
 
+    /// Clears the tombstone of a declaration that is back in the overlay: a delete followed by a
+    /// re-create of the same id (a restored file, a branch toggle) or a store-backed declaration
+    /// that resolution re-created. Without it the materialize paths keep treating the node as
+    /// deleted and the layered accessors keep skipping a node that exists again.
+    #[cfg(feature = "redb-store")]
+    pub fn clear_declaration_tombstone(&mut self, id: DeclarationId) {
+        self.removed.remove(&(TombstoneKind::Declaration, id.get()));
+    }
+
+    #[cfg(not(feature = "redb-store"))]
+    #[allow(clippy::unused_self)]
+    pub fn clear_declaration_tombstone(&mut self, _id: DeclarationId) {}
+
     /// Whether a node's raw ID was tombstoned by a live edit while a store is attached.
     #[cfg(feature = "redb-store")]
     #[must_use]
@@ -1238,6 +1251,11 @@ impl Graph {
                 vacant_entry.insert(declaration);
             }
         }
+
+        // Cleared only now that the overlay holds the declaration: the tombstone also suppresses
+        // materializing the store's stale copy above, which would otherwise merge the definitions a
+        // live edit removed back into the declaration just re-created.
+        self.clear_declaration_tombstone(declaration_id);
 
         declaration_id
     }
@@ -2085,10 +2103,17 @@ impl Graph {
         if self.documents.insert(uri_id, document).is_some() {
             debug_assert!(false, "UriId collision in global graph");
         }
+        // The document is back (a restored file, a branch toggle), so the tombstone a delete left
+        // must not keep the layered document lookup and the store scans skipping it.
+        #[cfg(feature = "redb-store")]
+        self.removed.remove(&(TombstoneKind::Document, uri_id.get()));
 
         for (string_id, string_ref) in strings {
             #[cfg(feature = "redb-store")]
-            self.materialize_string(string_id);
+            {
+                self.removed.remove(&(TombstoneKind::String, string_id.get()));
+                self.materialize_string(string_id);
+            }
             match self.strings.entry(string_id) {
                 Entry::Occupied(mut entry) => {
                     debug_assert!(*string_ref == **entry.get(), "StringId collision in global graph");
@@ -2102,7 +2127,10 @@ impl Graph {
 
         for (name_id, name_ref) in names {
             #[cfg(feature = "redb-store")]
-            self.materialize_name(name_id);
+            {
+                self.removed.remove(&(TombstoneKind::Name, name_id.get()));
+                self.materialize_name(name_id);
+            }
             match self.names.entry(name_id) {
                 Entry::Occupied(mut entry) => {
                     debug_assert!(*entry.get() == name_ref, "NameId collision in global graph");
@@ -2118,11 +2146,16 @@ impl Graph {
             if self.definitions.insert(definition_id, definition).is_some() {
                 debug_assert!(false, "DefinitionId collision in global graph");
             }
+            #[cfg(feature = "redb-store")]
+            self.removed.remove(&(TombstoneKind::Definition, definition_id.get()));
 
             self.push_work(Unit::Definition(definition_id));
         }
 
         for (constant_ref_id, constant_ref) in constant_references {
+            #[cfg(feature = "redb-store")]
+            self.removed
+                .remove(&(TombstoneKind::ConstantReference, constant_ref_id.get()));
             self.push_work(Unit::ConstantRef(constant_ref_id));
 
             if self.constant_references.insert(constant_ref_id, constant_ref).is_some() {
@@ -2134,13 +2167,21 @@ impl Graph {
             if self.method_references.insert(method_ref_id, method_ref).is_some() {
                 debug_assert!(false, "Method ReferenceId collision in global graph");
             }
+            #[cfg(feature = "redb-store")]
+            self.removed
+                .remove(&(TombstoneKind::MethodReference, method_ref_id.get()));
         }
 
         for (name_id, deps) in name_dependents {
             #[cfg(feature = "redb-store")]
-            self.materialize_name_dependents(name_id);
+            {
+                self.removed_edge_lists.remove(&name_id);
+                self.materialize_name_dependents(name_id);
+            }
             let global_deps = self.name_dependents.entry(name_id).or_default();
             for dep in deps {
+                #[cfg(feature = "redb-store")]
+                self.removed_edges.remove(&(name_id, dep));
                 if !global_deps.contains(&dep) {
                     global_deps.push(dep);
                 }
@@ -2821,6 +2862,66 @@ mod tests {
 
     fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
         definitions.into_iter().map(Definition::id).collect()
+    }
+
+    /// A delete followed by a restore re-inserts the same node ids. The tombstones the delete left
+    /// would otherwise keep the store's stale copies suppressed, keep the materialize paths treating
+    /// the node as gone, and keep re-created dependents filtered out of the materialized lists.
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn a_restored_document_clears_its_tombstones() {
+        use crate::indexing::LanguageId;
+        use crate::model::store::RedbStore;
+        use crate::resolution::Resolver;
+
+        let source = "class Foo\n  def go\n    Bar\n  end\nend\n";
+        let mut base = GraphTest::new();
+        base.index_uri("file:///foo.rb", source);
+        base.index_uri("file:///bar.rb", "class Bar; end\n");
+        base.resolve();
+        let uri = UriId::from("file:///foo.rb");
+        let (constant_reference_id, name_id) = base
+            .graph()
+            .constant_references()
+            .iter()
+            .find(|(_, reference)| reference.uri_id().get() == uri.get())
+            .map(|(id, reference)| (*id, *reference.name_id()))
+            .expect("a constant reference in foo.rb");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("index.redb");
+        let base_graph = base.into_graph();
+        RedbStore::build(&store_path, &base_graph).expect("build store");
+        drop(base_graph);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        graph.delete_document("file:///foo.rb");
+        crate::indexing::index_source(&mut graph, "file:///foo.rb".into(), source, &LanguageId::Ruby);
+        Resolver::new(&mut graph).resolve();
+
+        assert!(
+            !graph.is_tombstoned(TombstoneKind::Document, uri.get()),
+            "the restored document is not a deletion"
+        );
+        assert!(
+            !graph.is_tombstoned(TombstoneKind::ConstantReference, constant_reference_id.get()),
+            "the restored reference is not a deletion"
+        );
+        assert!(
+            !graph.is_tombstoned(TombstoneKind::Name, name_id.get()),
+            "the restored name is not a deletion"
+        );
+        assert!(
+            !graph.is_tombstoned(TombstoneKind::Declaration, DeclarationId::from("Foo").get()),
+            "the restored declaration is not a deletion"
+        );
+        assert!(
+            !graph.removed_edges.iter().any(|(id, _)| *id == name_id),
+            "a re-created dependent is not still filtered out of the materialized list"
+        );
+        assert!(
+            !graph.removed_edge_lists.contains(&name_id),
+            "nor is the whole list still suppressed"
+        );
     }
 
     /// A new file is not a no-op just because the overlay is empty: on a store-backed graph it can
