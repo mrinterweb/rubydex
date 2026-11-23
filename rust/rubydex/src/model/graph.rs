@@ -1134,6 +1134,45 @@ impl Graph {
         &self.declarations
     }
 
+    /// Reads the given declarations, taking the overlay's copies and fetching the rest from the store
+    /// in one read transaction: one bucket decode per bucket instead of one per declaration, which is
+    /// what a broad search (thousands of matches) pays without it. Tombstoned ids are absent.
+    ///
+    /// The result is keyed by id; a caller that cares about order keeps its own id list.
+    #[must_use]
+    pub fn declarations_in_bulk(
+        &self,
+        ids: &[DeclarationId],
+    ) -> IdentityHashMap<DeclarationId, NodeRef<'_, Declaration>> {
+        let mut found: IdentityHashMap<DeclarationId, NodeRef<'_, Declaration>> =
+            IdentityHashMap::with_capacity_and_hasher(ids.len(), IdentityHashBuilder);
+        let mut missing: Vec<u64> = Vec::new();
+        for id in ids {
+            match self.declarations.get(id) {
+                Some(declaration) => {
+                    found.insert(*id, NodeRef::Mem(declaration));
+                }
+                None => missing.push(id.get()),
+            }
+        }
+
+        #[cfg(feature = "redb-store")]
+        if !missing.is_empty()
+            && let Some(store) = &self.store
+            && let Some(declarations) =
+                read_store(store, &self.store_errors, |store| store.declarations(&missing).map(Some))
+        {
+            for (id, declaration) in declarations {
+                if self.is_tombstoned(TombstoneKind::Declaration, id) {
+                    continue;
+                }
+                found.insert(DeclarationId::new(id), NodeRef::Stored(Box::new(declaration)));
+            }
+        }
+
+        found
+    }
+
     /// Returns a mutable reference to the declarations map
     #[must_use]
     pub fn declarations_mut(&mut self) -> &mut IdentityHashMap<DeclarationId, Declaration> {

@@ -210,18 +210,9 @@ pub unsafe extern "C" fn rdx_graph_declarations_search(
     };
     let query_refs: Vec<&str> = queries.iter().map(String::as_str).collect();
 
-    let entries = with_graph(pointer, |graph| {
-        query::declaration_search(graph, &query_refs, &query::MatchMode::Exact)
-            .into_iter()
-            .filter_map(|id| {
-                let decl = graph.declaration(id)?;
-                Some(CDeclaration::from_declaration(id, &decl))
-            })
-            .collect::<Vec<CDeclaration>>()
-            .into_boxed_slice()
-    });
-
-    DeclarationsIter::new(entries)
+    with_graph(pointer, |graph| {
+        declarations_iter_for(graph, query::declaration_search(graph, &query_refs, &query::MatchMode::Exact))
+    })
 }
 
 /// Searches the graph using fuzzy matching, returning every declaration whose name matches any of the queries.
@@ -245,17 +236,39 @@ pub unsafe extern "C" fn rdx_graph_declarations_fuzzy_search(
     };
     let query_refs: Vec<&str> = queries.iter().map(String::as_str).collect();
 
-    let entries = with_graph(pointer, |graph| {
-        query::declaration_search(graph, &query_refs, &query::MatchMode::Fuzzy)
+    with_graph(pointer, |graph| {
+        declarations_iter_for(graph, query::declaration_search(graph, &query_refs, &query::MatchMode::Fuzzy))
+    })
+}
+
+/// The matching declarations as an iterator, in the order the search returned them.
+///
+/// A store-backed graph loads the matches in one read transaction (`Graph::declarations_in_bulk`)
+/// rather than one per id: a broad search matches thousands of store-backed declarations and each
+/// lookup otherwise opened its own transaction and decoded the same bucket again.
+fn declarations_iter_for(graph: &Graph, ids: Vec<DeclarationId>) -> *mut DeclarationsIter {
+    #[cfg(feature = "redb-store")]
+    if graph.is_store_backed() {
+        let declarations = graph.declarations_in_bulk(&ids);
+        let entries = ids
             .into_iter()
             .filter_map(|id| {
-                let decl = graph.declaration(id)?;
-                Some(CDeclaration::from_declaration(id, &decl))
+                let declaration = declarations.get(&id)?;
+                Some(CDeclaration::from_declaration(id, declaration))
             })
             .collect::<Vec<CDeclaration>>()
-            .into_boxed_slice()
-    });
+            .into_boxed_slice();
+        return DeclarationsIter::new(entries);
+    }
 
+    let entries = ids
+        .into_iter()
+        .filter_map(|id| {
+            let declaration = graph.declaration(id)?;
+            Some(CDeclaration::from_declaration(id, &declaration))
+        })
+        .collect::<Vec<CDeclaration>>()
+        .into_boxed_slice();
     DeclarationsIter::new(entries)
 }
 
