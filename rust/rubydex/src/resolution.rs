@@ -1011,15 +1011,20 @@ impl<'a> Resolver<'a> {
     #[must_use]
     fn linearize_ancestors(&mut self, declaration_id: DeclarationId) -> Ancestors {
         {
-            let declaration = self.graph.declaration_mut(declaration_id).unwrap();
+            let Some(declaration) = self.graph.declaration_mut(declaration_id) else {
+                return Ancestors::Partial(Vec::new());
+            };
+            let Some(ns) = declaration.as_namespace() else {
+                return Ancestors::Partial(Vec::new());
+            };
 
             // Add this declaration to the descendants so that we capture transitive descendant relationships
             self.context.descendants.insert(declaration_id);
 
             // Return the cached ancestors if we already computed them. If they are partial ancestors, ignore the cache to try
             // again
-            if declaration.as_namespace().unwrap().has_complete_ancestors() {
-                let cached = declaration.as_namespace().unwrap().clone_ancestors();
+            if ns.has_complete_ancestors() {
+                let cached = ns.clone_ancestors();
                 self.propagate_descendants(&cached);
 
                 self.context.finalize(declaration_id);
@@ -1036,10 +1041,9 @@ impl<'a> Resolver<'a> {
                 } else {
                     Ancestors::Cyclic(vec![])
                 };
-                declaration
-                    .as_namespace_mut()
-                    .unwrap()
-                    .set_ancestors(estimated_ancestors.clone());
+                if let Some(ns) = declaration.as_namespace_mut() {
+                    ns.set_ancestors(estimated_ancestors.clone());
+                }
 
                 self.context.finalize(declaration_id);
                 return estimated_ancestors;
@@ -1047,23 +1051,24 @@ impl<'a> Resolver<'a> {
 
             // Automatically track descendants as we recurse. This has to happen before checking the cache since we may have
             // already linearized the parent's ancestors, but it's the first time we're discovering the descendant
-            let namespace = declaration.as_namespace_mut().unwrap();
-            for descendant in &self.context.descendants {
-                namespace.add_descendant(*descendant);
+            if let Some(namespace) = declaration.as_namespace_mut() {
+                for descendant in &self.context.descendants {
+                    namespace.add_descendant(*descendant);
+                }
             }
         }
 
         let mut state = ChainState::default();
         let parent_ancestors = self.linearize_parent_ancestors(declaration_id, &mut state);
-        let declaration = self.graph.declaration(declaration_id).unwrap();
+        let Some(declaration) = self.graph.declaration(declaration_id) else {
+            return Ancestors::Partial(Vec::new());
+        };
         let mut mixins = Vec::new();
 
         let is_singleton_class = matches!(&*declaration, Declaration::Namespace(Namespace::SingletonClass(_)));
 
         // If we're linearizing a singleton class, add the extends of the attached class to the list of mixins to process
-        if is_singleton_class {
-            let attached_decl = self.graph.declaration(*declaration.owner_id()).unwrap();
-
+        if is_singleton_class && let Some(attached_decl) = self.graph.declaration(*declaration.owner_id()) {
             mixins.extend(
                 attached_decl
                     .definitions()
@@ -1298,7 +1303,9 @@ impl<'a> Resolver<'a> {
                 // If the owner is a promotable constant and something is being defined inside it, promote it to an
                 // unknown namespace. A later explicit class or module definition selects the concrete kind.
                 {
-                    let owner = self.graph.declaration(owner_id).unwrap();
+                    let Some(owner) = self.graph.declaration(owner_id) else {
+                        return Outcome::Unresolved;
+                    };
                     let is_promotable_constant =
                         matches!(&*owner, Declaration::Constant(_)) && self.graph.all_definitions_promotable(&owner);
 
@@ -1310,7 +1317,9 @@ impl<'a> Resolver<'a> {
                     }
                 }
 
-                let owner = self.graph.declaration(owner_id).unwrap();
+                let Some(owner) = self.graph.declaration(owner_id) else {
+                    return Outcome::Unresolved;
+                };
                 let owner_is_namespace = owner.as_namespace().is_some();
 
                 // Skip creating singletons when the target is a not a namespace or not promotable. For example:
@@ -1905,7 +1914,7 @@ impl<'a> Resolver<'a> {
         // Every name captured its depth during indexing (see `Name::compute_depth`), so ordering the units below is a
         // direct lookup rather than a recursive walk of the nesting chain. The layered lookup also covers names
         // that live only in the disk store: a surgical refresh re-queues units for store-backed nodes.
-        let depth_of = |name_id: &NameId| self.graph.name(*name_id).expect("name for queued unit").depth();
+        let depth_of = |name_id: &NameId| self.graph.name(*name_id).map(|name| name.depth());
 
         // Lexicographic rank of every document URI, overlay and store — see `Graph::uri_ranks`.
         let uri_ranks = self.graph.uri_ranks();
@@ -1936,23 +1945,33 @@ impl<'a> Resolver<'a> {
 
                     match &*definition {
                         Definition::Class(def) => {
-                            let depth = depth_of(def.name_id());
+                            let Some(depth) = depth_of(def.name_id()) else {
+                                continue;
+                            };
                             definitions.push((Unit::Definition(id), (depth, uri_rank, offset)));
                         }
                         Definition::Module(def) => {
-                            let depth = depth_of(def.name_id());
+                            let Some(depth) = depth_of(def.name_id()) else {
+                                continue;
+                            };
                             definitions.push((Unit::Definition(id), (depth, uri_rank, offset)));
                         }
                         Definition::Constant(def) => {
-                            let depth = depth_of(def.name_id());
+                            let Some(depth) = depth_of(def.name_id()) else {
+                                continue;
+                            };
                             definitions.push((Unit::Definition(id), (depth, uri_rank, offset)));
                         }
                         Definition::ConstantAlias(def) => {
-                            let depth = depth_of(def.name_id());
+                            let Some(depth) = depth_of(def.name_id()) else {
+                                continue;
+                            };
                             definitions.push((Unit::Definition(id), (depth, uri_rank, offset)));
                         }
                         Definition::SingletonClass(def) => {
-                            let depth = depth_of(def.name_id());
+                            let Some(depth) = depth_of(def.name_id()) else {
+                                continue;
+                            };
                             definitions.push((Unit::Definition(id), (depth, uri_rank, offset)));
                         }
                         // SelfReceiver methods create singleton classes, which need
@@ -1977,7 +1996,9 @@ impl<'a> Resolver<'a> {
                     // Same tiebreaker-only rank as the definitions above: an unranked URI (a store
                     // table that failed to scan) sorts last instead of aborting the resolver.
                     let uri_rank = *uri_ranks.get(&constant_ref.uri_id()).unwrap_or(&u32::MAX);
-                    let depth = depth_of(constant_ref.name_id());
+                    let Some(depth) = depth_of(constant_ref.name_id()) else {
+                        continue;
+                    };
                     let offset = constant_ref.offset().clone();
                     const_refs.push((Unit::ConstantRef(id), (depth, uri_rank, offset)));
                 }

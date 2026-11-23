@@ -188,10 +188,6 @@ pub unsafe extern "C" fn rdx_declaration_member(
 ///
 /// # Safety
 /// - `member` must be a valid, null-terminated UTF-8 string
-///
-/// # Panics
-///
-/// Will panic if there's inconsistent graph data
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_declaration_find_member(
     pointer: GraphPointer,
@@ -207,13 +203,8 @@ pub unsafe extern "C" fn rdx_declaration_find_member(
         let id = DeclarationId::new(declaration_id);
         let member_id = StringId::from(member_str.as_str());
 
-        let member_decl_id = match rubydex::query::find_member_in_ancestors(graph, id, member_id, only_inherited) {
-            Ok(decl_id) => decl_id,
-            Err(rubydex::query::FindMemberError::MemberNotFound) => return ptr::null(),
-            Err(err) => unreachable!(
-                "Namespace#find_member is only exposed on namespace declarations, so the declaration must exist and be \
-                 a namespace, got {err:?}"
-            ),
+        let Ok(member_decl_id) = rubydex::query::find_member_in_ancestors(graph, id, member_id, only_inherited) else {
+            return ptr::null();
         };
 
         // The member's target may have been deleted by a live edit (tombstoned).

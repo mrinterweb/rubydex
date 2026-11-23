@@ -108,3 +108,74 @@ fn damaged_store_fails_to_open_instead_of_aborting() {
         "a store damaged past its header must not open: {result:?}"
     );
 }
+
+#[test]
+fn corrupt_store_queries_and_live_edits_do_not_panic() {
+    use rubydex::{
+        model::ids::StringId,
+        query::{self, CompletionContext, CompletionReceiver, FindMemberError},
+    };
+
+    let mut base = Graph::new();
+    index_source(
+        &mut base,
+        "file:///foo.rb".into(),
+        "class Foo\n  def bar; end\n  alias baz bar\nend\n",
+        &LanguageId::Ruby,
+    );
+    index_source(
+        &mut base,
+        "file:///other.rb".into(),
+        "class Other; end\n",
+        &LanguageId::Ruby,
+    );
+    Resolver::new(&mut base).resolve();
+
+    let foo_id = DeclarationId::from("Foo");
+    let bar_id = StringId::from("bar");
+    let alias_def_id = base
+        .definitions()
+        .iter()
+        .find_map(|(id, def)| matches!(def, rubydex::model::definitions::Definition::MethodAlias(_)).then_some(*id))
+        .expect("method alias definition");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("corrupt-queries.redb");
+    RedbStore::build(&path, &base).expect("build store");
+
+    // Corrupt declarations, definitions, and names buckets so store-backed lookups fail to decode
+    // and return None after incrementing store_errors.
+    corrupt_node("declarations", foo_id.get(), &path);
+    corrupt_node("definitions", alias_def_id.get(), &path);
+    corrupt_node("names", 0, &path);
+
+    let mut graph = Graph::with_store(RedbStore::open(&path).expect("open store"));
+
+    assert_eq!(
+        query::find_member_in_ancestors(&graph, foo_id, bar_id, false),
+        Err(FindMemberError::DeclarationNotFound)
+    );
+    assert!(query::follow_method_alias(&graph, alias_def_id).is_err());
+
+    let candidates = query::completion_candidates(
+        &graph,
+        CompletionContext::new(CompletionReceiver::MethodCall {
+            self_decl_id: None,
+            receiver_decl_id: foo_id,
+        }),
+    )
+    .expect("completion returns Ok(empty) rather than panicking");
+    assert!(candidates.is_empty());
+
+    // Live edit on a corrupt store must not panic in Resolver::prepare_units or remove_document_data.
+    index_source(
+        &mut graph,
+        "file:///new.rb".into(),
+        "class New; end\n",
+        &LanguageId::Ruby,
+    );
+    Resolver::new(&mut graph).resolve();
+    graph.delete_document("file:///foo.rb");
+
+    assert!(graph.store_error_count() > 0);
+}

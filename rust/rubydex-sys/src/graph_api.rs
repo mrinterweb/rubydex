@@ -1166,19 +1166,17 @@ fn run_and_finalize_completion(graph: &Graph, receiver: CompletionReceiver) -> C
 
     let entries: Vec<CCompletionCandidate> = candidates
         .into_iter()
-        .map(|candidate| match candidate {
+        .filter_map(|candidate| match candidate {
             CompletionCandidate::Declaration(id) => {
-                let decl = graph
-                    .declaration(id)
-                    .expect("completion candidate declaration must exist in graph");
-                CCompletionCandidate {
+                let decl = graph.declaration(id)?;
+                Some(CCompletionCandidate {
                     kind: CCompletionCandidateKind::Declaration,
                     declaration: Box::into_raw(Box::new(CDeclaration::from_declaration(id, &decl))),
                     name: ptr::null(),
                     documentation: ptr::null(),
-                }
+                })
             }
-            CompletionCandidate::Keyword(kw) => CCompletionCandidate {
+            CompletionCandidate::Keyword(kw) => Some(CCompletionCandidate {
                 kind: CCompletionCandidateKind::Keyword,
                 declaration: ptr::null(),
                 name: CString::new(kw.name())
@@ -1189,20 +1187,16 @@ fn run_and_finalize_completion(graph: &Graph, receiver: CompletionReceiver) -> C
                     .expect("keyword documentation must not contain NUL")
                     .into_raw()
                     .cast_const(),
-            },
+            }),
             CompletionCandidate::KeywordArgument(str_id) => {
-                let name_str = graph
-                    .string(str_id)
-                    .expect("keyword argument string must exist in graph");
-                CCompletionCandidate {
+                let name_str = graph.string(str_id)?;
+                let c_name = CString::new(name_str.as_str()).ok()?.into_raw().cast_const();
+                Some(CCompletionCandidate {
                     kind: CCompletionCandidateKind::KeywordParameter,
                     declaration: ptr::null(),
-                    name: CString::new(name_str.as_str())
-                        .expect("keyword argument name must not contain NUL")
-                        .into_raw()
-                        .cast_const(),
+                    name: c_name,
                     documentation: ptr::null(),
-                }
+                })
             }
         })
         .collect();
@@ -1698,5 +1692,34 @@ mod tests {
             string_ref_count,
             graph.strings().get(&foo_string_id).unwrap().ref_count()
         );
+    }
+
+    #[test]
+    fn ffi_lookups_return_not_found_for_missing_or_stale_ids() {
+        let mut graph = Graph::new();
+        let mut indexer = RubyIndexer::new("file:///foo.rb".into(), "class Foo\n  def bar; end\nend\n");
+        indexer.index();
+        graph.consume_document_changes(indexer.local_graph());
+        Resolver::new(&mut graph).resolve();
+
+        let missing_decl_id = DeclarationId::from("Nonexistent").get();
+        let non_alias_def_id = *graph.definitions().keys().next().expect("a definition");
+        let graph_ptr = Box::into_raw(Box::new(RwLock::new(graph))) as GraphPointer;
+
+        let member_name = CString::new("bar").unwrap();
+        let found = unsafe {
+            crate::declaration_api::rdx_declaration_find_member(graph_ptr, missing_decl_id, member_name.as_ptr(), false)
+        };
+        assert!(found.is_null());
+
+        let alias_result =
+            unsafe { crate::definition_api::rdx_method_alias_definition_target(graph_ptr, non_alias_def_id.get()) };
+        assert!(matches!(
+            alias_result.status,
+            crate::definition_api::CMethodAliasResolution::NotFound
+        ));
+        assert!(alias_result.declaration.is_null());
+
+        drop(unsafe { Box::from_raw(graph_ptr.cast::<RwLock<Graph>>()) });
     }
 }

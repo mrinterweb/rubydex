@@ -2281,13 +2281,13 @@ impl Graph {
         for def_id in document.definitions() {
             #[cfg(feature = "redb-store")]
             self.materialize_definition(*def_id);
-            let definition = self.definitions.remove(def_id).unwrap();
-
-            if let Some(name_id) = definition.name_id() {
-                self.remove_name_dependent(*name_id, NameDependent::Definition(*def_id));
-                self.untrack_name(*name_id);
+            if let Some(definition) = self.definitions.remove(def_id) {
+                if let Some(name_id) = definition.name_id() {
+                    self.remove_name_dependent(*name_id, NameDependent::Definition(*def_id));
+                    self.untrack_name(*name_id);
+                }
+                self.untrack_definition_strings(&definition);
             }
-            self.untrack_definition_strings(&definition);
             // Definition IDs embed the document and offsets, so the store's copy is stale.
             #[cfg(feature = "redb-store")]
             self.tombstone(TombstoneKind::Definition, def_id.get());

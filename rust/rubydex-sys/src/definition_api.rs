@@ -625,10 +625,6 @@ pub struct CMethodAliasTargetResult {
 /// # Safety
 /// - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
 /// - `definition_id` must be a valid definition id for a `MethodAliasDefinition`.
-///
-/// # Panics
-/// Panics on graph inconsistencies (the definition is not a method alias, or the alias resolved to a non-method
-/// declaration).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_method_alias_definition_target(
     pointer: GraphPointer,
@@ -652,19 +648,19 @@ pub unsafe extern "C" fn rdx_method_alias_definition_target(
                     declaration: Box::into_raw(boxed).cast_const(),
                 }
             }
-            Err(AliasResolutionError::TargetNotFound | AliasResolutionError::UnresolvedOwner) => {
-                CMethodAliasTargetResult {
-                    status: CMethodAliasResolution::NotFound,
-                    declaration: ptr::null(),
-                }
-            }
+            Err(
+                AliasResolutionError::TargetNotFound
+                | AliasResolutionError::UnresolvedOwner
+                | AliasResolutionError::NotAnAlias
+                | AliasResolutionError::TargetNotMethod,
+            ) => CMethodAliasTargetResult {
+                status: CMethodAliasResolution::NotFound,
+                declaration: ptr::null(),
+            },
             Err(AliasResolutionError::Cycle) => CMethodAliasTargetResult {
                 status: CMethodAliasResolution::Cycle,
                 declaration: ptr::null(),
             },
-            Err(err @ (AliasResolutionError::NotAnAlias | AliasResolutionError::TargetNotMethod)) => {
-                panic!("graph inconsistency in method alias resolution: {err:?}")
-            }
         }
     })
 }

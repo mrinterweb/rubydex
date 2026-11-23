@@ -297,8 +297,12 @@ fn method_visible_at_call(
         Visibility::Public => true,
         Visibility::Private | Visibility::ModuleFunction => caller_self == Some(receiver),
         Visibility::Protected => caller_self.is_some_and(|cs| {
-            let defined_in = graph.declaration(defined_in).unwrap();
-            let defined_in = defined_in.as_namespace().unwrap();
+            let Some(defined_in) = graph.declaration(defined_in) else {
+                return false;
+            };
+            let Some(defined_in) = defined_in.as_namespace() else {
+                return false;
+            };
             let descendants = defined_in.descendants();
             descendants.contains(&cs) && descendants.contains(&receiver)
         }),
@@ -423,8 +427,12 @@ fn namespace_access_completion(
         return Ok(Vec::new());
     };
     let resolved_caller_self_id = self_decl_id.map(|id| resolve_self_namespace(graph, id)).transpose()?;
-    let namespace = graph.declaration(resolved_id).unwrap();
-    let namespace = namespace.as_namespace().unwrap();
+    let Some(namespace_decl) = graph.declaration(resolved_id) else {
+        return Ok(Vec::new());
+    };
+    let Some(namespace) = namespace_decl.as_namespace() else {
+        return Ok(Vec::new());
+    };
     let mut candidates = Vec::new();
 
     // Walk ancestors collecting inherited constants, stopping at Object to avoid surfacing top-level constants
@@ -450,9 +458,10 @@ fn namespace_access_completion(
 
     // The receiver of an explicit `Foo::` call is the singleton class, so visibility checks
     // compare against it (not against `Foo` itself).
-    if let Some(singleton_id) = namespace.singleton_class() {
-        let singleton = graph.declaration(*singleton_id).unwrap();
-        let singleton = singleton.as_namespace().unwrap();
+    if let Some(singleton_id) = namespace.singleton_class()
+        && let Some(singleton_decl) = graph.declaration(*singleton_id)
+        && let Some(singleton) = singleton_decl.as_namespace()
+    {
         let receiver = *singleton_id;
 
         for ancestor in singleton.ancestors() {
@@ -485,8 +494,12 @@ fn method_call_completion(
         return Ok(Vec::new());
     };
     let resolved_caller_self_id = self_decl_id.map(|id| resolve_self_namespace(graph, id)).transpose()?;
-    let namespace = graph.declaration(resolved_id).unwrap();
-    let namespace = namespace.as_namespace().unwrap();
+    let Some(receiver_decl) = graph.declaration(resolved_id) else {
+        return Ok(Vec::new());
+    };
+    let Some(namespace) = receiver_decl.as_namespace() else {
+        return Ok(Vec::new());
+    };
     let mut candidates = Vec::new();
 
     for ancestor in namespace.ancestors() {
@@ -590,10 +603,10 @@ fn collect_constants_from_lexical_scope<'a>(
         }
     }
 
-    if matches!(innermost_lexical_decl, Namespace::Module(_)) {
-        let object = graph.declaration(*OBJECT_ID).unwrap();
-        let object = object.as_namespace().unwrap();
-
+    if matches!(innermost_lexical_decl, Namespace::Module(_))
+        && let Some(object_decl) = graph.declaration(*OBJECT_ID)
+        && let Some(object) = object_decl.as_namespace()
+    {
         for ancestor in object.ancestors() {
             if let Ancestor::Complete(ancestor_id) = ancestor {
                 collect_members(
@@ -637,7 +650,9 @@ fn collect_class_variables_from_lexical_scope(
             // No non-singleton lexical scope (invalid Ruby). Skip cvar collection.
             return;
         };
-        let parent_name_node = graph.name(parent_name_id).unwrap();
+        let Some(parent_name_node) = graph.name(parent_name_id) else {
+            return;
+        };
         let NameRef::Resolved(parent_ref) = &*parent_name_node else {
             return;
         };
@@ -677,7 +692,9 @@ fn collect_constants_from_outer_nesting(
     let mut current_name_id = *name_ref.nesting();
 
     while let Some(id) = current_name_id {
-        let parent_name_node = graph.name(id).unwrap();
+        let Some(parent_name_node) = graph.name(id) else {
+            break;
+        };
         let NameRef::Resolved(parent_ref) = &*parent_name_node else {
             break;
         };
@@ -857,8 +874,8 @@ pub fn follow_method_alias(graph: &Graph, alias_id: DefinitionId) -> Result<Decl
         let target_id = match find_member_in_ancestors(graph, owner_id, *alias.old_name_str_id(), false) {
             Ok(id) => id,
             Err(FindMemberError::MemberNotFound) => return Err(AliasResolutionError::TargetNotFound),
-            Err(err @ (FindMemberError::DeclarationNotFound | FindMemberError::NotNamespace)) => {
-                unreachable!("alias owner must be a valid namespace declaration, got {err:?}")
+            Err(FindMemberError::DeclarationNotFound | FindMemberError::NotNamespace) => {
+                return Err(AliasResolutionError::UnresolvedOwner);
             }
         };
 
