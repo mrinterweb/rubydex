@@ -77,29 +77,24 @@ module Rubydex
         path = File.join(registry, "#{Process.pid}-#{SecureRandom.hex(4)}.json")
         payload = JSON.generate({ workspace:, store:, builder:, docs: })
 
-        temp = "#{path}.tmp"
-        # Windows cannot rename a file this process has open, so there is no temp to publish: claim
-        # the final name exclusively instead. A manager probing the gap sees an unlocked file it
-        # cannot parse, and it cannot unlink one an open handle holds either, so the session lists
-        # itself on the manager's next poll.
-        handle = if Gem.win_platform?
-          File.open(path, File::RDWR | File::CREAT | File::EXCL)
-        else
-          File.new(temp, "w")
-        end
-        # A registry file without a lock is worse than no file: the manager takes the free lock as
-        # proof of death and prunes a session that is alive, so it has to index everything twice.
+        # Liveness is a lock on a companion `.lock` file, never on the `.json` itself: Windows
+        # `LockFileEx` is mandatory, so a manager could not read the registry file of a live session
+        # at all and would exit immediately on every tick. The `.lock` is what proves the session is
+        # alive; the `.json` is plain data any reader can parse.
+        lock_path = "#{path}.lock"
+        handle = File.open(lock_path, File::RDWR | File::CREAT | File::EXCL, 0o600)
+        # A lock file without its lock is worse than none: the manager takes a free lock as proof of
+        # death and prunes a session that is alive, so it has to index everything twice.
         unless handle.flock(File::LOCK_EX | File::LOCK_NB)
           handle.close
-          FileUtils.rm_f(temp)
-          raise("could not lock the registry file #{path}")
+          FileUtils.rm_f(lock_path)
+          raise("could not lock the registry file #{lock_path}")
         end
-        handle.write(payload)
-        handle.flush
-        # The manager prunes a registry file whose lock it can take, so publishing an unlocked file
-        # would let it unlink a session that is about to lock it. Rename (with the lock already
-        # held) is the atomic publish.
-        File.rename(temp, path) unless Gem.win_platform?
+
+        # The registry file appears only once its session is alive (lock held above) and complete.
+        temp = "#{path}.tmp"
+        File.write(temp, payload)
+        File.rename(temp, path)
 
         @handles[path] = handle
         handle
@@ -112,7 +107,7 @@ module Rubydex
       def release_all
         @handles.each do |path, handle|
           handle.close
-          File.delete(path) if File.exist?(path)
+          [path, "#{path}.lock"].each { |file| File.delete(file) if File.exist?(file) }
         rescue SystemCallError
           # Another process probing the registry holds the file open on Windows. The lock is
           # already released, which is what liveness depends on, so a failed unlink must not

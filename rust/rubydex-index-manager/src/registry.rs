@@ -60,14 +60,26 @@ pub fn live_sessions(dir: &Path) -> Vec<Session> {
             continue;
         }
 
-        let Ok(handle) = File::open(&path) else {
+        // Liveness is the companion `.lock` file's lock, not the registry file's: Windows
+        // `LockFileEx` is mandatory, so a session that locked its own `.json` would make it
+        // unreadable here and the manager would exit on the first tick. Taking the lock means the
+        // process that held it is gone, which is the only proof of death used.
+        let lock_path = path.with_extension("json.lock");
+        let Ok(lock) = File::open(&lock_path) else {
+            // A session from an older release, or one that died before writing its lock: nothing
+            // proves it is alive, so it is not.
+            let _ = remove_file(&path);
             continue;
         };
-        if handle.try_lock().is_ok() {
+        if lock.try_lock().is_ok() {
             let _ = remove_file(&path);
+            let _ = remove_file(&lock_path);
             continue;
         }
 
+        let Ok(handle) = File::open(&path) else {
+            continue;
+        };
         let Ok(session): Result<Session, _> = from_reader(handle) else {
             continue;
         };
@@ -96,8 +108,8 @@ fn live_sessions_lists_a_session_holding_its_lock() {
     )
     .expect("write");
 
-    let handle = File::open(&file).expect("open");
-    handle.try_lock().expect("lock");
+    let lock = File::create(dir.path().join("1-aabbccdd.json.lock")).expect("create lock");
+    lock.try_lock().expect("lock");
     assert_eq!(
         1,
         live_sessions(dir.path()).len(),
@@ -114,11 +126,14 @@ fn live_sessions_prunes_a_session_that_no_longer_holds_its_lock() {
         "{\"workspace\":\"/ws\",\"store\":\"/ws/tmp/index.redb\",\"builder\":[\"ruby\"]}",
     )
     .expect("write");
+    let lock_path = dir.path().join("1-aabbccdd.json.lock");
+    std::fs::write(&lock_path, "").expect("write lock");
 
     assert_eq!(
         Vec::<Session>::new(),
         live_sessions(dir.path()),
-        "an unheld registry file is dead",
+        "a registry file whose lock is free is dead",
     );
     assert!(!file.exists(), "the dead registry file must be pruned from disk");
+    assert!(!lock_path.exists(), "and its lock file with it");
 }

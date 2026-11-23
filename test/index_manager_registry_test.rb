@@ -51,7 +51,7 @@ class IndexManagerRegistryTest < Minitest::Test
         docs: 100,
         registry: registry,
       )
-      assert_still_locked(published_registry_path(registry), "the test process must still hold the lock")
+      assert_still_locked(published_lock_path(registry), "the test process must still hold the lock")
 
       sessions = JSON.parse(manager("--registry", registry, "--list"))
       assert_equal(1, sessions.size, "a live session must be listed")
@@ -72,7 +72,7 @@ class IndexManagerRegistryTest < Minitest::Test
 
       assert_empty(Dir.glob(File.join(registry, "*.tmp")), "the unlocked temp file must not remain")
       assert_equal(1, Dir.glob(File.join(registry, "*.json")).size, "the locked file is published")
-      assert_still_locked(published_registry_path(registry), "the published file is already locked by the session")
+      assert_still_locked(published_lock_path(registry), "the published file's lock is already held by the session")
       handle.close
     end
   end
@@ -157,12 +157,14 @@ class IndexManagerRegistryTest < Minitest::Test
     end
   end
 
-  # The registry file `register` published: the only `.json` in a fresh registry directory.
-  def published_registry_path(registry)
+  # The liveness lock `register` took: the companion `.lock` of the published registry file. The
+  # registry file itself is never locked (Windows `LockFileEx` is mandatory, so the manager could not
+  # read a locked one).
+  def published_lock_path(registry)
     published = Dir.glob(File.join(registry, "*.json"))
     assert_equal(1, published.size, "register publishes exactly one registry file")
 
-    published.first
+    "#{published.first}.lock"
   end
 
   # Probed through a *second* file description: re-locking the handle `register` returned is
