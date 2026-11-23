@@ -113,7 +113,9 @@ pub unsafe extern "C" fn rdx_document_method_references_iter_new(
 ) -> *mut MethodReferencesIter {
     with_graph(pointer, |graph| {
         let uri_id = UriId::new(uri_id);
-        if let Some(doc) = graph.documents().get(&uri_id) {
+        // Layered lookup: an unedited store-backed document is not in the overlay, so reading only
+        // the overlay map made every store document report zero method references.
+        if let Some(doc) = graph.document(uri_id) {
             let entries: Vec<_> = doc
                 .method_references()
                 .iter()

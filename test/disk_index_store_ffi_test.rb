@@ -60,6 +60,12 @@ class DiskIndexStoreFfiTest < Minitest::Test
     document = disk.documents.find { |entry| entry.uri.end_with?("foo.rb") }
     refute_nil(document)
     assert_equal(["CONST", "Foo", "bar()"], document.definitions.map(&:name).sort)
+    assert_equal(
+      ["new"],
+      document.method_references.map(&:name).uniq,
+      "a store-backed document has to report its own method references",
+    )
+    assert_equal(document.method_references.count, document.method_references.size)
 
     assert_operator(disk.constant_references.size, :>, 0)
     resolved = disk.constant_references.grep(Rubydex::ResolvedConstantReference).map(&:declaration)
