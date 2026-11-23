@@ -88,6 +88,17 @@ pub(super) fn encode_front_coded(entries: &[(&[u8], u64)], out: &mut Vec<u8>) ->
     Ok(())
 }
 
+/// Longest text a single front-coded entry may decode to. A constant's fully qualified name is a few
+/// hundred bytes at most; the cap is what stops a crafted block from expanding one entry into a
+/// multi-megabyte string.
+const MAX_FRONT_CODED_ENTRY: usize = 64 * 1024;
+
+/// Most bytes one front-coded block may decode to in total. Front-coding copies the shared prefix
+/// for every entry, so a ~1 MiB block of "long shared prefix, one-byte suffix" pairs would otherwise
+/// expand to tens of gigabytes of allocated strings, which is an out-of-memory abort rather than an
+/// error. Generous for a real shard: a shard of a million-name store decodes in the low megabytes.
+const MAX_FRONT_CODED_BYTES: usize = 64 * 1024 * 1024;
+
 /// Calls `visit(id, text)` for every entry of a front-coded block.
 ///
 /// Never panics on a corrupt block: every read is bounds-checked and every assembled string is
@@ -109,6 +120,7 @@ pub(super) fn decode_front_coded(
     let mut pos = 4usize;
     // Reused across entries: one allocation per block rather than one per string.
     let mut assembled = Vec::<u8>::with_capacity(256);
+    let mut decoded_bytes = 0usize;
 
     for _ in 0..count {
         let shared = read_varint_u32(bytes, &mut pos).ok_or_else(|| error("truncated shared prefix length"))? as usize;
@@ -133,8 +145,20 @@ pub(super) fn decode_front_coded(
         // the sequence before `from_utf8` looks at it. `String::truncate` would panic here.
         assembled.truncate(shared);
         assembled.extend_from_slice(suffix);
+        if assembled.len() > MAX_FRONT_CODED_ENTRY {
+            return Err(error("entry decodes to more bytes than allowed"));
+        }
+        decoded_bytes = decoded_bytes.saturating_add(assembled.len());
+        if decoded_bytes > MAX_FRONT_CODED_BYTES {
+            return Err(error("block decodes to more bytes than allowed"));
+        }
         let text = std::str::from_utf8(&assembled).map_err(|_| error("invalid UTF-8 in entry"))?;
         visit(u64::from_le_bytes(id_bytes), text);
+    }
+    // The encoder writes exactly the entries it counted, so anything left over means the block was
+    // not written by this format.
+    if pos != bytes.len() {
+        return Err(error("trailing bytes after the last entry"));
     }
     Ok(())
 }
@@ -510,6 +534,41 @@ mod tests {
         );
     }
 
+    /// Front-coding copies the shared prefix into every entry, so a small crafted block can claim to
+    /// decode to more bytes than the process can hold. The block is rejected at the first entry that
+    /// would cross the cap instead of allocating it.
+    #[test]
+    fn a_front_coded_decompression_bomb_is_rejected_before_it_allocates() {
+        // count 2, then two entries whose shared prefix is the whole of a 64 KiB+1 first entry:
+        // the second entry decodes to one byte more than the entry cap.
+        let prefix_len = MAX_FRONT_CODED_ENTRY + 1;
+        let mut block = Vec::new();
+        block.extend_from_slice(&2u32.to_le_bytes());
+        block.extend_from_slice(&[0, 0x81, 0x80, 0x04]); // shared 0, suffix length 65537
+        block.extend(std::iter::repeat_n(b'a', prefix_len));
+        block.extend_from_slice(&1u64.to_le_bytes());
+        block.extend_from_slice(&[0x81, 0x80, 0x04, 1, b'b']); // shared 65537, suffix "b"
+        block.extend_from_slice(&2u64.to_le_bytes());
+
+        let error = decode_front_coded("test", 0, &block, |_, _| {}).expect_err("oversized entry");
+        assert!(
+            matches!(error, StoreError::CorruptBlock { reason, .. } if reason == "entry decodes to more bytes than allowed"),
+            "an entry over the cap is a corrupt block, got {error}"
+        );
+
+        // The first entry alone is already over the cap.
+        let mut single = Vec::new();
+        single.extend_from_slice(&1u32.to_le_bytes());
+        single.extend_from_slice(&[0, 0x81, 0x80, 0x04]);
+        single.extend(std::iter::repeat_n(b'a', prefix_len));
+        single.extend_from_slice(&1u64.to_le_bytes());
+        let error = decode_front_coded("test", 0, &single, |_, _| {}).expect_err("oversized entry");
+        assert!(
+            matches!(error, StoreError::CorruptBlock { reason, .. } if reason == "entry decodes to more bytes than allowed"),
+            "got {error}"
+        );
+    }
+
     #[test]
     fn corrupt_front_coded_blocks_are_errors_not_panics() {
         let cases: Vec<(&[u8], &str)> = vec![
@@ -523,6 +582,11 @@ mod tests {
             (
                 &[1, 0, 0, 0, 0, 1, 0xff, 0, 0, 0, 0, 0, 0, 0, 1],
                 "invalid UTF-8 in entry",
+            ),
+            // A complete entry with bytes after it that the header's count does not cover.
+            (
+                &[1, 0, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 0, 0, 0, 1, b'x'],
+                "trailing bytes after the last entry",
             ),
         ];
         for (block, expected) in cases {
