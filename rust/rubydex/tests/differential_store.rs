@@ -573,19 +573,19 @@ fn edit_case(edits: &[(&str, Option<&str>)]) {
     normalize(&mut mem_probe);
     normalize(&mut store_probe);
 
-    // Key-based comparison: a length mismatch must show up as missing/extra keys, not as a shifted zip.
-    let mem_keys: HashSet<String> = mem_probe.iter().map(|(key, _)| key.clone()).collect();
-    let store_keys: HashSet<String> = store_probe.iter().map(|(key, _)| key.clone()).collect();
-    let missing: Vec<String> = mem_keys
-        .iter()
-        .filter(|key| !store_keys.contains(key.as_str()))
-        .cloned()
-        .collect();
-    let extra: Vec<String> = store_keys
-        .iter()
-        .filter(|key| !mem_keys.contains(key.as_str()))
-        .cloned()
-        .collect();
+    assert_probes_match(&mem_probe, &store_probe, "edit differential");
+}
+
+/// Requires the two normalized probe sets to be identical, case by case.
+///
+/// Compared by key rather than by zipping: a length check plus a zip to the shorter slice tolerates a
+/// leaked or un-tombstoned store entry whenever an equal number of memory cases is also missing, and
+/// shifts every later comparison.
+fn assert_probes_match(mem_probe: &[(String, String)], store_probe: &[(String, String)], context: &str) {
+    let mem_keys: HashSet<&str> = mem_probe.iter().map(|(key, _)| key.as_str()).collect();
+    let store_keys: HashSet<&str> = store_probe.iter().map(|(key, _)| key.as_str()).collect();
+    let missing: Vec<&&str> = mem_keys.difference(&store_keys).collect();
+    let extra: Vec<&&str> = store_keys.difference(&mem_keys).collect();
     let diverged: Vec<String> = mem_probe
         .iter()
         .filter_map(|(key, value)| {
@@ -596,12 +596,13 @@ fn edit_case(edits: &[(&str, Option<&str>)]) {
                 .map(|(_, other_value)| format!("{key}\n  memory: {value}\n  store:  {other_value}"))
         })
         .collect();
+
     let mut report: Vec<String> = diverged.iter().take(6).cloned().collect();
     report.extend(missing.iter().take(6).map(|key| format!("MISSING {key}")));
     report.extend(extra.iter().take(6).map(|key| format!("EXTRA {key}")));
     assert!(
-        mem_probe.len() == store_probe.len() && diverged.is_empty(),
-        "edit differential: {} vs {} probes, {} diverged, {} missing, {} extra:\n{}",
+        mem_probe.len() == store_probe.len() && diverged.is_empty() && missing.is_empty() && extra.is_empty(),
+        "{context}: {} vs {} probes, {} diverged, {} missing, {} extra:\n{}",
         mem_probe.len(),
         store_probe.len(),
         diverged.len(),
@@ -795,15 +796,7 @@ fn probe_battery_matches(memory: &Graph, store_graph: &Graph, name_ids: &[NameId
     normalize(&mut mem_probe);
     normalize(&mut store_probe);
 
-    let mem_keys: HashSet<String> = mem_probe.iter().map(|(key, _)| key.clone()).collect();
-    let extra: usize = store_probe
-        .iter()
-        .filter(|(key, _)| !mem_keys.contains(key.as_str()))
-        .count();
-    assert_eq!(mem_probe.len(), store_probe.len() - extra, "probe case count differs");
-    for (m, s) in mem_probe.iter().zip(store_probe.iter()) {
-        assert_eq!(m, s, "soak divergence (seed/edits reproduce it)");
-    }
+    assert_probes_match(&mem_probe, &store_probe, "soak divergence (seed/edits reproduce it)");
 }
 
 /// Always-on regression gate for the edit script, on the fixture corpus: small enough to run in
