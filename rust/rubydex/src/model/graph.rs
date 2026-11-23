@@ -596,19 +596,33 @@ impl Graph {
         if let Some(store) = &self.store
             && let Some(name) = read_store(store, &self.store_errors, |store| store.get_name(id))
         {
-            // The store's copy predates any live edit: its resolved target may be a declaration
-            // a later edit tombstoned. Serving it resolved would point at a dead declaration and
-            // resurrect the stale world around it; the overlay world unresolved this name, so
-            // mirror that.
-            if let NameRef::Resolved(resolved) = &name
-                && self.is_tombstoned(TombstoneKind::Declaration, resolved.declaration_id().get())
-            {
-                let name_data = resolved.name().clone();
-                self.names.insert(id, NameRef::Unresolved(Box::new(name_data)));
-                return;
-            }
+            let name = self.live_name(name);
             self.names.insert(id, name);
         }
+    }
+
+    /// Whether a name read back from the store resolves to a declaration a live edit removed. The
+    /// store's copy predates the edit, so serving it resolved would point at a dead declaration and
+    /// resurrect the stale world around it.
+    #[cfg(feature = "redb-store")]
+    fn resolves_to_a_tombstone(&self, name: &NameRef) -> bool {
+        matches!(
+            name,
+            NameRef::Resolved(resolved)
+                if self.is_tombstoned(TombstoneKind::Declaration, resolved.declaration_id().get())
+        )
+    }
+
+    /// The store's copy of a name, downgraded to the way the overlay world left it: a resolved name
+    /// whose declaration a live edit removed is served unresolved instead.
+    #[cfg(feature = "redb-store")]
+    fn live_name(&self, name: NameRef) -> NameRef {
+        if let NameRef::Resolved(resolved) = &name
+            && self.is_tombstoned(TombstoneKind::Declaration, resolved.declaration_id().get())
+        {
+            return NameRef::Unresolved(Box::new(resolved.name().clone()));
+        }
+        name
     }
 
     /// Pulls name dependents from the store into the in-memory overlay. See [`materialize_declaration`].
@@ -803,10 +817,20 @@ impl Graph {
                     return;
                 }
                 let name_id = *reference.name_id();
+                let downgraded;
                 let name = match self.names.get(&name_id) {
                     Some(name_ref) => Some(name_ref),
                     None if self.is_tombstoned(TombstoneKind::Name, name_id.get()) => None,
-                    None => stored_name.as_ref(),
+                    None => match stored_name.as_ref() {
+                        // A name whose declaration a live edit removed is served unresolved, as the
+                        // materialize path does. Cloned only on that rare path: this is a
+                        // whole-table scan.
+                        Some(stored) if self.resolves_to_a_tombstone(stored) => {
+                            downgraded = self.live_name(stored.clone());
+                            Some(&downgraded)
+                        }
+                        other => other,
+                    },
                 };
                 visit(id, reference, name);
             })
@@ -1050,7 +1074,9 @@ impl Graph {
             && let Some(store) = &self.store
             && let Some(name) = read_store(store, &self.store_errors, |store| store.get_name(id))
         {
-            return Some(NodeRef::Stored(Box::new(name)));
+            // Same downgrade the materialize path applies: a read must not hand back a resolution
+            // to a declaration a live edit removed.
+            return Some(NodeRef::Stored(Box::new(self.live_name(name))));
         }
         None
     }
@@ -2907,6 +2933,44 @@ mod tests {
 
     fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
         definitions.into_iter().map(Definition::id).collect()
+    }
+
+    /// A read must not hand back a resolution to a declaration a live edit removed: the store's name
+    /// still points at it, and the FFI layers would show a reference to a dead declaration.
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn a_store_name_is_downgraded_when_its_declaration_was_deleted() {
+        use crate::model::store::RedbStore;
+        use crate::resolution::Resolver;
+
+        let mut base = GraphTest::new();
+        base.index_uri("file:///base.rb", "class Base\n  CONST = 1\nend\n");
+        base.index_uri("file:///user.rb", "class User\n  def go\n    Base::CONST\n  end\nend\n");
+        base.resolve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("index.redb");
+        let base_graph = base.into_graph();
+        RedbStore::build(&store_path, &base_graph).expect("build store");
+        drop(base_graph);
+
+        let mut graph = Graph::with_store(RedbStore::open(&store_path).expect("open store"));
+        graph.delete_document("file:///base.rb");
+        Resolver::new(&mut graph).resolve();
+
+        let mut checked = 0;
+        graph.for_each_store_constant_reference_with_name(|_id, reference, name| {
+            if name.is_none() {
+                return;
+            }
+            checked += 1;
+            assert!(
+                graph
+                    .name(*reference.name_id())
+                    .is_none_or(|name| matches!(&*name, NameRef::Unresolved(_))),
+                "a name whose declaration was deleted must read as unresolved"
+            );
+        });
+        assert!(checked > 0, "the surviving reference is still enumerated");
     }
 
     /// Resolution of a live edit searches the ancestors through the layered accessor: the superclass
