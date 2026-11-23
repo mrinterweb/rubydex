@@ -100,13 +100,13 @@ impl Builder {
             self.argv.clone()
         };
 
-        let Some((program, args)) = argv.split_first() else {
+        let Some((executable, arguments)) = argv.split_first() else {
             // A session that registered an empty builder can never index anything, and keeping the
             // batch would retry it on every pass forever.
             self.pending = 0;
             return None;
         };
-        let spawned = std::process::Command::new(program).args(args).spawn();
+        let spawned = std::process::Command::new(executable).args(arguments).spawn();
         let Ok(spawned) = spawned else {
             eprintln!("rubydex-index-manager: could not start the indexer: {argv:?}");
             // `pending` still holds the batch, so the retry is not lost — only spaced out.

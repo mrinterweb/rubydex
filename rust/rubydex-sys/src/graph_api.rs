@@ -211,7 +211,10 @@ pub unsafe extern "C" fn rdx_graph_declarations_search(
     let query_refs: Vec<&str> = queries.iter().map(String::as_str).collect();
 
     with_graph(pointer, |graph| {
-        declarations_iter_for(graph, query::declaration_search(graph, &query_refs, &query::MatchMode::Exact))
+        declarations_iter_for(
+            graph,
+            query::declaration_search(graph, &query_refs, &query::MatchMode::Exact),
+        )
     })
 }
 
@@ -237,7 +240,10 @@ pub unsafe extern "C" fn rdx_graph_declarations_fuzzy_search(
     let query_refs: Vec<&str> = queries.iter().map(String::as_str).collect();
 
     with_graph(pointer, |graph| {
-        declarations_iter_for(graph, query::declaration_search(graph, &query_refs, &query::MatchMode::Fuzzy))
+        declarations_iter_for(
+            graph,
+            query::declaration_search(graph, &query_refs, &query::MatchMode::Fuzzy),
+        )
     })
 }
 
