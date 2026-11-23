@@ -177,16 +177,23 @@ class DiskIndexCorruptStoreTest < Minitest::Test
   # migrate. Without it, every boot on that workspace would fall back to memory again.
   def test_a_sidecar_from_an_older_release_is_rewritten_by_a_background_rebuild
     graph, cache = write_store("foo.rb" => "class Foo; end\n")
-    File.write("#{cache}.hash", graph.send(:store_signature))
     File.binwrite("#{cache}.files", Marshal.dump({ "lockfile" => "no-lockfile", "files" => {} }))
+    # Nothing vouches for the store, so it has to be rebuilt rather than served.
+    FileUtils.rm_f("#{cache}.hash")
 
     graph.index_workspace
 
+    expected = graph.send(:store_signature)
     Timeout.timeout(120) do
-      sleep(0.05) until (manifest = File.read("#{cache}.files")).start_with?("{")
-      assert_equal(["files", "lockfile", "store", "workspace"], JSON.parse(manifest).keys.sort)
+      # Both sidecars are republished by the rebuild. Polling `store_fresh?` asks for the pair: the
+      # marker alone would also be satisfied by one the test had written itself.
+      sleep(0.05) until graph.send(:store_fresh?, cache)
+      assert_equal(expected, File.read("#{cache}.hash"), "the rebuild republished the marker")
+      assert_equal(
+        ["files", "lockfile", "store", "workspace"],
+        JSON.parse(File.read("#{cache}.files")).keys.sort,
+      )
     end
-    assert(File.exist?("#{cache}.hash"), "the rebuild republished the marker too")
   end
 
   # The quarantine destination is a path the workspace controls, so a committed symlink there must not

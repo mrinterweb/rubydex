@@ -52,6 +52,8 @@ class DiskIndexEnumeratorsTest < Minitest::Test
       disk.dead_code_candidates.map(&:name).sort,
       "dead code candidates",
     )
+  ensure
+    detach_if_store_backed(disk)
   end
 
   # `codebase_stats` needs lengths, not payloads: the enumerator size paths count store ids instead
