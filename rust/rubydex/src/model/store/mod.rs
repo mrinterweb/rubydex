@@ -802,7 +802,7 @@ impl RedbStore {
                             id,
                             source,
                         })?;
-                    let name = names_by_id.get(&*reference.name_id()).cloned();
+                    let name = names_by_id.get(reference.name_id()).cloned();
                     visit(ConstantReferenceId::new(id), reference, name);
                     Ok(())
                 },

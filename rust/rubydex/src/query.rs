@@ -994,16 +994,17 @@ pub fn follow_method_alias(graph: &Graph, alias_id: DefinitionId) -> Result<Decl
     }
 }
 
-/// Returns `true` when any definition of `declaration` was seeded by rubydex rather than read from indexed source.
-///
-/// Dead code candidates are reported at declaration granularity, so a seeded definition disqualifies the declaration
-/// even when user code also reopens it.
-fn is_built_in(graph: &Graph, declaration: &Declaration) -> bool {
-    declaration.definitions().iter().any(|definition_id| {
-        graph
-            .definition(*definition_id)
-            .is_some_and(|definition| definition.uri_id() == &*BUILT_IN_URI_ID)
-    })
+/// The definition ids the built-in document holds — the handful of core declarations rubydex seeds
+/// itself, rather than reading from indexed source. Dead code candidates are reported at declaration
+/// granularity, so a seeded definition disqualifies the declaration even when user code also reopens
+/// it. Collected once per scan so testing a declaration for "built in" does not open a read
+/// transaction and decode a definition per unreferenced constant.
+fn built_in_definition_ids(graph: &Graph) -> IdentityHashSet<DefinitionId> {
+    graph
+        .document(*BUILT_IN_URI_ID)
+        .map_or_else(IdentityHashSet::default, |document| {
+            document.definitions().iter().copied().collect()
+        })
 }
 
 /// Returns a list of declarations that may be unused in the codebase, which means
@@ -1018,17 +1019,18 @@ fn is_built_in(graph: &Graph, declaration: &Declaration) -> bool {
 pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
     let num_threads = thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let declarations = graph.declarations();
+    let built_in_definitions = built_in_definition_ids(graph);
 
     // A store-backed graph streams its declarations in one read transaction, so only the (small)
     // overlay is evaluated here; the in-memory graph keeps the parallel split of the whole set.
     if graph.is_store_backed() {
         let mut candidates: Vec<DeclarationId> = declarations
             .iter()
-            .filter(|(_, declaration)| is_dead_code_candidate(graph, declaration))
+            .filter(|(_, declaration)| is_dead_code_candidate(declaration, &built_in_definitions))
             .map(|(id, _)| *id)
             .collect();
         graph.for_each_store_declaration(|id, declaration| {
-            if is_dead_code_candidate(graph, &declaration) {
+            if is_dead_code_candidate(&declaration, &built_in_definitions) {
                 candidates.push(id);
             }
         });
@@ -1052,7 +1054,7 @@ pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
                         .filter(|id| {
                             declarations
                                 .get(id)
-                                .is_some_and(|declaration| is_dead_code_candidate(graph, declaration))
+                                .is_some_and(|declaration| is_dead_code_candidate(declaration, &built_in_definitions))
                         })
                         .copied()
                         .collect::<Vec<_>>()
@@ -1065,13 +1067,16 @@ pub fn dead_code_candidates(graph: &Graph) -> Vec<DeclarationId> {
 }
 
 /// A constant nothing refers to and no definitions own is dead code.
-fn is_dead_code_candidate(graph: &Graph, declaration: &Declaration) -> bool {
+fn is_dead_code_candidate(declaration: &Declaration, built_in_definitions: &IdentityHashSet<DefinitionId>) -> bool {
     declaration
         .constant_references()
         .is_some_and(<[ConstantReferenceId]>::is_empty)
         && !matches!(declaration, Declaration::Namespace(Namespace::SingletonClass(_)))
         && !declaration.has_no_definitions()
-        && !is_built_in(graph, declaration)
+        && !declaration
+            .definitions()
+            .iter()
+            .any(|id| built_in_definitions.contains(id))
 }
 
 #[cfg(test)]
