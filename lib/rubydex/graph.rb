@@ -16,6 +16,10 @@ module Rubydex
     # generation and points `index.redb.files` at it instead of replacing an open `.redb` file
     # in place, so Windows sessions can keep reading the old snapshot while a rebuild publishes.
     GENERATION_STORE_PATTERN = /\Aindex\.[0-9a-f]{16}\.redb\z/
+    # Grace window before deleting an unreferenced generation file that was not the manifest's
+    # previous store, so a concurrent builder between its store rename and manifest rename cannot
+    # have its newly published generation swept out from under it.
+    GENERATION_CLEANUP_GRACE_SECONDS = 60
     # A rebuild lock older than this is treated as abandoned (a builder that crashed) and
     # reclaimed, so a directory can never wedge itself out of rebuilding forever.
     REBUILD_LOCK_TIMEOUT = 30 * 60
@@ -99,14 +103,10 @@ module Rubydex
         begin
           attach_store_generation(store_file)
         rescue RuntimeError # no usable snapshot: wait for a new store instead of serving the old one
-          build_store_in_child(cache)
-          adopted = adopt_manifest(cache)
-          attach_store_generation(@manifest_store_path || cache)
+          adopted = build_and_attach_store(cache, failed_store: store_file)
         end
       else
-        build_store_in_child(cache)
-        adopted = adopt_manifest(cache)
-        attach_store_generation(@manifest_store_path || cache)
+        adopted = build_and_attach_store(cache)
       end
       return index_all(workspace_paths) if quarantine_if_untrustworthy(cache)
 
@@ -795,19 +795,53 @@ module Rubydex
       end
     end
 
+    # Claims the rebuild lock to build and publish a fresh store, or waits for the session that
+    # already holds it, then adopts the published manifest and attaches the resulting store.
+    #: (String, ?failed_store: String?) -> bool
+    def build_and_attach_store(cache, failed_store: nil)
+      lock = claim_rebuild(cache)
+      if lock
+        begin
+          if adopt_manifest(cache) && @manifest_store_path && @manifest_store_path != failed_store
+            begin
+              attach_store_generation(@manifest_store_path)
+              return true
+            rescue RuntimeError
+              nil
+            end
+          end
+          build_store_in_child(cache)
+        ensure
+          release_rebuild_lock(lock)
+        end
+      else
+        wait_for_rebuild(cache)
+      end
+
+      adopted = adopt_manifest(cache)
+      attach_store_generation(@manifest_store_path || cache)
+      adopted
+    end
+
     # Best-effort sweep of older generation files (and any legacy `index.redb`) after a new
     # generation is published. Files still held open by another Windows session fail with EACCES
     # and are skipped until that session moves on or the manager's prune pass reaps them.
-    #: (String, String) -> void
-    def cleanup_stale_generations(cache, keep_basename)
+    #: (String, String, ?String?) -> void
+    def cleanup_stale_generations(cache, keep_basename, previous_basename = nil)
       dir = File.dirname(cache)
       legacy = File.basename(cache)
+      cutoff = Time.now - GENERATION_CLEANUP_GRACE_SECONDS
       Dir.each_child(dir) do |entry|
         next if entry == keep_basename
         next unless entry == legacy || entry.match?(GENERATION_STORE_PATTERN)
 
+        path = File.join(dir, entry)
         begin
-          File.delete(File.join(dir, entry))
+          if entry != legacy && entry != previous_basename && File.mtime(path) > cutoff
+            next
+          end
+
+          File.delete(path)
         rescue SystemCallError
           nil
         end
@@ -864,12 +898,14 @@ module Rubydex
             "files" => scan,
           }),
         )
+        _, _, previous_store = read_manifest(manifest)
+        previous_basename = previous_store && File.basename(previous_store)
         File.write(marker_tmp, store_signature(scan, lockfile))
         rename_with_retry(tmp, gen_path)
         rename_with_retry(manifest_tmp, manifest)
         manifest_published = true
         rename_with_retry(marker_tmp, marker)
-        cleanup_stale_generations(cache, gen_name)
+        cleanup_stale_generations(cache, gen_name, previous_basename)
       ensure
         # A failed build (or a crash mid-publish) must not leave .building temps or an unreferenced
         # generation behind; after a successful publish all temps were renamed, so these are no-ops.

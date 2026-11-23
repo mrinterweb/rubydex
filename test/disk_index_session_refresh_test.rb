@@ -480,4 +480,94 @@ class DiskIndexSessionRefreshTest < Minitest::Test
       assert(refreshed, "a missing marker must refresh instead of trusting the attached store")
     end
   end
+
+  def test_cold_boot_and_corrupt_recovery_hold_the_rebuild_lock
+    with_workspace do |dir, _rb|
+      graph = Rubydex::Graph.configure_for_workspace(dir)
+      @sessions << graph
+      cache = graph.send(:store_cache_path)
+      lock = "#{cache}.rebuild"
+      lock_held_during_build = []
+      graph.define_singleton_method(:build_store_in_child) do |*args|
+        lock_held_during_build << Dir.exist?(lock)
+        super(*args)
+      end
+
+      graph.index_workspace
+      assert_equal([true], lock_held_during_build, "cold boot must hold the rebuild lock while building")
+      refute(Dir.exist?(lock), "cold boot must release the rebuild lock afterward")
+
+      # Simulate an unopenable active generation file on next boot.
+      active_store = graph.send(:active_store_path)
+      graph.detach_store
+      File.write(active_store, "not a redb store")
+
+      recovery = Rubydex::Graph.configure_for_workspace(dir)
+      @sessions << recovery
+      recovery_locks = []
+      recovery.define_singleton_method(:build_store_in_child) do |*args|
+        recovery_locks << Dir.exist?(lock)
+        super(*args)
+      end
+
+      recovery.index_workspace
+      assert_equal([true], recovery_locks, "corrupt recovery must hold the rebuild lock while rebuilding")
+      refute(Dir.exist?(lock), "corrupt recovery must release the rebuild lock afterward")
+      assert_includes(recovery["Foo"].members.map(&:name), "Foo#bar()")
+    end
+  end
+
+  def test_contended_cold_boot_waits_for_rebuild_lock_and_adopts_published_store
+    with_workspace do |dir, _rb|
+      builder = Rubydex::Graph.configure_for_workspace(dir)
+      @sessions << builder
+      cache = builder.send(:store_cache_path)
+      lock = builder.send(:claim_rebuild, cache)
+
+      waiter = Rubydex::Graph.configure_for_workspace(dir)
+      @sessions << waiter
+      builds = 0
+      waiter.define_singleton_method(:build_store_in_child) do |*|
+        builds += 1
+        raise "contended cold boot should adopt the holder's store instead of rebuilding"
+      end
+
+      rebuilder = Thread.new do
+        sleep(0.05)
+        builder.send(:build_store_in_child, cache)
+      ensure
+        builder.send(:release_rebuild_lock, lock)
+      end
+
+      waiter.index_workspace
+      rebuilder.join(30)
+
+      assert_equal(0, builds)
+      assert_includes(waiter["Foo"].members.map(&:name), "Foo#bar()")
+    end
+  end
+
+  def test_cleanup_stale_generations_respects_grace_window_for_unreferenced_generations
+    with_workspace do |dir, _rb|
+      graph = session(dir)
+      cache = graph.send(:store_cache_path)
+      store_dir = File.dirname(cache)
+      keep = File.basename(graph.send(:active_store_path))
+
+      recent_racing = File.join(store_dir, "index.1111111111111111.redb")
+      expired_orphan = File.join(store_dir, "index.2222222222222222.redb")
+      previous_gen = File.join(store_dir, "index.3333333333333333.redb")
+      File.write(recent_racing, "racing")
+      File.write(expired_orphan, "orphan")
+      File.write(previous_gen, "previous")
+      old_time = Time.now - (Rubydex::Graph::GENERATION_CLEANUP_GRACE_SECONDS + 10)
+      File.utime(old_time, old_time, expired_orphan)
+
+      graph.send(:cleanup_stale_generations, cache, keep, File.basename(previous_gen))
+
+      assert(File.exist?(recent_racing), "recent unreferenced generation must survive the grace window")
+      refute(File.exist?(expired_orphan), "expired unreferenced generation must be swept")
+      refute(File.exist?(previous_gen), "explicitly superseded generation must be swept immediately")
+    end
+  end
 end
