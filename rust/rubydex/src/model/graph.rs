@@ -2216,6 +2216,11 @@ impl Graph {
             Entry::Vacant(_) => None,
         };
 
+        // The graph's contents changed even before the resolver runs: the FFI layers key their
+        // derived caches (a method reference's cached name, an ancestor chain) on this epoch, and a
+        // resolve that finds nothing queued does not bump it.
+        self.bump_mutation_epoch();
+
         // Skip invalidation during boot indexing (no documents have been resolved yet)
         // or when the document is brand new (no old data to invalidate against). A store-backed
         // graph always has resolved data to invalidate — a new file can reopen a store-backed
@@ -2862,6 +2867,24 @@ mod tests {
 
     fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
         definitions.into_iter().map(Definition::id).collect()
+    }
+
+    /// The FFI layers cache derived data (a method reference's name, an ancestor chain) keyed on the
+    /// mutation epoch, and a resolve that finds nothing queued does not bump it, so the epoch has to
+    /// move when a document's contents are replaced.
+    #[test]
+    fn consuming_document_changes_bumps_the_mutation_epoch() {
+        let mut context = GraphTest::new();
+        context.index_uri("file:///foo.rb", "class Foo; end");
+        context.resolve();
+        let before = context.graph().mutation_epoch();
+
+        context.index_uri("file:///foo.rb", "class Foo\n  def bar; end\nend");
+
+        assert!(
+            context.graph().mutation_epoch() > before,
+            "a replaced document is a mutation"
+        );
     }
 
     /// A delete followed by a restore re-inserts the same node ids. The tombstones the delete left
