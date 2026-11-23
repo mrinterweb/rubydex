@@ -72,6 +72,41 @@ class DiskIndexSessionRefreshTest < Minitest::Test
     end
   end
 
+  # The manager spawns this indexer without the session's environment, so the store path it was told
+  # about is the only right answer: recomputing it from configuration looked at a different
+  # directory's store (or none) whenever the session used RUBYDEX_CACHE_DIR.
+  def test_a_refresh_uses_the_store_path_it_is_given
+    with_workspace do |dir, _rb|
+      cache_dir = File.join(dir, "elsewhere")
+      ENV["RUBYDEX_CACHE_DIR"] = cache_dir
+      begin
+        graph = session(dir)
+        store = graph.send(:store_cache_path)
+        assert(store.start_with?(cache_dir), "the session's store lives under RUBYDEX_CACHE_DIR")
+
+        # The indexer: same workspace, but it never saw RUBYDEX_CACHE_DIR, so the path is the only
+        # thing that tells it which store to look at.
+        ENV.delete("RUBYDEX_CACHE_DIR")
+        indexer = Rubydex::Graph.configure_for_workspace(dir)
+        @sessions << indexer
+
+        assert(indexer.refresh_if_stale(store), "the current store is attached, not waited on")
+        assert_equal(
+          graph.send(:active_store_path),
+          indexer.send(:active_store_path),
+          "the indexer must open the store it was given",
+        )
+        assert_equal("Foo", indexer["Foo"].name, "and answer from it")
+        refute(
+          File.exist?(File.join(dir, "tmp", "rubydex", "index.redb")),
+          "the recomputed path must not be touched",
+        )
+      ensure
+        ENV.delete("RUBYDEX_CACHE_DIR")
+      end
+    end
+  end
+
   # `prepare_for_tool_call` is the whole pre-tool sequence, and it resolves exactly once itself —
   # that is what lets the caller skip its own resolve, which used to walk and sort every document
   # URI in the store on top of the refresh.

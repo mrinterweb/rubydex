@@ -23,7 +23,9 @@ if flags.include?("--full")
     graph.send(:release_rebuild_lock, lock)
   end
 else
-  graph.refresh_if_stale
+  # `store` is the path the manager registered, which need not be the one this process would compute:
+  # the manager does not carry the session's `RUBYDEX_CACHE_DIR`.
+  graph.refresh_if_stale(store)
   # Bounded: the lock directory is removed by the detached builder's `ensure`, so a builder killed
   # before it could run one would otherwise spin this indexer — and the manager waits on this indexer.
   exit(1) unless graph.send(:wait_for_rebuild, store)

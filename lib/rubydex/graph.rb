@@ -164,9 +164,13 @@ module Rubydex
     # Leaves the graph resolved: a surgical apply resolves, a re-attached store is already resolved,
     # and a rebuilt store was built from a resolved graph. Callers must not resolve again.
     #
-    # -> bool
-    def refresh_if_stale
-      cache = store_cache_path
+    # `store` overrides the store path computed from this process's configuration. The background
+    # manager's indexer is spawned without the session's environment (`RUBYDEX_CACHE_DIR`, say), so
+    # recomputing the path there would refresh a different store than the one it was asked about.
+    #
+    #: (?String store) -> bool
+    def refresh_if_stale(store = store_cache_path)
+      cache = store
       head = workspace_head
       # A moved HEAD means the tree changed in bulk, which is exactly what the walk measures, so the
       # memo is dropped rather than reused stale: stale stamps would be published as what the rebuild
